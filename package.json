@@ -1,0 +1,22 @@
+{
+  "name": "claude-auto-retry",
+  "version": "0.1.0",
+  "description": "Automatically retry Claude Code sessions when hitting Anthropic subscription rate limits",
+  "type": "module",
+  "bin": {
+    "claude-auto-retry": "./bin/cli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["claude", "claude-code", "rate-limit", "retry", "tmux", "anthropic"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cheapestinference/claude-auto-retry"
+  },
+  "files": ["bin/", "src/", "LICENSE", "README.md"]
+}
