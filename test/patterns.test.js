@@ -57,8 +57,8 @@ describe('isRateLimited', () => {
   it('detects "hit the limit resets"', () => {
     assert.equal(isRateLimited('You hit the limit. Resets at 5pm'), true);
   });
-  it('detects "limit resets in: 3 hours"', () => {
-    assert.equal(isRateLimited('limit resets in: 3 hours'), true);
+  it('detects "usage limit · resets in: 3 hours"', () => {
+    assert.equal(isRateLimited('usage limit · resets in: 3 hours'), true);
   });
 });
 
@@ -78,5 +78,53 @@ describe('findRateLimitMessage', () => {
   });
   it('returns null when no match', () => {
     assert.equal(findRateLimitMessage('normal output\nmore output'), null);
+  });
+  it('returns the resets line from multi-line TUI render', () => {
+    const text = '⚠ You\'ve hit your limit\n· resets 3pm (UTC)';
+    assert.equal(findRateLimitMessage(text), '· resets 3pm (UTC)');
+  });
+  it('returns Resets line when limit and resets on different lines', () => {
+    const text = '5-hour limit reached\nResets at 3pm (UTC)';
+    assert.ok(findRateLimitMessage(text).includes('3pm'));
+  });
+});
+
+describe('isRateLimited (multi-line TUI renders)', () => {
+  it('detects limit + resets on separate lines', () => {
+    assert.ok(isRateLimited('⚠ You\'ve hit your limit\n· resets 3pm (UTC)'));
+  });
+  it('detects box-drawing TUI format', () => {
+    const text = '╭──────────╮\n│ ⚠ You\'ve hit your limit │\n│ · resets 3pm │\n╰──────────╯';
+    assert.ok(isRateLimited(text));
+  });
+  it('detects 5-hour limit + Resets on separate lines', () => {
+    assert.ok(isRateLimited('⚠ 5-hour limit reached\nResets at 3pm (UTC)'));
+  });
+  it('detects middle-dot separated multi-line', () => {
+    assert.ok(isRateLimited('⚠ You\'ve hit your 5-hour limit\n· resets 3pm (Asia/Tbilisi)'));
+  });
+  it('rejects limit + resets too far apart (>6 lines)', () => {
+    assert.equal(isRateLimited('hit your limit\n1\n2\n3\n4\n5\n6\n7\nresets 3pm'), false);
+  });
+  it('rejects normal output with no rate limit keywords', () => {
+    assert.equal(isRateLimited('Working on your request\nHere is the code\nDone'), false);
+  });
+});
+
+describe('stripAnsi (OSC sequences)', () => {
+  it('strips OSC hyperlinks (\\x1b]8;;url\\x1b\\\\)', () => {
+    const input = '\x1b]8;;https://example.com\x1b\\click here\x1b]8;;\x1b\\';
+    assert.equal(stripAnsi(input), 'click here');
+  });
+  it('strips OSC window title (\\x1b]0;title\\x07)', () => {
+    assert.equal(stripAnsi('\x1b]0;My Terminal\x07hello'), 'hello');
+  });
+  it('strips OSC + CSI mixed sequences', () => {
+    const input = '\x1b]8;;url\x1b\\\x1b[33m5-hour limit reached - resets 3pm\x1b[0m\x1b]8;;\x1b\\';
+    assert.equal(stripAnsi(input), '5-hour limit reached - resets 3pm');
+  });
+  it('rate limit detection works through OSC hyperlinks', () => {
+    const input = '\x1b]8;;link\x1b\\5-hour limit reached\x1b]8;;\x1b\\ - resets 3pm';
+    assert.ok(isRateLimited(input));
   });
 });

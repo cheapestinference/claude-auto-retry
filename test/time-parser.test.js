@@ -31,6 +31,21 @@ describe('parseResetTime', () => {
   it('returns null for unparseable text', () => {
     assert.equal(parseResetTime('some random text'), null);
   });
+  it('parses "try again in 5 minutes" as relative time', () => {
+    const r = parseResetTime('try again in 5 minutes');
+    assert.ok(r.relative);
+    assert.equal(r.waitMs, 5 * 60_000);
+  });
+  it('parses "try again in 2 hours" as relative time', () => {
+    const r = parseResetTime('try again in 2 hours');
+    assert.ok(r.relative);
+    assert.equal(r.waitMs, 2 * 3_600_000);
+  });
+  it('parses "wait 30 mins" as relative time', () => {
+    const r = parseResetTime('wait 30 mins');
+    assert.ok(r.relative);
+    assert.equal(r.waitMs, 30 * 60_000);
+  });
 });
 
 describe('calculateWaitMs', () => {
@@ -58,5 +73,13 @@ describe('calculateWaitMs', () => {
       { hour: 3, minute: 0, timezone: 'UTC', ambiguous: true }, 0, 5, now
     );
     assert.ok(wait > 0 && wait <= 3 * 3600_000);
+  });
+  it('handles relative time correctly', () => {
+    const wait = calculateWaitMs({ relative: true, waitMs: 300_000 }, 60, 5);
+    assert.ok(Math.abs(wait - 360_000) < 2000); // 5 min + 60s margin
+  });
+  it('falls back on invalid timezone', () => {
+    const wait = calculateWaitMs({ hour: 15, minute: 0, timezone: 'Invalid/Zone' }, 60, 5);
+    assert.ok(Math.abs(wait - (5 * 3600 + 60) * 1000) < 2000); // fallback
   });
 });

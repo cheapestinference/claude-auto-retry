@@ -1,27 +1,52 @@
 const RESET_TIME_REGEX = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?/i;
+const RELATIVE_TIME_REGEX = /(?:try again|wait)\s+(?:for\s+)?(?:in\s+)?(\d+)\s*(hours?|minutes?|mins?|h|m)\b/i;
 
 export function parseResetTime(text) {
-  const match = text.match(RESET_TIME_REGEX);
-  if (!match) return null;
+  // Try absolute time first: "resets at 3pm (UTC)"
+  const absMatch = text.match(RESET_TIME_REGEX);
+  if (absMatch) {
+    let hour = parseInt(absMatch[1], 10);
+    const minute = absMatch[2] ? parseInt(absMatch[2], 10) : 0;
+    const ampm = absMatch[3]?.toLowerCase() || null;
+    const timezone = absMatch[4] || null;
 
-  let hour = parseInt(match[1], 10);
-  const minute = match[2] ? parseInt(match[2], 10) : 0;
-  const ampm = match[3]?.toLowerCase() || null;
-  const timezone = match[4] || null;
+    if (ampm === 'pm' && hour !== 12) hour += 12;
+    if (ampm === 'am' && hour === 12) hour = 0;
 
-  if (ampm === 'pm' && hour !== 12) hour += 12;
-  if (ampm === 'am' && hour === 12) hour = 0;
+    const ambiguous = !ampm && hour >= 1 && hour <= 12;
+    return { hour, minute, timezone, ambiguous };
+  }
 
-  // Ambiguous only when no am/pm AND hour is 1-12 (not 0, which is unambiguous 24h midnight)
-  const ambiguous = !ampm && hour >= 1 && hour <= 12;
+  // Try relative time: "try again in 5 minutes" / "wait 2 hours"
+  const relMatch = text.match(RELATIVE_TIME_REGEX);
+  if (relMatch) {
+    const amount = parseInt(relMatch[1], 10);
+    const unit = relMatch[2].toLowerCase();
+    const isMinutes = unit.startsWith('m');
+    const ms = amount * (isMinutes ? 60_000 : 3_600_000);
+    return { relative: true, waitMs: ms };
+  }
 
-  return { hour, minute, timezone, ambiguous };
+  return null;
 }
 
 export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, now = new Date()) {
   if (!parsed) return (fallbackHours * 3600 + marginSeconds) * 1000;
 
-  const tz = parsed.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // Handle relative times: "try again in 5 minutes"
+  if (parsed.relative) {
+    return parsed.waitMs + marginSeconds * 1000;
+  }
+
+  let tz;
+  try {
+    tz = parsed.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+    // Validate timezone early to avoid cryptic errors later
+    Intl.DateTimeFormat('en-US', { timeZone: tz });
+  } catch {
+    // Invalid timezone (possibly garbled by TUI capture) — use fallback
+    return (fallbackHours * 3600 + marginSeconds) * 1000;
+  }
 
   // DST-safe approach: binary search for the correct UTC timestamp
   // that corresponds to the given hour:minute in the target timezone.

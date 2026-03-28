@@ -13,21 +13,25 @@ export function createMonitorState() {
 export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) {
   if (!isAlive()) return 'exit';
 
-  const raw = await tmuxAdapter.capturePane(pane);
+  const raw = await tmuxAdapter.capturePane(pane, 20);
   const stripped = stripAnsi(raw);
 
   if (state.status === 'waiting') {
     if (Date.now() < state.waitUntil) return 'waiting';
     if (!isAlive()) return 'exit';
-    if (state.attempts >= config.maxRetries) {
-      state.status = 'monitoring';
-      return 'max-retries';
-    }
 
-    // Use same window size for detection and recovery check to avoid asymmetry
+    // Always check if rate limit cleared FIRST — even when maxRetries
+    // exhausted, the user (or time passing) may have resolved it.
     if (!isRateLimited(stripped, config.customPatterns)) {
       state.status = 'monitoring'; state.attempts = 0;
       return 'user-continued';
+    }
+
+    if (state.attempts >= config.maxRetries) {
+      // Stay in 'waiting' to avoid re-detecting the stale rate limit
+      // on the next tick and creating an infinite max-retries loop.
+      state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      return 'max-retries';
     }
 
     const fg = await tmuxAdapter.getPaneCommand(pane);
@@ -39,7 +43,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) 
 
     await tmuxAdapter.sendKeys(pane, config.retryMessage);
     state.attempts++;
-    state.status = 'monitoring';
+    // Stay in 'waiting' with a 30s cooldown instead of going to 'monitoring'.
+    // This gives Claude time to process the retry and produce enough output
+    // to push the stale rate-limit message out of the recent-lines window.
+    // Without this, the next tick re-detects the old message and waits 24h.
+    state.waitUntil = Date.now() + 30_000;
     return 'retried';
   }
 
@@ -59,6 +67,8 @@ export async function startMonitor(pane, pid) {
   const config = await loadConfig();
   const logger = createLogger();
   const state = createMonitorState();
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 10;
 
   await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
 
@@ -68,6 +78,7 @@ export async function startMonitor(pane, pid) {
   const loop = async () => {
     try {
       const result = await processOneTick(state, tmuxAdapter, pane, config, isAlive);
+      consecutiveErrors = 0;
 
       if (result === 'exit') { await logger.info('Claude exited. Monitor shutting down.'); process.exit(0); }
       if (result === 'waiting' && state.lastRateLimitMessage) {
@@ -80,12 +91,24 @@ export async function startMonitor(pane, pid) {
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn('Foreground is not Claude. Skipping send-keys.');
     } catch (err) {
+      consecutiveErrors++;
       await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});
+      if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+        await logger.error(`${MAX_CONSECUTIVE_ERRORS} consecutive errors. Pane likely destroyed. Exiting.`).catch(() => {});
+        process.exit(1);
+      }
     }
   };
 
-  setInterval(loop, config.pollIntervalSeconds * 1000);
-  loop();
+  // Use recursive setTimeout instead of setInterval to prevent concurrent
+  // tick execution when a tick takes longer than the poll interval.
+  const scheduleNext = () => {
+    setTimeout(async () => {
+      await loop();
+      scheduleNext();
+    }, config.pollIntervalSeconds * 1000);
+  };
+  loop().then(scheduleNext);
 }
 
 // Direct execution: node monitor.js <pane> <pid>

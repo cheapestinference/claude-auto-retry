@@ -39,6 +39,15 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
     assert.equal(t._sent.length, 1);
     assert.equal(s.attempts, 1);
+    // Should stay in 'waiting' with a cooldown to let Claude process
+    assert.equal(s.status, 'waiting');
+    assert.ok(s.waitUntil > Date.now());
+  });
+  it('detects multi-line TUI rate limit', async () => {
+    const t = mockTmux('⚠ You\'ve hit your limit\n· resets 3pm (UTC)');
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.ok(s.waitUntil > Date.now());
   });
   it('skips when foreground is not claude', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'vim');
@@ -54,10 +63,21 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(s.attempts, 0);
   });
-  it('stops retrying after max attempts', async () => {
+  it('stops retrying after max attempts and stays in waiting', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)');
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 5;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'max-retries');
+    // Should stay in 'waiting' to avoid re-detection loop
+    assert.equal(s.status, 'waiting');
+    assert.ok(s.waitUntil > Date.now());
+  });
+  it('resets from max-retries when rate limit clears', async () => {
+    const t = mockTmux('Claude is working normally');
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 10;
+    // Rate limit cleared → should detect user-continued before max-retries check
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s.attempts, 0);
   });
 });
