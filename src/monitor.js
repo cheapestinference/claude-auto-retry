@@ -4,7 +4,7 @@ import { capturePane, sendKeys, getPaneCommand } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 
-const CLAUDE_COMMANDS = ['node', 'claude'];
+const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
 
 export function createMonitorState() {
   return { status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null };
@@ -35,9 +35,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) 
     }
 
     const fg = await tmuxAdapter.getPaneCommand(pane);
-    if (!CLAUDE_COMMANDS.some(c => fg.toLowerCase().includes(c))) {
+    const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
+    if (!fgCommands.some(c => fg.toLowerCase().includes(c))) {
       // Push waitUntil forward to avoid tight-loop polling every tick
       state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      state._lastForeground = fg;
       return 'skipped-not-claude';
     }
 
@@ -89,7 +91,7 @@ export async function startMonitor(pane, pid) {
       if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
-      if (result === 'skipped-not-claude') await logger.warn('Foreground is not Claude. Skipping send-keys.');
+      if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
     } catch (err) {
       consecutiveErrors++;
       await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});

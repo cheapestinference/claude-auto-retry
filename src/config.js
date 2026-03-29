@@ -28,6 +28,11 @@ function validate(cfg) {
   if (!Array.isArray(cfg.customPatterns)) {
     cfg.customPatterns = DEFAULT_CONFIG.customPatterns;
   }
+  if (cfg.foregroundCommands !== undefined) {
+    if (!Array.isArray(cfg.foregroundCommands) || cfg.foregroundCommands.length === 0) {
+      delete cfg.foregroundCommands;
+    }
+  }
   return cfg;
 }
 

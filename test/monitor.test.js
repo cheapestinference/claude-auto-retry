@@ -55,6 +55,21 @@ describe('processOneTick', () => {
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
     assert.equal(t._sent.length, 0);
+    assert.equal(s._lastForeground, 'vim');
+  });
+  it('accepts custom foregroundCommands from config', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'my-claude-wrapper');
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting';
+    const config = { ...DEFAULT_CONFIG, foregroundCommands: ['my-claude-wrapper'] };
+    assert.equal(await processOneTick(s, t, '%0', config, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+  });
+  it('matches npx as default foreground command', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'npx');
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting';
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
   });
   it('resets counter when rate limit disappears', async () => {
     const t = mockTmux('Claude is working normally');
