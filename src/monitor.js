@@ -1,6 +1,6 @@
 import { stripAnsi, isRateLimited, findRateLimitMessage } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
-import { capturePane, sendKeys, getPaneCommand } from './tmux.js';
+import { capturePane, sendKeys, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 
@@ -34,22 +34,27 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) 
       return 'max-retries';
     }
 
-    const fg = await tmuxAdapter.getPaneCommand(pane);
-    const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
-    if (!fgCommands.some(c => fg.toLowerCase().includes(c))) {
-      // Push waitUntil forward to avoid tight-loop polling every tick
-      state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
-      state._lastForeground = fg;
-      return 'skipped-not-claude';
+    // Primary check: is the Claude process in the foreground process group?
+    // On macOS, pane_current_command reports "zsh" instead of the child process,
+    // so we use `ps -o stat=` to check the '+' (foreground) flag directly.
+    // `true` short-circuits past pane_current_command (fixes macOS).
+    // `false`/`null` falls back to pane_current_command for safety.
+    const isFg = await tmuxAdapter.isClaudeForeground();
+    if (isFg !== true) {
+      const fg = await tmuxAdapter.getPaneCommand(pane);
+      const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
+      if (!fgCommands.some(c => fg.toLowerCase().includes(c))) {
+        state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        state._lastForeground = fg;
+        return 'skipped-not-claude';
+      }
     }
 
-    await tmuxAdapter.sendKeys(pane, config.retryMessage);
+    // Increment attempts and set cooldown BEFORE sendKeys so that a failure
+    // (e.g. pane destroyed) still consumes a retry and avoids tight-loop errors.
     state.attempts++;
-    // Stay in 'waiting' with a 30s cooldown instead of going to 'monitoring'.
-    // This gives Claude time to process the retry and produce enough output
-    // to push the stale rate-limit message out of the recent-lines window.
-    // Without this, the next tick re-detects the old message and waits 24h.
     state.waitUntil = Date.now() + 30_000;
+    await tmuxAdapter.sendKeys(pane, config.retryMessage);
     return 'retried';
   }
 
@@ -74,7 +79,7 @@ export async function startMonitor(pane, pid) {
 
   await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
 
-  const tmuxAdapter = { capturePane, sendKeys, getPaneCommand };
+  const tmuxAdapter = { capturePane, sendKeys, getPaneCommand, isClaudeForeground: () => isProcessForeground(pid) };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
   const loop = async () => {

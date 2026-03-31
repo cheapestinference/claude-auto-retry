@@ -53,6 +53,17 @@ describe('loadConfig', () => {
       assert.equal(config.pollIntervalSeconds, 5);
     } finally { await unlink(f); }
   });
+  it('filters invalid customPatterns entries', async () => {
+    const { writeFile, unlink } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const f = join(tmpdir(), `car-test-${Date.now()}.json`);
+    await writeFile(f, JSON.stringify({ customPatterns: ["valid", 42, null, "[invalid"] }));
+    try {
+      const config = await loadConfig(f);
+      assert.deepEqual(config.customPatterns, ["valid"]);
+    } finally { await unlink(f); }
+  });
   it('rejects negative numbers and falls back to defaults', async () => {
     const { writeFile, unlink } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');

@@ -40,5 +40,14 @@ export async function getPaneCommand(pane) {
   return stdout.trim();
 }
 
+export async function isProcessForeground(pid) {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'stat=', '-p', String(pid)]);
+    return stdout.trim().includes('+');
+  } catch {
+    return null;
+  }
+}
+
 export function isInsideTmux() { return !!process.env.TMUX; }
 export function getCurrentPane() { return process.env.TMUX_PANE || null; }

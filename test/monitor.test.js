@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { createMonitorState, processOneTick } from '../src/monitor.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
 
-function mockTmux(paneContent = '', paneCommand = 'node') {
+function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = true) {
   const t = {
     _sent: [],
     capturePane: async () => paneContent,
     getPaneCommand: async () => paneCommand,
     sendKeys: async (_p, text) => { t._sent.push(text); },
+    isClaudeForeground: async () => claudeForeground,
   };
   return t;
 }
@@ -49,24 +50,39 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
     assert.ok(s.waitUntil > Date.now());
   });
-  it('skips when foreground is not claude', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'vim');
+  it('retries when Claude process is in foreground (fixes macOS zsh issue)', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'zsh', true);
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting';
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+  });
+  it('falls back to pane_current_command when process state is false', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'vim', false);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
     assert.equal(t._sent.length, 0);
     assert.equal(s._lastForeground, 'vim');
   });
-  it('accepts custom foregroundCommands from config', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'my-claude-wrapper');
+  it('falls back to pane_current_command when process state is null', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'vim', null);
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting';
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
+    assert.equal(t._sent.length, 0);
+    assert.equal(s._lastForeground, 'vim');
+  });
+  it('accepts custom foregroundCommands in fallback path', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'my-claude-wrapper', null);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     const config = { ...DEFAULT_CONFIG, foregroundCommands: ['my-claude-wrapper'] };
     assert.equal(await processOneTick(s, t, '%0', config, () => true), 'retried');
     assert.equal(t._sent.length, 1);
   });
-  it('matches npx as default foreground command', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'npx');
+  it('matches npx in fallback path', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'npx', null);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');

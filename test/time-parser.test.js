@@ -46,6 +46,16 @@ describe('parseResetTime', () => {
     assert.ok(r.relative);
     assert.equal(r.waitMs, 30 * 60_000);
   });
+  it('parses "resets in: 3 hours" as relative time', () => {
+    const r = parseResetTime('usage limit · resets in: 3 hours');
+    assert.ok(r.relative);
+    assert.equal(r.waitMs, 3 * 3_600_000);
+  });
+  it('parses "resets in 2 hours" as relative time', () => {
+    const r = parseResetTime('resets in 2 hours');
+    assert.ok(r.relative);
+    assert.equal(r.waitMs, 2 * 3_600_000);
+  });
 });
 
 describe('calculateWaitMs', () => {

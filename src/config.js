@@ -27,6 +27,11 @@ function validate(cfg) {
   }
   if (!Array.isArray(cfg.customPatterns)) {
     cfg.customPatterns = DEFAULT_CONFIG.customPatterns;
+  } else {
+    cfg.customPatterns = cfg.customPatterns.filter(p => {
+      if (typeof p !== 'string') return false;
+      try { new RegExp(p); return true; } catch { return false; }
+    });
   }
   if (cfg.foregroundCommands !== undefined) {
     if (!Array.isArray(cfg.foregroundCommands) || cfg.foregroundCommands.length === 0) {

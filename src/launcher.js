@@ -113,7 +113,7 @@ async function launchPrintMode(args) {
 
     // Rate limited — discard buffer, wait and retry
     retries++;
-    if (retries >= config.maxRetries) {
+    if (retries > config.maxRetries) {
       process.stderr.write(`[claude-auto-retry] Max retries (${config.maxRetries}) reached.\n`);
       return 1;
     }
