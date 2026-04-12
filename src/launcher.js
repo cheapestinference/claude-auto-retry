@@ -147,7 +147,7 @@ async function createTmuxSession(args) {
       if (v == null) continue;
       envArgs.push('-e', `${k}=${v}`);
     }
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, ...envArgs, innerCmd];
+    newSessionArgs = ['new-session', '-d', '-s', sessionName, '-e', `CLAUDE_AUTO_RETRY_ACTIVE=1`, ...envArgs, innerCmd];
   } else {
     // For tmux < 3.0: export critical env vars inline in the command
     const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
