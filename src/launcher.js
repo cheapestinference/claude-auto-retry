@@ -1,4 +1,4 @@
-import { spawn, fork } from 'node:child_process';
+import { spawn, fork, execSync } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -36,7 +36,6 @@ async function launchInteractive(args) {
     env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
   });
 
-  // Check spawn succeeded before using PID
   if (claude.pid == null) {
     claude.on('error', (err) => {
       process.stderr.write(`[claude-auto-retry] Failed to start claude: ${err.message}\n`);
@@ -47,12 +46,10 @@ async function launchInteractive(args) {
     });
   }
 
-  // Forward SIGWINCH for terminal resize
   process.on('SIGWINCH', () => {
     try { claude.kill('SIGWINCH'); } catch {}
   });
 
-  // Start monitor as detached background process
   if (pane) {
     const monitor = fork(MONITOR_PATH, [pane, String(claude.pid)], {
       detached: true,
@@ -61,11 +58,8 @@ async function launchInteractive(args) {
     monitor.unref();
   }
 
-  // Forward signals to Claude
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(sig, () => {
-      try { claude.kill(sig); } catch {}
-    });
+    process.on(sig, () => { try { claude.kill(sig); } catch {} });
   }
 
   return new Promise((resolve) => {
@@ -105,13 +99,11 @@ async function launchPrintMode(args) {
     const combined = result.stdout + result.stderr;
 
     if (!isRateLimited(combined, config.customPatterns)) {
-      // Clean exit — write buffered output
       process.stdout.write(result.stdout);
       process.stderr.write(result.stderr);
       return result.code;
     }
 
-    // Rate limited — discard buffer, wait and retry
     retries++;
     if (retries > config.maxRetries) {
       process.stderr.write(`[claude-auto-retry] Max retries (${config.maxRetries}) reached.\n`);
@@ -130,13 +122,10 @@ async function createTmuxSession(args) {
   const sessionName = `claude-retry-${process.pid}-${Date.now()}`;
   const launcherPath = __filename;
 
-  // Build the command to run inside tmux
   const escapedLauncher = shellEscape(launcherPath);
   const escapedArgs = args.map(a => shellEscape(a)).join(' ');
-  const innerCmd = `CLAUDE_AUTO_RETRY_ACTIVE=1 node ${escapedLauncher} ${escapedArgs}; exec bash`;
+  const innerCmd = `CLAUDE_AUTO_RETRY_ACTIVE=1 node ${escapedLauncher} ${escapedArgs}`;
 
-  // Build env propagation args
-  // tmux -e flag requires tmux >= 3.0; for older versions, prefix env exports in the command
   const tmuxVer = getTmuxVersion();
   let newSessionArgs;
 
@@ -147,9 +136,8 @@ async function createTmuxSession(args) {
       if (v == null) continue;
       envArgs.push('-e', `${k}=${v}`);
     }
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, ...envArgs, innerCmd];
+    newSessionArgs = ['new-session', '-d', '-s', sessionName, '-e', `CLAUDE_AUTO_RETRY_ACTIVE=1`, ...envArgs, innerCmd];
   } else {
-    // For tmux < 3.0: export critical env vars inline in the command
     const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
       'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
       'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH'];
@@ -162,24 +150,30 @@ async function createTmuxSession(args) {
   }
 
   try {
+    try { execFileSync('tmux', ['set', '-g', 'mouse', 'off']); } catch {}
+    try { execFileSync('tmux', ['set', '-g', 'set-clipboard', 'off']); } catch {}
+    try { execFileSync('tmux', ['set', '-g', 'default-terminal', 'xterm-256color']); } catch {}
+
     execFileSync('tmux', newSessionArgs);
 
-    // Attach to the session
-    const attachResult = spawn('tmux', ['attach-session', '-t', sessionName], {
-      stdio: 'inherit',
-    });
-
-    return new Promise((resolve) => {
-      attachResult.on('exit', (code) => resolve(code ?? 0));
-      attachResult.on('error', () => resolve(1));
-    });
+    // The inner launcher (inside tmux) handles spawning Claude and forking the
+    // monitor. We poll until the tmux session exits.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      try {
+        execFileSync('tmux', ['has-session', '-t', sessionName]);
+      } catch {
+        break;
+      }
+      execSync('sleep 0.5', { encoding: 'utf-8' });
+    }
+    return 0;
   } catch (err) {
     process.stderr.write(`[claude-auto-retry] Failed to create tmux session: ${err.message}\n`);
     return 1;
   }
 }
 
-// Main
 const args = process.argv.slice(2);
 
 let exitCode;
