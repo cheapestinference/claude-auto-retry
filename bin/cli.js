@@ -139,9 +139,13 @@ async function cmdInstall() {
   const rcFiles = [];
   const bashrc = join(homedir(), '.bashrc');
   const zshrc = join(homedir(), '.zshrc');
+  const zshenv = join(homedir(), '.zshenv');
 
   if (existsSync(bashrc) || shell.includes('bash')) rcFiles.push(bashrc);
   if (existsSync(zshrc) || shell.includes('zsh')) rcFiles.push(zshrc);
+  // macOS Terminal uses login shells (only source ~/.zprofile, not ~/.zshrc).
+  // zsh loads ~/.zshenv for ALL shell types — inject here too for guaranteed loading.
+  if (existsSync(zshenv) || shell.includes('zsh')) rcFiles.push(zshenv);
   if (rcFiles.length === 0) rcFiles.push(bashrc);
 
   for (const rc of rcFiles) {
@@ -158,7 +162,8 @@ async function cmdInstall() {
 async function cmdUninstall() {
   const bashrc = join(homedir(), '.bashrc');
   const zshrc = join(homedir(), '.zshrc');
-  for (const rc of [bashrc, zshrc]) { await removeWrapper(rc); }
+  const zshenv = join(homedir(), '.zshenv');
+  for (const rc of [bashrc, zshrc, zshenv]) { await removeWrapper(rc); }
   console.log('Shell function removed. Restart your shell to complete.');
 }
 

@@ -155,7 +155,7 @@ claude-auto-retry version     # Print version
 | Shell | Status |
 |-------|--------|
 | bash | Full (auto-install to `~/.bashrc`) |
-| zsh | Full (auto-install to `~/.zshrc`) |
+| zsh | Full (auto-install to `~/.zshrc` + `~/.zshenv`) |
 | fish | Manual setup (instructions printed on `install`) |
 
 ## `--print` Mode
@@ -197,6 +197,8 @@ This removes the shell function from your rc files. tmux is left installed.
 1. **Retry message context** — The retry message is sent as plain text. If Claude was mid-confirmation or in a special input state, it may not interpret it as a continuation. You can customize the message via config.
 
 2. **Node version lock** — The launcher path is resolved at install time. If you switch Node versions with nvm, re-run `claude-auto-retry install`.
+
+3. **macOS Terminal login shells** — macOS Terminal opens login shells, which source `~/.zprofile` but NOT `~/.zshrc`. The wrapper is installed to both, but if `type claude` shows a binary path instead of a function in a fresh terminal, create `~/.zshenv` manually: `claude-auto-retry install` handles this automatically.
 
 3. **tmux required** — The tool needs tmux to monitor terminal output and inject keystrokes. It auto-installs if missing, but requires sudo for system package managers.
 
