@@ -6,9 +6,11 @@ import { DEFAULT_CONFIG } from '../src/config.js';
 function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = true) {
   const t = {
     _sent: [],
+    _sentKeySequences: [],
     capturePane: async () => paneContent,
     getPaneCommand: async () => paneCommand,
     sendKeys: async (_p, text) => { t._sent.push(text); },
+    sendKeySequence: async (_p, keys) => { t._sentKeySequences.push(keys); },
     isClaudeForeground: async () => claudeForeground,
   };
   return t;
@@ -48,6 +50,19 @@ describe('processOneTick', () => {
     const t = mockTmux('⚠ You\'ve hit your limit\n· resets 3pm (UTC)');
     const s = createMonitorState();
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.ok(s.waitUntil > Date.now());
+  });
+  it('selects "Wait for limit to reset" when Claude shows the spend-limit menu', async () => {
+    const t = mockTmux([
+      'What do you want to do?',
+      '❯ Adjust monthly spend limit: Unlimited',
+      '  Wait for limit to reset',
+      '  Resets 11:20pm (America/New_York)',
+    ].join('\n'));
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'selected-wait-for-reset');
+    assert.deepEqual(t._sentKeySequences, [['Down', 'Enter']]);
+    assert.equal(s.status, 'waiting');
     assert.ok(s.waitUntil > Date.now());
   });
   it('retries when Claude process is in foreground (fixes macOS zsh issue)', async () => {
@@ -93,6 +108,20 @@ describe('processOneTick', () => {
     s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 2;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(s.attempts, 0);
+  });
+  it('can select the spend-limit menu while already waiting', async () => {
+    const t = mockTmux([
+      'What do you want to do?',
+      '❯ Adjust monthly spend limit: Unlimited',
+      '  Wait for limit to reset',
+      '  Resets 11:20pm (America/New_York)',
+    ].join('\n'));
+    const s = createMonitorState();
+    s.status = 'waiting';
+    s.waitUntil = Date.now() + 60_000;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'selected-wait-for-reset');
+    assert.deepEqual(t._sentKeySequences, [['Down', 'Enter']]);
+    assert.equal(t._sent.length, 0);
   });
   it('stops retrying after max attempts and stays in waiting', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)');

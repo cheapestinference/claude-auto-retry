@@ -40,6 +40,15 @@ export async function sendKeys(pane, text) {
   await execFileAsync('tmux', ['send-keys', '-t', pane, 'Enter']);
 }
 
+export async function sendKeySequence(pane, keys, delayMs = 250) {
+  for (let i = 0; i < keys.length; i++) {
+    await execFileAsync('tmux', ['send-keys', '-t', pane, keys[i]]);
+    if (i < keys.length - 1) {
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+}
+
 export async function getPaneCommand(pane) {
   const { stdout } = await execFileAsync('tmux', buildDisplayArgs(pane, '#{pane_current_command}'));
   return stdout.trim();

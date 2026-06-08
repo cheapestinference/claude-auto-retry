@@ -87,3 +87,25 @@ export function findRateLimitMessage(text, customPatterns = []) {
 
   return null;
 }
+
+export function findSpendLimitMenuAction(text) {
+  const lines = stripAnsi(text).split('\n');
+  const promptIdx = lines.findIndex(line => /What do you want to do\?/i.test(line));
+  const waitIdx = lines.findIndex(line => /Wait for limit to reset/i.test(line));
+
+  if (promptIdx === -1 || waitIdx === -1) return null;
+
+  const selectedIdx = lines.findIndex(line => /^[\s]*[❯>]/.test(line));
+  const keys = [];
+
+  if (selectedIdx === -1) {
+    keys.push('Down');
+  } else if (selectedIdx < waitIdx) {
+    keys.push(...Array(waitIdx - selectedIdx).fill('Down'));
+  } else if (selectedIdx > waitIdx) {
+    keys.push(...Array(selectedIdx - waitIdx).fill('Up'));
+  }
+
+  keys.push('Enter');
+  return { keys };
+}

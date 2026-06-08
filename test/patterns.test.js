@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage } from '../src/patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, findSpendLimitMenuAction } from '../src/patterns.js';
 
 describe('stripAnsi', () => {
   it('removes bold codes', () => {
@@ -108,6 +108,34 @@ describe('isRateLimited (multi-line TUI renders)', () => {
   });
   it('rejects normal output with no rate limit keywords', () => {
     assert.equal(isRateLimited('Working on your request\nHere is the code\nDone'), false);
+  });
+});
+
+describe('findSpendLimitMenuAction', () => {
+  it('returns Down + Enter when the wait option is one row below the selected item', () => {
+    const text = [
+      'What do you want to do?',
+      '❯ Adjust monthly spend limit: Unlimited',
+      '  Wait for limit to reset',
+      '  Upgrade to Max for higher session limits every month',
+    ].join('\n');
+
+    assert.deepEqual(findSpendLimitMenuAction(text), { keys: ['Down', 'Enter'] });
+  });
+
+  it('returns Enter when wait is already selected', () => {
+    const text = [
+      'What do you want to do?',
+      '  Adjust monthly spend limit: Unlimited',
+      '❯ Wait for limit to reset',
+      '  Upgrade to Max for higher session limits every month',
+    ].join('\n');
+
+    assert.deepEqual(findSpendLimitMenuAction(text), { keys: ['Enter'] });
+  });
+
+  it('returns null when the spend-limit menu is absent', () => {
+    assert.equal(findSpendLimitMenuAction('Normal Claude output'), null);
   });
 });
 
