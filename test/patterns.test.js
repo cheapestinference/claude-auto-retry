@@ -137,6 +137,32 @@ describe('findSpendLimitMenuAction', () => {
   it('returns null when the spend-limit menu is absent', () => {
     assert.equal(findSpendLimitMenuAction('Normal Claude output'), null);
   });
+
+  it('ignores stale spend-limit text when a later unrelated menu is selected', () => {
+    const text = [
+      'What do you want to do?',
+      '❯ Adjust monthly spend limit: Unlimited',
+      '  Wait for limit to reset',
+      '  Upgrade to Max for higher session limits every month',
+      'Some later output',
+      'What do you want to do?',
+      '❯ Open conversation history',
+      '  Cancel',
+    ].join('\n');
+
+    assert.equal(findSpendLimitMenuAction(text), null);
+  });
+
+  it('requires the monthly spend option to be present', () => {
+    const text = [
+      'What do you want to do?',
+      '❯ Retry request',
+      '  Wait for limit to reset',
+      '  Cancel',
+    ].join('\n');
+
+    assert.equal(findSpendLimitMenuAction(text), null);
+  });
 });
 
 describe('stripAnsi (OSC sequences)', () => {

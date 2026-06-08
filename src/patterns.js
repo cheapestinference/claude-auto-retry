@@ -90,12 +90,27 @@ export function findRateLimitMessage(text, customPatterns = []) {
 
 export function findSpendLimitMenuAction(text) {
   const lines = stripAnsi(text).split('\n');
-  const promptIdx = lines.findIndex(line => /What do you want to do\?/i.test(line));
-  const waitIdx = lines.findIndex(line => /Wait for limit to reset/i.test(line));
+  const promptIdx = lines.findLastIndex
+    ? lines.findLastIndex(line => /What do you want to do\?/i.test(line))
+    : (() => {
+        for (let i = lines.length - 1; i >= 0; i--) {
+          if (/What do you want to do\?/i.test(lines[i])) return i;
+        }
+        return -1;
+      })();
 
-  if (promptIdx === -1 || waitIdx === -1) return null;
+  if (promptIdx === -1) return null;
 
-  const selectedIdx = lines.findIndex(line => /^[\s]*[❯>]/.test(line));
+  const blockEnd = Math.min(lines.length, promptIdx + 8);
+  const block = lines.slice(promptIdx, blockEnd);
+
+  const hasSpendLimitOption = block.some(line => /Adjust monthly spend limit/i.test(line));
+  const waitOffset = block.findIndex(line => /Wait for limit to reset/i.test(line));
+  if (!hasSpendLimitOption || waitOffset === -1) return null;
+
+  const selectedOffset = block.findIndex(line => /^[\s]*[❯>]/.test(line));
+  const waitIdx = promptIdx + waitOffset;
+  const selectedIdx = selectedOffset === -1 ? -1 : promptIdx + selectedOffset;
   const keys = [];
 
   if (selectedIdx === -1) {
