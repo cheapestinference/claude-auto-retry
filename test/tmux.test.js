@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCaptureArgs, buildSendKeysArgs, buildDisplayArgs, parseTmuxVersion } from '../src/tmux.js';
+import { buildCaptureArgs, buildSendTextArgs, buildSendEnterArgs, buildDisplayArgs, parseTmuxVersion } from '../src/tmux.js';
 
 describe('buildCaptureArgs', () => {
   it('builds correct args', () => {
@@ -8,10 +8,16 @@ describe('buildCaptureArgs', () => {
       ['capture-pane', '-t', '%3', '-p', '-S', '-200']);
   });
 });
-describe('buildSendKeysArgs', () => {
-  it('builds correct args with Enter', () => {
-    assert.deepEqual(buildSendKeysArgs('%3', 'hello world'),
-      ['send-keys', '-t', '%3', 'hello world', 'Enter']);
+describe('buildSendTextArgs', () => {
+  it('sends text literally without Enter (issue #7)', () => {
+    assert.deepEqual(buildSendTextArgs('%3', 'hello world'),
+      ['send-keys', '-t', '%3', '-l', '--', 'hello world']);
+  });
+});
+describe('buildSendEnterArgs', () => {
+  it('sends Enter as its own keystroke', () => {
+    assert.deepEqual(buildSendEnterArgs('%3'),
+      ['send-keys', '-t', '%3', 'Enter']);
   });
 });
 describe('buildDisplayArgs', () => {

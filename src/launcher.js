@@ -1,7 +1,9 @@
 import { spawn, fork } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { isInsideTmux, getCurrentPane, getTmuxVersion } from './tmux.js';
 import { isRateLimited } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
@@ -15,6 +17,16 @@ function findClaudeBinary() {
   try {
     return execFileSync('which', ['claude'], { encoding: 'utf-8' }).trim();
   } catch {
+    // Not on PATH — check known install locations. Claude Code's local
+    // installer puts the binary here and exposes it only via a shell alias,
+    // which our wrapper removes (see wrapper.sh / issue #10).
+    const candidates = [
+      join(homedir(), '.claude', 'local', 'claude'),
+      join(homedir(), '.local', 'bin', 'claude'),
+    ];
+    for (const c of candidates) {
+      if (existsSync(c)) return c;
+    }
     return 'claude';
   }
 }

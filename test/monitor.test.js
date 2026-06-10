@@ -87,6 +87,22 @@ describe('processOneTick', () => {
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
   });
+  it('retries when Claude PID is attached to the pane tty despite shell foreground (issue #1)', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'zsh', false);
+    t.isClaudeInPane = async () => true;
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting';
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+  });
+  it('still skips when Claude PID is not attached to the pane tty', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'zsh', false);
+    t.isClaudeInPane = async () => false;
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting';
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
+    assert.equal(t._sent.length, 0);
+  });
   it('resets counter when rate limit disappears', async () => {
     const t = mockTmux('Claude is working normally');
     const s = createMonitorState();

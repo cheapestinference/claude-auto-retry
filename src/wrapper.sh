@@ -1,4 +1,8 @@
 # >>> claude-auto-retry >>>
+# If "claude" is already an alias (e.g. added by Claude Code's installer),
+# defining a function with the same name is a syntax error in bash and zsh
+# because the alias is expanded while the definition is parsed (issue #10).
+unalias claude 2>/dev/null || true
 claude() {
   if [ "${CLAUDE_AUTO_RETRY_ACTIVE}" = "1" ]; then
     command claude "$@"

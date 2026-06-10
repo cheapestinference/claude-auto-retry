@@ -92,4 +92,28 @@ describe('calculateWaitMs', () => {
     const wait = calculateWaitMs({ hour: 15, minute: 0, timezone: 'Invalid/Zone' }, 60, 5);
     assert.ok(Math.abs(wait - (5 * 3600 + 60) * 1000) < 2000); // fallback
   });
+  it('does not overshoot by 24h for same-day reset in UTC+9 (issue #6)', () => {
+    // 2026-04-15 18:43 in Asia/Tokyo; "resets 8pm (Asia/Tokyo)" is 1h17m away
+    const now = new Date('2026-04-15T09:43:00Z');
+    const wait = calculateWaitMs({ hour: 20, minute: 0, timezone: 'Asia/Tokyo' }, 60, 5, now);
+    assert.equal(wait, (77 * 60 + 60) * 1000);
+  });
+  it('handles evening reset crossing UTC midnight in UTC+8 (issue #6/#15)', () => {
+    // 2026-06-09 15:00 in Asia/Shanghai; "resets 4:50pm (Asia/Shanghai)" is 1h50m away
+    const now = new Date('2026-06-09T07:00:00Z');
+    const wait = calculateWaitMs({ hour: 16, minute: 50, timezone: 'Asia/Shanghai' }, 0, 5, now);
+    assert.equal(wait, 110 * 60 * 1000);
+  });
+  it('rolls to tomorrow when reset time already passed today', () => {
+    // 21:00 Asia/Tokyo, reset "8pm (Asia/Tokyo)" → tomorrow, 23h away
+    const now = new Date('2026-04-15T12:00:00Z');
+    const wait = calculateWaitMs({ hour: 20, minute: 0, timezone: 'Asia/Tokyo' }, 0, 5, now);
+    assert.equal(wait, 23 * 3600 * 1000);
+  });
+  it('still computes correct wait for timezones behind UTC', () => {
+    // 2026-04-15 10:00 in America/New_York (EDT); "resets 2pm" is 4h away
+    const now = new Date('2026-04-15T14:00:00Z');
+    const wait = calculateWaitMs({ hour: 14, minute: 0, timezone: 'America/New_York' }, 0, 5, now);
+    assert.equal(wait, 4 * 3600 * 1000);
+  });
 });

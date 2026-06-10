@@ -12,6 +12,25 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 
 ---
 
+## About this fork
+
+This fork of [cheapestinference/claude-auto-retry](https://github.com/cheapestinference/claude-auto-retry) fixes the open upstream issues:
+
+- **#7** — Retry message was typed into Claude Code's input box but never submitted. Text and Enter were sent in a single `tmux send-keys` call, which the TUI treats as a paste, turning Enter into a newline. Enter is now sent as a separate keystroke after a 1s delay, and the text is sent literally (`-l`) so words like "Enter" in a custom retry message aren't interpreted as key names.
+- **#15** — Current Claude Code messages like *"You've hit your session limit"* / *"weekly limit"* were not detected. The limit pattern now accepts qualifier words before "limit".
+- **#6** — Reset times in timezones ahead of UTC (e.g. *"resets 8pm (Asia/Tokyo)"*) were scheduled ~24h late because the wall-clock-to-UTC correction ignored the date. The calculation now converges on the correct same-day timestamp.
+- **#10** — `source ~/.zshrc` failed with `parse error near '('` when `claude` was already an alias (e.g. added by Claude Code's local installer). The wrapper now removes the alias before defining the function, and the launcher additionally looks for the binary in `~/.claude/local/` and `~/.local/bin/` since the alias is gone.
+- **#1** — Retries were skipped with *"Foreground is 'zsh', not Claude"* on macOS, where `pane_current_command` reports the login shell. The monitor now also checks whether the monitored Claude PID is attached to the pane's tty, and proceeds if it is.
+
+Install this fork globally (instead of the npm package):
+
+```bash
+sudo npm i -g github:LawfulGremlin/claude-auto-retry
+claude-auto-retry install
+```
+
+---
+
 ## The Problem
 
 You're in the middle of a complex task with Claude Code. After a while, you see:
@@ -207,9 +226,9 @@ Contributions are welcome! Here's how to get started:
 ### Development Setup
 
 ```bash
-git clone https://github.com/cheapestinference/claude-auto-retry.git
+git clone https://github.com/LawfulGremlin/claude-auto-retry.git
 cd claude-auto-retry
-npm test            # Run all 59 tests
+npm test            # Run all tests
 npm link            # Install locally for testing
 ```
 

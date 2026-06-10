@@ -48,35 +48,37 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     return (fallbackHours * 3600 + marginSeconds) * 1000;
   }
 
-  // DST-safe approach: binary search for the correct UTC timestamp
-  // that corresponds to the given hour:minute in the target timezone.
+  // DST-safe approach: iteratively search for the UTC timestamp that
+  // corresponds to the given hour:minute TODAY in the target timezone.
   function getTargetTimestamp(h, m) {
-    // Get today's date in the target timezone
-    const parts = new Intl.DateTimeFormat('en-US', {
+    const fmt = new Intl.DateTimeFormat('en-US', {
       timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-      hour12: false,
-    }).formatToParts(now);
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    const get = (parts, type) => parseInt(parts.find(p => p.type === type).value, 10);
 
-    const y = parseInt(parts.find(p => p.type === 'year').value);
-    const mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
-    const d = parseInt(parts.find(p => p.type === 'day').value);
+    // Get today's date in the target timezone
+    const nowParts = fmt.formatToParts(now);
+    const y = get(nowParts, 'year');
+    const mo = get(nowParts, 'month') - 1;
+    const d = get(nowParts, 'day');
 
-    // Construct target date string and parse as UTC as initial guess
-    const targetStr = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
-    const naiveUtc = new Date(targetStr + 'Z');
+    // Initial guess: treat the target wall-clock time as UTC
+    let candidate = Date.UTC(y, mo, d, h, m, 0);
 
-    // Iterative correction: format the guess in the target TZ,
-    // compare with desired h:m, adjust, repeat up to 3 times for DST convergence
-    let candidate = naiveUtc.getTime();
-    for (let i = 0; i < 3; i++) {
-      const check = new Date(candidate);
-      const fp = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz, hour: 'numeric', minute: 'numeric', hour12: false,
-      }).formatToParts(check);
-      const ch = parseInt(fp.find(p => p.type === 'hour').value) % 24;
-      const cm = parseInt(fp.find(p => p.type === 'minute').value);
+    // Iterative correction: format the guess in the target TZ and compare
+    // against the desired DATE + h:m. The date must be part of the comparison:
+    // for timezones ahead of UTC, the naive guess lands on the NEXT local day
+    // (e.g. 20:00 UTC = 05:00 next day in Asia/Tokyo), and matching only
+    // hour:minute converges on tomorrow's reset — a ~24h overshoot (issue #6).
+    for (let i = 0; i < 4; i++) {
+      const cp = fmt.formatToParts(new Date(candidate));
+      const dayDiffMin = (Date.UTC(get(cp, 'year'), get(cp, 'month') - 1, get(cp, 'day'))
+                        - Date.UTC(y, mo, d)) / 60_000;
+      const ch = get(cp, 'hour') % 24;
+      const cm = get(cp, 'minute');
 
-      const diffMin = (h - ch) * 60 + (m - cm);
+      const diffMin = (h - ch) * 60 + (m - cm) - dayDiffMin;
       if (diffMin === 0) break;
       candidate += diffMin * 60_000;
     }

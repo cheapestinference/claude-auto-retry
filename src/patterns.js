@@ -23,7 +23,7 @@ export function stripAnsi(text) {
 // Detection: find a "limit" line and a "resets" line within 6 lines of each other.
 
 const LIMIT_PATTERNS = [
-  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:\d+-hour\s+)?limit/i,  // "hit/exceeded/reached your limit"
+  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w-]+\s+)*limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
   /\d+-hour limit/i,                                // "5-hour limit"
   /limit reached/i,                                  // "limit reached"
   /usage limit/i,                                    // "usage limit"

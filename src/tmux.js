@@ -7,8 +7,18 @@ export function buildCaptureArgs(pane, lines = 200) {
   return ['capture-pane', '-t', pane, '-p', '-S', `-${lines}`];
 }
 
-export function buildSendKeysArgs(pane, text) {
-  return ['send-keys', '-t', pane, text, 'Enter'];
+// Text and Enter must be sent as two separate tmux calls with a delay in
+// between. When they arrive in the same instant, Claude Code's TUI treats
+// the burst as a paste and the Enter becomes a newline inside the input box
+// instead of submitting it (issue #7).
+export function buildSendTextArgs(pane, text) {
+  // -l sends the text literally so tmux doesn't interpret words like
+  // "Enter" or "Escape" inside the retry message as key names.
+  return ['send-keys', '-t', pane, '-l', '--', text];
+}
+
+export function buildSendEnterArgs(pane) {
+  return ['send-keys', '-t', pane, 'Enter'];
 }
 
 export function buildDisplayArgs(pane, format) {
@@ -31,13 +41,41 @@ export async function capturePane(pane, lines = 200) {
   return stdout;
 }
 
-export async function sendKeys(pane, text) {
-  await execFileAsync('tmux', buildSendKeysArgs(pane, text));
+export async function sendKeys(pane, text, enterDelayMs = 1000) {
+  await execFileAsync('tmux', buildSendTextArgs(pane, text));
+  await new Promise(r => setTimeout(r, enterDelayMs));
+  await execFileAsync('tmux', buildSendEnterArgs(pane));
 }
 
 export async function getPaneCommand(pane) {
   const { stdout } = await execFileAsync('tmux', buildDisplayArgs(pane, '#{pane_current_command}'));
   return stdout.trim();
+}
+
+export async function getPaneTty(pane) {
+  const { stdout } = await execFileAsync('tmux', buildDisplayArgs(pane, '#{pane_tty}'));
+  return stdout.trim();
+}
+
+export async function getProcessTty(pid) {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'tty=', '-p', String(pid)]);
+    return stdout.trim();
+  } catch {
+    return null;
+  }
+}
+
+// True when the process is attached to the pane's tty, i.e. it is actually
+// running inside that pane — regardless of what pane_current_command claims
+// (on macOS it often reports the login shell, e.g. "zsh", issue #1).
+export async function isProcessInPane(pane, pid) {
+  const [paneTty, procTty] = await Promise.all([
+    getPaneTty(pane).catch(() => null),
+    getProcessTty(pid),
+  ]);
+  if (!paneTty || !procTty || procTty === '?' || procTty === '??') return false;
+  return paneTty.replace(/^\/dev\//, '') === procTty.replace(/^\/dev\//, '');
 }
 
 export async function isProcessForeground(pid) {

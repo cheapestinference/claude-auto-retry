@@ -1,6 +1,6 @@
 import { stripAnsi, isRateLimited, findRateLimitMessage } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
-import { capturePane, sendKeys, getPaneCommand, isProcessForeground } from './tmux.js';
+import { capturePane, sendKeys, getPaneCommand, isProcessForeground, isProcessInPane } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 
@@ -44,9 +44,18 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) 
       const fg = await tmuxAdapter.getPaneCommand(pane);
       const fgCommands = config.foregroundCommands || DEFAULT_FOREGROUND_COMMANDS;
       if (!fgCommands.some(c => fg.toLowerCase().includes(c))) {
-        state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
-        state._lastForeground = fg;
-        return 'skipped-not-claude';
+        // pane_current_command can report the login shell (e.g. "zsh" on
+        // macOS) even while Claude runs inside the pane. If the monitored
+        // Claude PID is attached to this pane's tty it IS running here, so
+        // sending keys is safe (issue #1).
+        const inPane = tmuxAdapter.isClaudeInPane
+          ? await tmuxAdapter.isClaudeInPane()
+          : false;
+        if (inPane !== true) {
+          state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+          state._lastForeground = fg;
+          return 'skipped-not-claude';
+        }
       }
     }
 
@@ -79,7 +88,11 @@ export async function startMonitor(pane, pid) {
 
   await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
 
-  const tmuxAdapter = { capturePane, sendKeys, getPaneCommand, isClaudeForeground: () => isProcessForeground(pid) };
+  const tmuxAdapter = {
+    capturePane, sendKeys, getPaneCommand,
+    isClaudeForeground: () => isProcessForeground(pid),
+    isClaudeInPane: () => isProcessInPane(pane, pid),
+  };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
   const loop = async () => {

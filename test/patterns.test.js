@@ -60,6 +60,12 @@ describe('isRateLimited', () => {
   it('detects "usage limit · resets in: 3 hours"', () => {
     assert.equal(isRateLimited('usage limit · resets in: 3 hours'), true);
   });
+  it('detects "You\'ve hit your session limit" (issue #15)', () => {
+    assert.equal(isRateLimited("You've hit your session limit · resets 4:50pm (Asia/Shanghai)"), true);
+  });
+  it('detects "You\'ve hit your weekly limit" (issue #15)', () => {
+    assert.equal(isRateLimited("You've hit your weekly limit · resets 9am (Asia/Shanghai)"), true);
+  });
 });
 
 describe('stripAnsi (private-mode sequences)', () => {
