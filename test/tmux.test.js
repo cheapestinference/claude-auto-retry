@@ -15,8 +15,8 @@ describe('buildSendKeysArgs', () => {
   });
 });
 describe('buildSendEnterArgs', () => {
-  it('builds correct args for bare Enter', () => {
-    assert.deepEqual(buildSendEnterArgs('%3'), ['send-keys', '-t', '%3', 'Enter']);
+  it('builds correct args for carriage return', () => {
+    assert.deepEqual(buildSendEnterArgs('%3'), ['send-keys', '-t', '%3', 'C-m']);
   });
 });
 describe('buildDisplayArgs', () => {

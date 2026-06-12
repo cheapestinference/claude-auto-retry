@@ -26,8 +26,12 @@ function isRateLimitOptionsPrompt(text) {
 
 function isClaudeBusy(text) {
   return /\bHerding\b/i.test(text)
+    || /\b(?:Booping|Cooking|Brewing|Brewed|Sautéing|Sauteing)\b/i.test(text)
     || /still thinking/i.test(text)
-    || /thinking (?:with|more|hard|.*effort)/i.test(text);
+    || /thinking (?:with|more|hard|.*effort)/i.test(text)
+    || /\([^)]+tokens\)/i.test(text)
+    || /\b\d+[smh]\s*·\s*↓\s*[\d.]+[kM]?\s*tokens\b/i.test(text)
+    || (/esc to interrupt/i.test(text) && /(?:tokens|↓ to manage|Backgrounded agent|Agent\()/i.test(text));
 }
 
 export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) {

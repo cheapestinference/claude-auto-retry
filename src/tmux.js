@@ -12,7 +12,7 @@ export function buildSendKeysArgs(pane, text) {
 }
 
 export function buildSendEnterArgs(pane) {
-  return ['send-keys', '-t', pane, 'Enter'];
+  return ['send-keys', '-t', pane, 'C-m'];
 }
 
 export function buildDisplayArgs(pane, format) {

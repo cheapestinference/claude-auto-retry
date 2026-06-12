@@ -66,8 +66,37 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'monitoring');
     assert.equal(t._sent.length, 0);
   });
+  it('ignores stale rate-limit text while Claude is showing active token status', async () => {
+    const text = [
+      '⎿  You\'ve hit your session limit · resets 2am (Europe/Dublin)',
+      '✽ Booping… (1m 43s · ↓ 5.6k tokens)',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ↓ to manage',
+      '  ◯ general-purpose  Retry demo-weekend engine prep  24s · ↓ 22.7k tokens',
+    ].join('\n');
+    const t = mockTmux(text);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(t._sent.length, 0);
+  });
   it('clears waiting state when Claude is visibly thinking after retry', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)\n· Herding… (3m · thinking with xhigh effort)');
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000;
+    s.status = 'waiting';
+    s.retrySentForCurrentLimit = true;
+    s.attempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s.attempts, 0);
+    assert.equal(s.retrySentForCurrentLimit, false);
+  });
+  it('clears waiting state when active token status appears after retry', async () => {
+    const text = [
+      '⎿  You\'ve hit your session limit · resets 2am (Europe/Dublin)',
+      '✽ Booping… (1m 43s · ↓ 5.6k tokens)',
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ↓ to manage',
+    ].join('\n');
+    const t = mockTmux(text);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000;
     s.status = 'waiting';
