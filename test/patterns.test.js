@@ -60,6 +60,15 @@ describe('isRateLimited', () => {
   it('detects "usage limit · resets in: 3 hours"', () => {
     assert.equal(isRateLimited('usage limit · resets in: 3 hours'), true);
   });
+  it('detects "You\'ve hit your session limit" (current Claude Code wording, #15)', () => {
+    assert.equal(isRateLimited("You've hit your session limit · resets 4:50pm (Asia/Shanghai)"), true);
+  });
+  it('detects "You\'ve hit your weekly limit" (#15)', () => {
+    assert.equal(isRateLimited("You've hit your weekly limit · resets 9am (Europe/London)"), true);
+  });
+  it('still detects "You\'ve hit your 5-hour limit" (no qualifier regression)', () => {
+    assert.equal(isRateLimited("You've hit your 5-hour limit · resets 3pm (UTC)"), true);
+  });
 });
 
 describe('stripAnsi (private-mode sequences)', () => {
@@ -86,6 +95,10 @@ describe('findRateLimitMessage', () => {
   it('returns Resets line when limit and resets on different lines', () => {
     const text = '5-hour limit reached\nResets at 3pm (UTC)';
     assert.ok(findRateLimitMessage(text).includes('3pm'));
+  });
+  it('returns the most recent resets line when scrollback has a stale one', () => {
+    const text = 'You\'ve hit your limit · resets 11:30am (UTC)\nlots of output\nYou\'ve hit your limit · resets 4:30pm (UTC)';
+    assert.ok(findRateLimitMessage(text).includes('4:30pm'));
   });
 });
 

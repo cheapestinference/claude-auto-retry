@@ -23,7 +23,7 @@ export function stripAnsi(text) {
 // Detection: find a "limit" line and a "resets" line within 6 lines of each other.
 
 const LIMIT_PATTERNS = [
-  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:\d+-hour\s+)?limit/i,  // "hit/exceeded/reached your limit"
+  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w-]+\s+){0,3}limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
   /\d+-hour limit/i,                                // "5-hour limit"
   /limit reached/i,                                  // "limit reached"
   /usage limit/i,                                    // "usage limit"
@@ -73,14 +73,17 @@ export function isRateLimited(text, customPatterns = []) {
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
 
-  // Return the "resets" line — that's what parseResetTime needs
-  for (const line of lines) {
-    if (RESET_PATTERNS.some(p => p.test(line))) return line.trim();
+  // Scan from the bottom up — the most recent "resets" line is the one to
+  // parse. The Claude TUI never clears earlier rate-limit messages from
+  // scrollback, so a forward scan would lock onto a stale line (e.g. an old
+  // "resets 11:30am" lingering above a fresh "resets 4:30pm").
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (RESET_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 
-  // Fallback: any "limit" line
-  for (const line of lines) {
-    if (LIMIT_PATTERNS.some(p => p.test(line))) return line.trim();
+  // Fallback: any "limit" line, also scanned from the bottom.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 
   return null;
