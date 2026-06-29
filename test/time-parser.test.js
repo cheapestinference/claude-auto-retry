@@ -92,4 +92,36 @@ describe('calculateWaitMs', () => {
     const wait = calculateWaitMs({ hour: 15, minute: 0, timezone: 'Invalid/Zone' }, 60, 5);
     assert.ok(Math.abs(wait - (5 * 3600 + 60) * 1000) < 2000); // fallback
   });
+
+  // Regression (#6): in a positive-offset tz, 10:02 AM Melbourne (UTC+10)
+  // looking for "11:40pm Melbourne" should wait ~13.6h (today), not ~37.6h.
+  it('targets today for a future reset in a positive-offset timezone', () => {
+    const now = new Date('2026-05-03T00:02:15Z'); // 10:02 AM in Melbourne (UTC+10)
+    const wait = calculateWaitMs(
+      { hour: 23, minute: 40, timezone: 'Australia/Melbourne' }, 60, 5, now
+    );
+    const hours = wait / 3600_000;
+    assert.ok(hours > 13 && hours < 14, `expected ~13.6h, got ${hours.toFixed(2)}h`);
+  });
+
+  // Regression (#6): negative-offset tz, "resets 3am NY" at 1am NY → ~2h.
+  it('targets today for a future reset in a negative-offset timezone', () => {
+    const now = new Date('2026-05-03T05:00:00Z'); // 1:00 AM in New York (UTC-4 EDT)
+    const wait = calculateWaitMs(
+      { hour: 3, minute: 0, timezone: 'America/New_York' }, 60, 5, now
+    );
+    const hours = wait / 3600_000;
+    assert.ok(hours > 1.9 && hours < 2.1, `expected ~2h, got ${hours.toFixed(2)}h`);
+  });
+
+  // Regression (#6): reset already passed today → target tomorrow (~22.6h),
+  // not 48h. Symmetric case for the off-by-a-day bug.
+  it('targets tomorrow when reset time already passed today', () => {
+    const now = new Date('2026-05-03T15:00:00Z'); // 1:00 AM next day in Melbourne
+    const wait = calculateWaitMs(
+      { hour: 23, minute: 40, timezone: 'Australia/Melbourne' }, 60, 5, now
+    );
+    const hours = wait / 3600_000;
+    assert.ok(hours > 22 && hours < 23, `expected ~22.6h, got ${hours.toFixed(2)}h`);
+  });
 });

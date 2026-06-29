@@ -76,7 +76,13 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
       const ch = parseInt(fp.find(p => p.type === 'hour').value) % 24;
       const cm = parseInt(fp.find(p => p.type === 'minute').value);
 
-      const diffMin = (h - ch) * 60 + (m - cm);
+      // Normalize to [-720, +720] minutes so we take the minimum-magnitude
+      // correction. Otherwise, in a UTC+10 tz looking for 23:40, the naive UTC
+      // guess formats as 09:40 next day local, and a raw +14h adjustment lands
+      // on tomorrow's occurrence instead of today's (the off-by-a-day bug).
+      let diffMin = (h - ch) * 60 + (m - cm);
+      diffMin = ((diffMin % 1440) + 1440) % 1440;
+      if (diffMin > 720) diffMin -= 1440;
       if (diffMin === 0) break;
       candidate += diffMin * 60_000;
     }
