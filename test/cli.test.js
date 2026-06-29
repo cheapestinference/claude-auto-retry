@@ -17,6 +17,15 @@ describe('injectWrapper', () => {
     assert.ok(content.includes(MARKER_END));
     assert.ok(content.includes('/path/to/launcher.js'));
   });
+  it('unaliases claude before defining the wrapper function (#10)', async () => {
+    await writeFile(testFile, '');
+    await injectWrapper(testFile, '/path/to/launcher.js');
+    const content = await readFile(testFile, 'utf-8');
+    const unaliasIdx = content.indexOf('unalias claude');
+    const fnIdx = content.indexOf('\nclaude() {');
+    assert.ok(unaliasIdx !== -1, 'wrapper should unalias claude');
+    assert.ok(unaliasIdx < fnIdx, 'unalias must come before the function definition');
+  });
   it('adds wrapper to file with existing content', async () => {
     await writeFile(testFile, 'export PATH=$HOME/bin:$PATH\n');
     await injectWrapper(testFile, '/path/to/launcher.js');
