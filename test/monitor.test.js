@@ -74,6 +74,17 @@ describe('processOneTick', () => {
     assert.notEqual(s.status, 'waiting');
   });
 
+  // --- Regression: a menu only quoted in scrollback is NOT the live prompt. Driving
+  //     arrow keys + Enter on it would act on whatever is actually on screen. ---
+  it('does NOT drive a /rate-limit-options menu only quoted above the live tail', async () => {
+    const pane = [...MENU_UPGRADE_FIRST.split('\n'), ...Array(12).fill('● unrelated work below the quoted menu'), '❯ '].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    const r = await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true);
+    assert.notEqual(r, 'menu-confirmed');
+    assert.equal(t._keys.length, 0);   // no arrow/Enter keys driven
+  });
+
   it('refuses to press Enter when the menu layout is unreadable (#19)', async () => {
     // Cursor marker absent → we cannot tell which option is highlighted.
     const noCursor = ['What do you want to do?', '  1. Upgrade your plan', '  2. Stop and wait for limit to reset', 'Enter to confirm'].join('\n');

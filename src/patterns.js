@@ -90,8 +90,13 @@ const MENU_CURSOR = '❯';
 const WAIT_OPTION_REGEX = /stop and wait for limit to reset/i;
 const MENU_OPTION_REGEX = /^\s*❯?\s*\d+\.\s/;
 
-export function isRateLimitOptionsPrompt(text) {
-  const t = stripAnsi(text);
+// tailLines > 0 restricts to the last N lines: a LIVE menu sits at the prompt, so the
+// same menu text quoted in scrollback (a conversation about limits) must not make us
+// drive arrow keys + Enter into whatever is actually on screen.
+export function isRateLimitOptionsPrompt(text, tailLines = 0) {
+  let lines = stripAnsi(text).split('\n');
+  if (tailLines > 0) lines = lines.slice(-tailLines);
+  const t = lines.join('\n');
   return /what do you want to do\?/i.test(t)
     && WAIT_OPTION_REGEX.test(t)
     && (/enter to confirm/i.test(t) || /esc to cancel/i.test(t) || t.includes(MENU_CURSOR));
@@ -101,8 +106,11 @@ export function isRateLimitOptionsPrompt(text) {
 // option steps: positive => press Down N times, negative => Up, 0 => already there.
 // Returns null when the layout can't be read (no cursor or option not found); the
 // caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
-export function menuStepsToWaitOption(text) {
-  const optionLines = stripAnsi(text).split('\n').filter(l => MENU_OPTION_REGEX.test(l));
+// tailLines mirrors isRateLimitOptionsPrompt so option counting ignores quoted menus.
+export function menuStepsToWaitOption(text, tailLines = 0) {
+  let lines = stripAnsi(text).split('\n');
+  if (tailLines > 0) lines = lines.slice(-tailLines);
+  const optionLines = lines.filter(l => MENU_OPTION_REGEX.test(l));
   if (optionLines.length === 0) return null;
   const cursorPos = optionLines.findIndex(l => l.includes(MENU_CURSOR));
   const waitPos = optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));

@@ -99,7 +99,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // Enter here confirms the highlighted default, which on some Claude Code versions
   // is "Upgrade your plan". Navigate to "Stop and wait for limit to reset" wherever
   // it sits, confirm it, then enter the normal (hours-scale) wait state.
-  if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped)
+  if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped, RATE_LIMIT_TAIL_LINES)
       && Date.now() >= (state._menuCooldownUntil || 0)) {
     const cooldown = config.pollIntervalSeconds * 1000 * 2;
 
@@ -113,7 +113,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       return 'skipped-not-claude';
     }
 
-    const steps = menuStepsToWaitOption(stripped);
+    const steps = menuStepsToWaitOption(stripped, RATE_LIMIT_TAIL_LINES);
     if (steps === null) {
       // Layout unreadable — refuse to press Enter (could confirm "Upgrade").
       state._menuCooldownUntil = Date.now() + cooldown;
