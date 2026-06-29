@@ -67,6 +67,10 @@ export async function getPaneCommand(pane) {
   return stdout.trim();
 }
 
+export function buildSetWindowOptionArgs(target, option, value) {
+  return ['set-window-option', '-t', target, option, value];
+}
+
 export async function isProcessForeground(pid) {
   try {
     const { stdout } = await execFileAsync('ps', ['-o', 'stat=', '-p', String(pid)]);

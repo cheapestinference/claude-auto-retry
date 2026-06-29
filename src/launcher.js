@@ -2,7 +2,7 @@ import { spawn, fork } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { isInsideTmux, getCurrentPane, getTmuxVersion } from './tmux.js';
+import { isInsideTmux, getCurrentPane, getTmuxVersion, buildSetWindowOptionArgs } from './tmux.js';
 import { isRateLimited } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { loadConfig } from './config.js';
@@ -163,6 +163,15 @@ async function createTmuxSession(args) {
 
   try {
     execFileSync('tmux', newSessionArgs);
+
+    // Best-effort: enable mouse mode (scroll, copy-mode, pane/window click) and
+    // vi-style copy-mode keys on the session's first window. Requires tmux >= 2.1;
+    // wrapped so an older tmux that rejects these options doesn't fail the whole
+    // session creation.
+    try {
+      execFileSync('tmux', buildSetWindowOptionArgs(`${sessionName}:0`, 'mouse', 'on'));
+      execFileSync('tmux', buildSetWindowOptionArgs(`${sessionName}:0`, 'mode-keys', 'vi'));
+    } catch { /* old tmux without these options — skip silently */ }
 
     // Attach to the session
     const attachResult = spawn('tmux', ['attach-session', '-t', sessionName], {

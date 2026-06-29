@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCaptureArgs, buildSendKeysArgs, buildSendTextArgs, buildSendEnterArgs, buildDisplayArgs, parseTmuxVersion, SUBMIT_DELAY_MS } from '../src/tmux.js';
+import { buildCaptureArgs, buildSendKeysArgs, buildSendTextArgs, buildSendEnterArgs, buildDisplayArgs, parseTmuxVersion, SUBMIT_DELAY_MS, buildSetWindowOptionArgs } from '../src/tmux.js';
 
 describe('buildCaptureArgs', () => {
   it('builds correct args', () => {
@@ -46,4 +46,15 @@ describe('parseTmuxVersion', () => {
   it('parses "tmux 3.4"', () => { assert.equal(parseTmuxVersion('tmux 3.4'), 3.4); });
   it('parses "tmux 2.1"', () => { assert.equal(parseTmuxVersion('tmux 2.1'), 2.1); });
   it('returns 0 for unparseable', () => { assert.equal(parseTmuxVersion('not tmux'), 0); });
+});
+
+describe('buildSetWindowOptionArgs', () => {
+  it('builds correct args for mouse on', () => {
+    assert.deepEqual(buildSetWindowOptionArgs('session:0', 'mouse', 'on'),
+      ['set-window-option', '-t', 'session:0', 'mouse', 'on']);
+  });
+  it('builds correct args for mode-keys vi', () => {
+    assert.deepEqual(buildSetWindowOptionArgs('claude-retry-123:0', 'mode-keys', 'vi'),
+      ['set-window-option', '-t', 'claude-retry-123:0', 'mode-keys', 'vi']);
+  });
 });
