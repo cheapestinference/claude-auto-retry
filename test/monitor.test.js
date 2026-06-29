@@ -6,13 +6,31 @@ import { DEFAULT_CONFIG } from '../src/config.js';
 function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = true) {
   const t = {
     _sent: [],
+    _keys: [],
     capturePane: async () => paneContent,
     getPaneCommand: async () => paneCommand,
     sendKeys: async (_p, text) => { t._sent.push(text); },
+    sendKey: async (_p, key) => { t._keys.push(key); },
     isClaudeForeground: async () => claudeForeground,
   };
   return t;
 }
+
+const MENU_UPGRADE_FIRST = [
+  "You've hit your session limit · resets 6:50pm (Europe/London)",
+  'What do you want to do?',
+  '❯ 1. Upgrade your plan',
+  '  2. Stop and wait for limit to reset',
+  'Enter to confirm · Esc to cancel',
+].join('\n');
+
+const MENU_WAIT_FIRST = [
+  "You've hit your session limit · resets 12:10am (Europe/Dublin)",
+  'What do you want to do?',
+  '❯ 1. Stop and wait for limit to reset',
+  '  2. Upgrade your plan',
+  'Enter to confirm · Esc to cancel',
+].join('\n');
 
 describe('processOneTick', () => {
   it('returns monitoring when no rate limit', async () => {
@@ -26,6 +44,35 @@ describe('processOneTick', () => {
     const s = createMonitorState();
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
     assert.ok(s.waitUntil > Date.now());
+  });
+
+  it('navigates the menu down to "Stop and wait" when "Upgrade" is the default (#19)', async () => {
+    const t = mockTmux(MENU_UPGRADE_FIRST);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    // One Down to move off "Upgrade", then Enter to confirm "Stop and wait".
+    assert.deepEqual(t._keys, ['Down', 'Enter']);
+    assert.equal(t._sent.length, 0);            // never typed a stray message
+    assert.equal(s.status, 'waiting');
+    assert.ok(s.waitUntil > Date.now());
+  });
+
+  it('confirms directly when "Stop and wait" is already highlighted (#19)', async () => {
+    const t = mockTmux(MENU_WAIT_FIRST);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    assert.deepEqual(t._keys, ['Enter']);       // no navigation needed
+    assert.equal(s.status, 'waiting');
+  });
+
+  it('refuses to press Enter when the menu layout is unreadable (#19)', async () => {
+    // Cursor marker absent → we cannot tell which option is highlighted.
+    const noCursor = ['What do you want to do?', '  1. Upgrade your plan', '  2. Stop and wait for limit to reset', 'Enter to confirm'].join('\n');
+    const t = mockTmux(noCursor);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-unreadable');
+    assert.equal(t._keys.length, 0);            // pressed nothing
+    assert.equal(t._sent.length, 0);
   });
   it('exits when PID dead', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)');

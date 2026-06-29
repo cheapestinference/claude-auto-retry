@@ -35,6 +35,16 @@ export function buildSendEnterArgs(pane) {
   return ['send-keys', '-t', pane, 'Enter'];
 }
 
+// Send a single named key (e.g. 'Down', 'Up', 'Enter', 'Escape') — used to drive
+// the interactive /rate-limit-options menu.
+export function buildSendKeyArgs(pane, key) {
+  return ['send-keys', '-t', pane, key];
+}
+
+export async function sendKey(pane, key) {
+  await execFileAsync('tmux', buildSendKeyArgs(pane, key));
+}
+
 export function buildDisplayArgs(pane, format) {
   return ['display-message', '-t', pane, '-p', format];
 }

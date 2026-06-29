@@ -1,6 +1,23 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage } from '../src/patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption } from '../src/patterns.js';
+
+const MENU_UPGRADE_FIRST = [
+  "You've hit your session limit · resets 6:50pm (Europe/London)",
+  '/rate-limit-options',
+  'What do you want to do?',
+  '❯ 1. Upgrade your plan',
+  '  2. Stop and wait for limit to reset',
+  'Enter to confirm · Esc to cancel',
+].join('\n');
+
+const MENU_WAIT_FIRST = [
+  "You've hit your session limit · resets 12:10am (Europe/Dublin)",
+  'What do you want to do?',
+  '❯ 1. Stop and wait for limit to reset',
+  '  2. Upgrade your plan',
+  'Enter to confirm · Esc to cancel',
+].join('\n');
 
 describe('stripAnsi', () => {
   it('removes bold codes', () => {
@@ -99,6 +116,44 @@ describe('findRateLimitMessage', () => {
   it('returns the most recent resets line when scrollback has a stale one', () => {
     const text = 'You\'ve hit your limit · resets 11:30am (UTC)\nlots of output\nYou\'ve hit your limit · resets 4:30pm (UTC)';
     assert.ok(findRateLimitMessage(text).includes('4:30pm'));
+  });
+});
+
+describe('isRateLimitOptionsPrompt (#19)', () => {
+  it('detects the menu with "Upgrade" highlighted first', () => {
+    assert.equal(isRateLimitOptionsPrompt(MENU_UPGRADE_FIRST), true);
+  });
+  it('detects the menu with "Stop and wait" highlighted first', () => {
+    assert.equal(isRateLimitOptionsPrompt(MENU_WAIT_FIRST), true);
+  });
+  it('detects through ANSI codes', () => {
+    assert.equal(isRateLimitOptionsPrompt('\x1b[1mWhat do you want to do?\x1b[0m\n❯ 1. Stop and wait for limit to reset'), true);
+  });
+  it('returns false for a plain rate-limit banner (no menu)', () => {
+    assert.equal(isRateLimitOptionsPrompt("You've hit your limit · resets 3pm (UTC)"), false);
+  });
+  it('returns false for normal output', () => {
+    assert.equal(isRateLimitOptionsPrompt('What do you want to do? Build a feature?'), false);
+  });
+});
+
+describe('menuStepsToWaitOption (#19)', () => {
+  it('returns +1 when "Stop and wait" is one below the cursor (Upgrade first)', () => {
+    assert.equal(menuStepsToWaitOption(MENU_UPGRADE_FIRST), 1);
+  });
+  it('returns 0 when "Stop and wait" is already highlighted', () => {
+    assert.equal(menuStepsToWaitOption(MENU_WAIT_FIRST), 0);
+  });
+  it('returns -1 when "Stop and wait" is above the cursor', () => {
+    const text = ['What do you want to do?', '  1. Stop and wait for limit to reset', '❯ 2. Upgrade your plan'].join('\n');
+    assert.equal(menuStepsToWaitOption(text), -1);
+  });
+  it('returns null when there is no cursor to anchor on', () => {
+    const text = ['What do you want to do?', '  1. Upgrade your plan', '  2. Stop and wait for limit to reset'].join('\n');
+    assert.equal(menuStepsToWaitOption(text), null);
+  });
+  it('returns null when no menu options are present', () => {
+    assert.equal(menuStepsToWaitOption('just some text'), null);
   });
 });
 

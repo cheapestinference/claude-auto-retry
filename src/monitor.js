@@ -1,6 +1,6 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
-import { capturePane, sendKeys, getPaneCommand, isProcessForeground } from './tmux.js';
+import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
 
@@ -15,6 +15,36 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive) 
 
   const raw = await tmuxAdapter.capturePane(pane, 20);
   const stripped = stripAnsi(raw);
+
+  // Handle the interactive /rate-limit-options menu before any other logic. A bare
+  // Enter here confirms the highlighted default, which on some Claude Code versions
+  // is "Upgrade your plan". Navigate to "Stop and wait for limit to reset" wherever
+  // it sits, confirm it, then enter the normal (hours-scale) wait state.
+  if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped)
+      && Date.now() >= (state._menuCooldownUntil || 0)) {
+    const steps = menuStepsToWaitOption(stripped);
+    const cooldown = config.pollIntervalSeconds * 1000 * 2;
+    if (steps === null) {
+      // Layout unreadable — refuse to press Enter (could confirm "Upgrade").
+      state._menuCooldownUntil = Date.now() + cooldown;
+      return 'menu-unreadable';
+    }
+    const key = steps >= 0 ? 'Down' : 'Up';
+    for (let i = 0; i < Math.abs(steps); i++) {
+      await tmuxAdapter.sendKey(pane, key);
+      await new Promise(r => setTimeout(r, 80));
+    }
+    await tmuxAdapter.sendKey(pane, 'Enter');
+    // Parse the reset time straight from the menu text, so the wait does not depend
+    // on the limit banner still being visible afterward.
+    const message = findRateLimitMessage(stripped, config.customPatterns);
+    state.lastRateLimitMessage = message;
+    const parsed = message ? parseResetTime(message) : null;
+    state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+    state.status = 'waiting';
+    state._menuCooldownUntil = Date.now() + cooldown;
+    return 'menu-confirmed';
+  }
 
   if (state.status === 'waiting') {
     if (Date.now() < state.waitUntil) return 'waiting';
@@ -79,7 +109,7 @@ export async function startMonitor(pane, pid) {
 
   await logger.info(`Monitor started for pane ${pane} (claude PID: ${pid})`);
 
-  const tmuxAdapter = { capturePane, sendKeys, getPaneCommand, isClaudeForeground: () => isProcessForeground(pid) };
+  const tmuxAdapter = { capturePane, sendKeys, sendKey, getPaneCommand, isClaudeForeground: () => isProcessForeground(pid) };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
   const loop = async () => {
@@ -93,6 +123,12 @@ export async function startMonitor(pane, pid) {
         await logger.info(`Rate limit detected: "${state.lastRateLimitMessage}". Waiting ${secs}s...`);
         state.lastRateLimitMessage = null;
       }
+      if (result === 'menu-confirmed') {
+        const secs = Math.round((state.waitUntil - Date.now()) / 1000);
+        await logger.info(`Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
+        state.lastRateLimitMessage = null;
+      }
+      if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
       if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);

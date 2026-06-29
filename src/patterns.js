@@ -70,6 +70,40 @@ export function isRateLimited(text, customPatterns = []) {
   return false;
 }
 
+// --- Interactive /rate-limit-options menu ---
+// Newer Claude Code shows a selectable menu when a session/weekly limit is hit:
+//   What do you want to do?
+//   ❯ 1. Upgrade your plan
+//     2. Stop and wait for limit to reset
+// A bare Enter confirms the highlighted default — which is "Upgrade your plan"
+// on some versions. The option ORDER varies between versions, so we never assume
+// a position: we locate the cursor (❯) and the "Stop and wait" option and compute
+// the cursor moves needed to land on it.
+
+const MENU_CURSOR = '❯';
+const WAIT_OPTION_REGEX = /stop and wait for limit to reset/i;
+const MENU_OPTION_REGEX = /^\s*❯?\s*\d+\.\s/;
+
+export function isRateLimitOptionsPrompt(text) {
+  const t = stripAnsi(text);
+  return /what do you want to do\?/i.test(t)
+    && WAIT_OPTION_REGEX.test(t)
+    && (/enter to confirm/i.test(t) || /esc to cancel/i.test(t) || t.includes(MENU_CURSOR));
+}
+
+// Cursor moves to reach the "Stop and wait for limit to reset" option, counted in
+// option steps: positive => press Down N times, negative => Up, 0 => already there.
+// Returns null when the layout can't be read (no cursor or option not found); the
+// caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
+export function menuStepsToWaitOption(text) {
+  const optionLines = stripAnsi(text).split('\n').filter(l => MENU_OPTION_REGEX.test(l));
+  if (optionLines.length === 0) return null;
+  const cursorPos = optionLines.findIndex(l => l.includes(MENU_CURSOR));
+  const waitPos = optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
+  if (cursorPos === -1 || waitPos === -1) return null;
+  return waitPos - cursorPos;
+}
+
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
 
