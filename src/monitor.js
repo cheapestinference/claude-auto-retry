@@ -97,8 +97,19 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // it sits, confirm it, then enter the normal (hours-scale) wait state.
   if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped)
       && Date.now() >= (state._menuCooldownUntil || 0)) {
-    const steps = menuStepsToWaitOption(stripped);
     const cooldown = config.pollIntervalSeconds * 1000 * 2;
+
+    // Foreground safety: never send arrow/Enter keys unless Claude/node is the
+    // foreground process. Otherwise, if the user switched the pane to another app
+    // while the menu was up, we'd drive that app's UI instead.
+    const fgOk = await checkForeground(tmuxAdapter, pane, config);
+    if (!fgOk.ok) {
+      state._lastForeground = fgOk.fg;
+      state._menuCooldownUntil = Date.now() + cooldown;
+      return 'skipped-not-claude';
+    }
+
+    const steps = menuStepsToWaitOption(stripped);
     if (steps === null) {
       // Layout unreadable — refuse to press Enter (could confirm "Upgrade").
       state._menuCooldownUntil = Date.now() + cooldown;

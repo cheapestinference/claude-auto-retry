@@ -65,6 +65,15 @@ describe('processOneTick', () => {
     assert.equal(s.status, 'waiting');
   });
 
+  it('does not drive the menu when Claude is not in the foreground (#19 safety)', async () => {
+    // Menu is up, but some other app (vim) is focused and the process isn't fg.
+    const t = mockTmux(MENU_UPGRADE_FIRST, 'vim', false);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
+    assert.equal(t._keys.length, 0);   // pressed no menu keys
+    assert.notEqual(s.status, 'waiting');
+  });
+
   it('refuses to press Enter when the menu layout is unreadable (#19)', async () => {
     // Cursor marker absent → we cannot tell which option is highlighted.
     const noCursor = ['What do you want to do?', '  1. Upgrade your plan', '  2. Stop and wait for limit to reset', 'Enter to confirm'].join('\n');
