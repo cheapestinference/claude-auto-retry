@@ -49,8 +49,14 @@ function hasNearbyMatch(lines, idx, patterns) {
   return false;
 }
 
-export function isRateLimited(text, customPatterns = []) {
-  const lines = stripAnsi(text).split('\n');
+// tailLines > 0 restricts detection to the last N lines of the pane. A live usage-limit
+// banner sits at the prompt (the last thing printed); the same words quoted in scrollback
+// — a conversation discussing limits, a stale banner the session already moved past — are
+// NOT the current state and must not drive a retry. 0 = scan everything (print mode, where
+// the input is captured process output, not a scrolling TUI).
+export function isRateLimited(text, customPatterns = [], tailLines = 0) {
+  let lines = stripAnsi(text).split('\n');
+  if (tailLines > 0) lines = lines.slice(-tailLines);
 
   // Custom patterns: check full text (user controls their own regex)
   if (customPatterns.length > 0) {
