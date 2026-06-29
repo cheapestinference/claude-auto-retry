@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCaptureArgs, buildSendKeysArgs, buildDisplayArgs, parseTmuxVersion } from '../src/tmux.js';
+import { buildCaptureArgs, buildSendKeysArgs, buildSendTextArgs, buildSendEnterArgs, buildDisplayArgs, parseTmuxVersion, SUBMIT_DELAY_MS } from '../src/tmux.js';
 
 describe('buildCaptureArgs', () => {
   it('builds correct args', () => {
@@ -9,9 +9,31 @@ describe('buildCaptureArgs', () => {
   });
 });
 describe('buildSendKeysArgs', () => {
-  it('builds correct args with Enter', () => {
+  it('builds correct args with Enter (legacy single-call form)', () => {
     assert.deepEqual(buildSendKeysArgs('%3', 'hello world'),
       ['send-keys', '-t', '%3', 'hello world', 'Enter']);
+  });
+});
+describe('buildSendTextArgs', () => {
+  it('builds literal text-only send-keys args (no Enter)', () => {
+    assert.deepEqual(buildSendTextArgs('%3', 'hello world'),
+      ['send-keys', '-t', '%3', '-l', 'hello world']);
+  });
+  it('sends key-like words as literal text, not keypresses', () => {
+    assert.deepEqual(buildSendTextArgs('%3', 'press Enter to continue'),
+      ['send-keys', '-t', '%3', '-l', 'press Enter to continue']);
+  });
+});
+describe('buildSendEnterArgs', () => {
+  it('builds bare-Enter send-keys args', () => {
+    assert.deepEqual(buildSendEnterArgs('%3'),
+      ['send-keys', '-t', '%3', 'Enter']);
+  });
+});
+describe('SUBMIT_DELAY_MS', () => {
+  it('is a positive number giving Ink time to reconcile before Enter', () => {
+    assert.equal(typeof SUBMIT_DELAY_MS, 'number');
+    assert.ok(SUBMIT_DELAY_MS >= 50 && SUBMIT_DELAY_MS <= 1000);
   });
 });
 describe('buildDisplayArgs', () => {
