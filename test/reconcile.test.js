@@ -58,6 +58,13 @@ describe('planReconcile', () => {
     assert.equal(skipped.find(s => s.pane === '%2').reason, 'self (excluded)');
   });
 
+  it('honors an explicit exclude list (durable, e.g. from the systemd timer)', () => {
+    const { panes, processes } = fixture();
+    const { arm, skipped } = planReconcile({ panes, processes, running: new Map(), exclude: ['%1'] });
+    assert.deepEqual(arm, [{ pane: '%2', pid: 400 }]);
+    assert.equal(skipped.find(s => s.pane === '%1').reason, 'excluded');
+  });
+
   it('pane-id reuse: prefers the FOREGROUND claude when two share a pane', () => {
     // Two claudes resolve to pane %1 (pane-id was reused); only 201 is foreground ('+').
     const panes = [{ pane: '%1', panePid: 100 }];
