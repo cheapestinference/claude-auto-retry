@@ -78,6 +78,7 @@ When you disconnect (SSH drops, close terminal, laptop sleeps), **tmux keeps run
 - **Timezone-aware** — parses reset times with full IANA timezone support (including half-hour offsets)
 - **DST-safe** — iterative offset correction handles daylight saving transitions
 - **Safe send-keys** — verifies Claude is still the foreground process before injecting text
+- **Self-healing coverage** — `reconcile` re-arms monitors for any live `claude` session that lost one; an optional `systemd --user` timer runs it automatically ([details](#keeping-monitors-alive))
 - **Overload backoff** — detects sustained API overload (`429/500/502/503/504/529`) and retries on a configurable exponential backoff with jitter and a cumulative-wait cap, distinct from the usage-reset path ([details](#overload-backoff))
 - **Safeguard retry** — auto-continues past an AUP-safeguard false-positive (often transient), capped at a few tries so a sticky flag can't loop ([details](#safeguard-retry))
 - **tmux status bar indicator** — see at a glance whether a pane is being monitored, waiting on a reset, backing off from overload, or has given up ([details](#tmux-status-bar-indicator))
@@ -390,11 +391,22 @@ default `pollIntervalSeconds`) keeps the overload countdown responsive.
 ## CLI Commands
 
 ```bash
-claude-auto-retry install     # Install shell wrapper + tmux
-claude-auto-retry uninstall   # Remove shell wrapper
-claude-auto-retry status      # Show monitor activity + last log entries
-claude-auto-retry logs        # Tail today's log file in real-time
-claude-auto-retry version     # Print version
+claude-auto-retry install          # Install shell wrapper + tmux
+claude-auto-retry uninstall        # Remove shell wrapper
+claude-auto-retry status           # Show monitor activity + last log entries
+claude-auto-retry logs             # Tail today's log file in real-time
+claude-auto-retry version          # Print version
+
+# Event-driven overload detection (optional; see "Overload backoff")
+claude-auto-retry install-hook [dir]    # Install the StopFailure hook into a config dir
+claude-auto-retry uninstall-hook [dir]  # Remove it
+
+# Monitor coverage (see "Keeping monitors alive")
+claude-auto-retry reconcile        # Re-arm a monitor for every live claude pane not covered
+claude-auto-retry reconcile --dry-run   # Preview without arming
+claude-auto-retry install-timer    # systemd --user timer: run reconcile every 5 min
+claude-auto-retry uninstall-timer  # Remove the timer
+claude-auto-retry exclude-self     # Keep THIS session unmonitored (durable, self-expiring)
 ```
 
 ## For AI Agents
@@ -419,6 +431,31 @@ Notes for agents:
   back to defaults instead of crashing.
 - If the user runs multiple `CLAUDE_CONFIG_DIR`s, repeat `claude-auto-retry install-hook <path>` per dir.
 - Clean removal: `claude-auto-retry uninstall` and `claude-auto-retry uninstall-hook`.
+
+## Keeping monitors alive
+
+Each `claude` you launch through the wrapper gets its own background monitor. Monitors
+are detached processes with no supervising service, so if one is killed — or a `claude`
+is started outside the wrapper — that session ends up unmonitored, and only *new*
+sessions get a monitor. Two commands restore and maintain full coverage:
+
+- **`reconcile`** re-arms a monitor for every live tmux pane running `claude` that isn't
+  already covered. It maps each `claude` to its pane from live process state, skips
+  panes already monitored (idempotent — safe to run anytime), and handles tmux pane-id
+  reuse. Run it after a crash, or use `--dry-run` to see what it would do.
+- **`install-timer`** wires `reconcile` to a `systemd --user` timer that runs every 5
+  minutes, so a monitor that dies is re-armed within one interval — coverage self-heals
+  with no manual step. (Enable `loginctl enable-linger $USER` once if you want it to run
+  while logged out.)
+
+**Excluding a session.** To keep a specific session *unmonitored* (e.g. one where you're
+pasting rate-limit text and don't want any auto-retry), run `claude-auto-retry
+exclude-self` from inside it. This records the session's `claude` PID in
+`~/.claude-auto-retry/reconcile-exclude`; both `reconcile` and the timer skip it. Keying
+on the PID makes the entry **self-expiring** — once that `claude` exits it matches
+nothing, so it can never accidentally mute a later session (tmux reuses pane ids, so a
+pane-based exclude could). You can also hand-add a `%pane` id or a PID to that file.
+>>>>>>> 3113474 (docs(readme): document reconcile, install-timer, exclude-self + monitor coverage)
 
 ## Platform Support
 
@@ -505,7 +542,7 @@ npm link            # Install locally for testing
 
 ```
 claude-auto-retry/
-├── bin/cli.js              # CLI: install/uninstall/status/logs/version
+├── bin/cli.js              # CLI: install, hook, reconcile, timer, status, logs, ...
 ├── src/
 │   ├── patterns.js         # Rate limit + overload detection + ANSI stripping
 │   ├── time-parser.js      # Reset time parsing with timezone support
@@ -513,9 +550,12 @@ claude-auto-retry/
 │   ├── logger.js           # File-based logging with rotation
 │   ├── tmux.js             # tmux command wrappers (execFile-based)
 │   ├── monitor.js          # Core monitoring loop + retry logic (usage + overload paths)
+│   ├── events.js           # StopFailure hook event channel (scrape-free overload trigger)
+│   ├── reconcile.js        # Re-arm monitors for all live claude panes + exclusion
 │   ├── launcher.js         # Process orchestration + signal forwarding
 │   └── wrapper.sh          # Shell function template
-├── test/                   # 128 tests across 8 test files
+├── systemd/                # systemd --user units for the reconcile timer
+├── test/                   # tests across the src modules
 ├── package.json
 ├── LICENSE
 └── README.md
