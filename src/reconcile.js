@@ -11,11 +11,26 @@
 
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 
 const execFile = promisify(execFileCb);
 const MONITOR_PATH = join(dirname(fileURLToPath(import.meta.url)), 'monitor.js');
+
+// Panes to never auto-monitor (one pane id per line, e.g. "%2"). Honored by BOTH
+// interactive reconcile and the systemd timer — the timer has no $TMUX_PANE, so a
+// durable file is the only way to keep a specific pane unmonitored. Note: tmux reuses
+// pane ids, so an entry can go stale; it's a deliberate per-pane opt-out, not permanent.
+export const EXCLUDE_FILE = join(homedir(), '.claude-auto-retry', 'reconcile-exclude');
+
+async function readExcludeFile(path = EXCLUDE_FILE) {
+  try {
+    return (await readFile(path, 'utf-8'))
+      .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  } catch { return []; }
+}
 
 const CLAUDE_COMMANDS = ['claude', 'node'];  // pane_current_command / comm can be either
 
@@ -67,9 +82,11 @@ function paneForPid(pid, byPid, panePidToPane) {
 // resolves to the same pane, prefer the foreground one (stat contains '+').
 //
 // Returns { arm: [{pane, pid, cwdHint?}], skipped: [{pane, pid, reason}] }.
-export function planReconcile({ panes, processes, running, selfPane = null }) {
+export function planReconcile({ panes, processes, running, selfPane = null, exclude = [] }) {
   const byPid = new Map(processes.map(p => [p.pid, p]));
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
+  const excluded = new Set(exclude);
+  if (selfPane) excluded.add(selfPane);
 
   // Every claude/node process that is claude (comm === 'claude'); map to its pane.
   const claudes = processes.filter(p => p.comm === 'claude');
@@ -83,8 +100,8 @@ export function planReconcile({ panes, processes, running, selfPane = null }) {
 
   const arm = [], skipped = [];
   for (const [pane, procs] of byPane) {
-    if (selfPane && pane === selfPane) {
-      skipped.push({ pane, pid: procs[0].pid, reason: 'self (excluded)' });
+    if (excluded.has(pane)) {
+      skipped.push({ pane, pid: procs[0].pid, reason: pane === selfPane ? 'self (excluded)' : 'excluded' });
       continue;
     }
     // Pane-id reuse: pick the foreground claude ('+' in stat), else the highest pid
@@ -132,7 +149,8 @@ function armMonitor(pane, pid) {
 // so reconciling from inside a session doesn't monitor its own pane.
 export async function reconcile({ selfPane = process.env.TMUX_PANE || null, dryRun = false } = {}) {
   const { panes, processes, running } = await gather();
-  const plan = planReconcile({ panes, processes, running, selfPane });
+  const exclude = await readExcludeFile();
+  const plan = planReconcile({ panes, processes, running, selfPane, exclude });
   const armed = [];
   if (!dryRun) {
     for (const { pane, pid } of plan.arm) {
