@@ -58,11 +58,33 @@ describe('planReconcile', () => {
     assert.equal(skipped.find(s => s.pane === '%2').reason, 'self (excluded)');
   });
 
-  it('honors an explicit exclude list (durable, e.g. from the systemd timer)', () => {
+  it('honors a pane-id exclude entry', () => {
     const { panes, processes } = fixture();
     const { arm, skipped } = planReconcile({ panes, processes, running: new Map(), exclude: ['%1'] });
     assert.deepEqual(arm, [{ pane: '%2', pid: 400 }]);
-    assert.equal(skipped.find(s => s.pane === '%1').reason, 'excluded');
+    assert.equal(skipped.find(s => s.pane === '%1').reason, 'excluded (pane)');
+  });
+
+  it('honors a claude-PID exclude entry (reuse-proof form)', () => {
+    const { panes, processes } = fixture();
+    // Exclude by the claude PID (400 = the %2 session), not the pane.
+    const { arm, skipped } = planReconcile({ panes, processes, running: new Map(), exclude: ['400'] });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+    assert.equal(skipped.find(s => s.pane === '%2').reason, 'excluded (pid)');
+  });
+
+  it('a PID exclude matches the FOREGROUND claude after pane-id reuse', () => {
+    // Pane %1 reused: background claude 200 (old, excluded) + foreground 201 (current).
+    // Excluding pane %1 would wrongly mute the new session; excluding PID 200 does not.
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Ssl', comm: 'claude' },
+      { pid: 201, ppid: 100, stat: 'Sl+', comm: 'claude' },
+    ];
+    // target resolves to foreground 201; excluding old PID 200 must NOT skip it.
+    const { arm } = planReconcile({ panes, processes, running: new Map(), exclude: ['200'] });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 201 }]);
   });
 
   it('pane-id reuse: prefers the FOREGROUND claude when two share a pane', () => {
