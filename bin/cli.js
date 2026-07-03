@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
-import { reconcile } from '../src/reconcile.js';
+import { reconcile, excludeSelf } from '../src/reconcile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -318,6 +318,25 @@ async function cmdUninstallTimer() {
   console.log('Timer removed. (Already-running monitors are unaffected.)');
 }
 
+// Durably exclude the current session from auto-monitoring (by its claude PID, which
+// is self-expiring and immune to tmux pane-id reuse). Run from inside the session.
+async function cmdExcludeSelf() {
+  const r = await excludeSelf();
+  if (!r.ok) { console.error(`exclude-self: ${r.reason}`); process.exit(1); }
+  console.log(r.already
+    ? `Already excluded (claude PID ${r.pid}, pane ${r.pane}).`
+    : `Excluded this session: claude PID ${r.pid} (pane ${r.pane}). reconcile/timer will skip it.`);
+  console.log('The entry self-expires when this claude exits (no cleanup needed).');
+  // Kill any monitor already covering this pane so exclusion takes effect immediately.
+  try {
+    const out = execFileSync('pgrep', ['-af', `src/monitor\\.js ${r.pane} ${r.pid}`], { encoding: 'utf-8' });
+    for (const line of out.split('\n')) {
+      const mpid = line.trim().split(/\s+/)[0];
+      if (mpid && /^\d+$/.test(mpid)) { try { process.kill(Number(mpid)); console.log(`Stopped existing monitor ${mpid}.`); } catch {} }
+    }
+  } catch { /* no monitor running for this pane — nothing to stop */ }
+}
+
 // Re-arm a monitor for every live tmux pane running claude that isn't already covered.
 // Restores coverage after a crash/kill or for sessions started outside the wrapper.
 async function cmdReconcile() {
@@ -362,6 +381,7 @@ switch (command) {
   case 'uninstall-hook': await cmdUninstallHook(); break;
   case HOOK_MARKER: await cmdStopFailureHook(); break;
   case 'reconcile': await cmdReconcile(); break;
+  case 'exclude-self': await cmdExcludeSelf(); break;
   case 'install-timer': await cmdInstallTimer(); break;
   case 'uninstall-timer': await cmdUninstallTimer(); break;
   case 'status': await cmdStatus(); break;
@@ -379,6 +399,8 @@ switch (command) {
     console.log('  claude-auto-retry reconcile          Re-arm a monitor for every live tmux');
     console.log('                                       claude session not already covered');
     console.log('                                       (--dry-run to preview). Run after a crash.');
+    console.log('  claude-auto-retry exclude-self       Keep THIS session unmonitored (durable,');
+    console.log('                                       by claude PID; self-expires on exit)');
     console.log('  claude-auto-retry install-timer      Install a systemd --user timer that runs');
     console.log('                                       reconcile every 5 min (self-healing coverage)');
     console.log('  claude-auto-retry uninstall-timer    Remove the reconcile timer');

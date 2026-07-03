@@ -19,16 +19,27 @@ import { homedir } from 'node:os';
 const execFile = promisify(execFileCb);
 const MONITOR_PATH = join(dirname(fileURLToPath(import.meta.url)), 'monitor.js');
 
-// Panes to never auto-monitor (one pane id per line, e.g. "%2"). Honored by BOTH
-// interactive reconcile and the systemd timer — the timer has no $TMUX_PANE, so a
-// durable file is the only way to keep a specific pane unmonitored. Note: tmux reuses
-// pane ids, so an entry can go stale; it's a deliberate per-pane opt-out, not permanent.
+// Sessions to never auto-monitor. Honored by BOTH interactive reconcile and the systemd
+// timer (the timer has no $TMUX_PANE, so a durable file is the only self-exclusion path).
+// One entry per line; two forms:
+//   <pid>   e.g. "1842917" — the claude PID. PREFERRED: unique while alive and
+//                            SELF-EXPIRING — once that claude exits the entry matches no
+//                            live process, so it can never mute a different future
+//                            session. Immune to tmux pane-id reuse. Written by
+//                            `exclude-self`.
+//   %<pane> e.g. "%2"       — a tmux pane id. Convenient to hand-edit, but tmux REUSES
+//                            pane ids, so a stale entry can silently mute a later,
+//                            unrelated session in that pane. Prefer the PID form.
+// '#' comments and blank lines are ignored.
 export const EXCLUDE_FILE = join(homedir(), '.claude-auto-retry', 'reconcile-exclude');
 
 async function readExcludeFile(path = EXCLUDE_FILE) {
   try {
     return (await readFile(path, 'utf-8'))
-      .split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('#'))
+      .map(l => l.split(/[\s#]/)[0]);  // take the first token; allow "1234  # note"
   } catch { return []; }
 }
 
@@ -100,14 +111,20 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 
   const arm = [], skipped = [];
   for (const [pane, procs] of byPane) {
-    if (excluded.has(pane)) {
-      skipped.push({ pane, pid: procs[0].pid, reason: pane === selfPane ? 'self (excluded)' : 'excluded' });
-      continue;
-    }
     // Pane-id reuse: pick the foreground claude ('+' in stat), else the highest pid
     // (most-recently-started) as a stable tiebreak.
     let target = procs.find(p => p.stat.includes('+'));
     if (!target) target = procs.slice().sort((a, b) => b.pid - a.pid)[0];
+
+    // Exclusion matches either the claude PID (preferred — self-expiring, reuse-proof)
+    // or the pane id. PID is checked against the resolved target so it survives pane
+    // reuse; pane match is the convenience form.
+    if (excluded.has(String(target.pid)) || excluded.has(pane)) {
+      const reason = pane === selfPane ? 'self (excluded)'
+        : excluded.has(String(target.pid)) ? 'excluded (pid)' : 'excluded (pane)';
+      skipped.push({ pane, pid: target.pid, reason });
+      continue;
+    }
 
     if (running.has(`${pane} ${target.pid}`)) {
       skipped.push({ pane, pid: target.pid, reason: 'already monitored' });
@@ -159,4 +176,32 @@ export async function reconcile({ selfPane = process.env.TMUX_PANE || null, dryR
     }
   }
   return { armed: dryRun ? plan.arm : armed, skipped: plan.skipped, dryRun };
+}
+
+// Resolve the claude PID for a given pane from live process state (same mapping
+// reconcile uses). Returns the foreground claude's pid, or null.
+export async function claudePidForPane(pane) {
+  if (!pane) return null;
+  const { panes, processes } = await gather();
+  const byPid = new Map(processes.map(p => [p.pid, p]));
+  const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
+  const here = processes.filter(p => p.comm === 'claude'
+    && paneForPid(p.pid, byPid, panePidToPane) === pane);
+  if (here.length === 0) return null;
+  return (here.find(p => p.stat.includes('+')) ?? here.sort((a, b) => b.pid - a.pid)[0]).pid;
+}
+
+// Durably exclude the CURRENT session from auto-monitoring by appending its claude PID
+// (self-expiring, reuse-proof) to the exclude file. Run from inside the session.
+export async function excludeSelf(pane = process.env.TMUX_PANE || null, path = EXCLUDE_FILE) {
+  if (!pane) return { ok: false, reason: 'not inside tmux ($TMUX_PANE unset)' };
+  const pid = await claudePidForPane(pane);
+  if (!pid) return { ok: false, reason: `no claude process found for pane ${pane}` };
+  const existing = await readExcludeFile(path);
+  if (existing.includes(String(pid))) return { ok: true, pane, pid, already: true };
+  const { mkdir } = await import('node:fs/promises');
+  const { appendFile } = await import('node:fs/promises');
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, `${pid}\t# pane ${pane}, excluded by exclude-self\n`);
+  return { ok: true, pane, pid };
 }
