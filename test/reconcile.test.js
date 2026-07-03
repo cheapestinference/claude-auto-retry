@@ -1,0 +1,105 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  parsePanes, parseProcesses, parseRunningMonitors, planReconcile,
+} from '../src/reconcile.js';
+
+describe('reconcile parsing', () => {
+  it('parses tmux pane list', () => {
+    const p = parsePanes('%1 460807\n%10 1642861\n\n');
+    assert.deepEqual(p, [{ pane: '%1', panePid: 460807 }, { pane: '%10', panePid: 1642861 }]);
+  });
+  it('parses ps output with multi-word comm', () => {
+    const p = parseProcesses('1842917 460471 Sl+ claude\n460471 1 Ss bash\n');
+    assert.deepEqual(p[0], { pid: 1842917, ppid: 460471, stat: 'Sl+', comm: 'claude' });
+  });
+  it('extracts covered pane/pid keys from pgrep output', () => {
+    const c = parseRunningMonitors('1866839 node /x/src/monitor.js %1 2453159\n1866840 node /x/src/monitor.js %10 1842917\n');
+    assert.equal(c.get('%1 2453159'), 1866839);
+    assert.equal(c.get('%10 1842917'), 1866840);
+    assert.equal(c.size, 2);
+  });
+  it('empty pgrep output → no covered', () => assert.equal(parseRunningMonitors('').size, 0));
+});
+
+// A small fixture: pane %1 (pane_pid 100) has a claude (200) as a child; pane %2 (300)
+// has a claude (400). Process tree links claude→shell(pane_pid).
+function fixture() {
+  const panes = [{ pane: '%1', panePid: 100 }, { pane: '%2', panePid: 300 }];
+  const processes = [
+    { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+    { pid: 200, ppid: 100, stat: 'Sl+', comm: 'claude' },
+    { pid: 300, ppid: 1, stat: 'Ss', comm: 'bash' },
+    { pid: 400, ppid: 300, stat: 'Sl+', comm: 'claude' },
+  ];
+  return { panes, processes };
+}
+
+describe('planReconcile', () => {
+  it('arms a monitor for each live claude pane', () => {
+    const { panes, processes } = fixture();
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm.sort((a, b) => a.pane < b.pane ? -1 : 1),
+      [{ pane: '%1', pid: 200 }, { pane: '%2', pid: 400 }]);
+  });
+
+  it('skips a pane that already has a monitor', () => {
+    const { panes, processes } = fixture();
+    const running = parseRunningMonitors('9 node src/monitor.js %1 200\n');
+    const { arm, skipped } = planReconcile({ panes, processes, running });
+    assert.deepEqual(arm, [{ pane: '%2', pid: 400 }]);
+    assert.equal(skipped.find(s => s.pane === '%1').reason, 'already monitored');
+  });
+
+  it('never arms the self pane', () => {
+    const { panes, processes } = fixture();
+    const { arm, skipped } = planReconcile({ panes, processes, running: new Map(), selfPane: '%2' });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+    assert.equal(skipped.find(s => s.pane === '%2').reason, 'self (excluded)');
+  });
+
+  it('pane-id reuse: prefers the FOREGROUND claude when two share a pane', () => {
+    // Two claudes resolve to pane %1 (pane-id was reused); only 201 is foreground ('+').
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Ssl', comm: 'claude' },   // background
+      { pid: 201, ppid: 100, stat: 'Sl+', comm: 'claude' },   // foreground
+    ];
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 201 }]);
+  });
+
+  it('pane-id reuse with no foreground marker: falls back to the highest pid', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Ssl', comm: 'claude' },
+      { pid: 250, ppid: 100, stat: 'Ssl', comm: 'claude' },
+    ];
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 250 }]);
+  });
+
+  it('ignores non-claude panes and panes with no claude', () => {
+    const panes = [{ pane: '%1', panePid: 100 }, { pane: '%9', panePid: 900 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Sl+', comm: 'claude' },
+      { pid: 900, ppid: 1, stat: 'Ss+', comm: 'vim' },       // %9 runs vim, no claude
+    ];
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+  });
+
+  it('resolves a claude nested several levels below the pane shell', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 150, ppid: 100, stat: 'Sl', comm: 'node' },     // wrapper/launcher
+      { pid: 200, ppid: 150, stat: 'Sl+', comm: 'claude' },  // actual claude
+    ];
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+  });
+});

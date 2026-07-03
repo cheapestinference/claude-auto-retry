@@ -8,6 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
+import { reconcile } from '../src/reconcile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -265,6 +266,31 @@ async function cmdUninstallHook() {
   } catch { console.log('No settings file to modify.'); }
 }
 
+// Re-arm a monitor for every live tmux pane running claude that isn't already covered.
+// Restores coverage after a crash/kill or for sessions started outside the wrapper.
+async function cmdReconcile() {
+  const dryRun = process.argv.includes('--dry-run');
+  let result;
+  try {
+    result = await reconcile({ dryRun });
+  } catch (err) {
+    console.error(`reconcile failed: ${err.message}`);
+    console.error('(needs a running tmux server; run from a machine with your claude sessions)');
+    process.exit(1);
+  }
+  const { armed, skipped } = result;
+  if (armed.length === 0 && skipped.length === 0) {
+    console.log('No tmux panes running claude found. Nothing to reconcile.');
+    return;
+  }
+  if (armed.length) {
+    console.log(dryRun ? `Would arm ${armed.length} monitor(s):` : `Armed ${armed.length} monitor(s):`);
+    for (const a of armed) console.log(`  ${a.pane} → claude ${a.pid}${a.monitorPid ? ` (monitor ${a.monitorPid})` : ''}`);
+  }
+  for (const s of skipped) console.log(`  ${s.pane} → claude ${s.pid}: skipped (${s.reason})`);
+  if (armed.length === 0) console.log('All live claude sessions already monitored.');
+}
+
 async function cmdVersion() {
   try {
     const pkg = JSON.parse(await readFile(join(__dirname, '..', 'package.json'), 'utf-8'));
@@ -283,6 +309,7 @@ switch (command) {
   case 'install-hook': await cmdInstallHook(); break;
   case 'uninstall-hook': await cmdUninstallHook(); break;
   case HOOK_MARKER: await cmdStopFailureHook(); break;
+  case 'reconcile': await cmdReconcile(); break;
   case 'status': await cmdStatus(); break;
   case 'logs': await cmdLogs(); break;
   case 'version': case '--version': case '-v': await cmdVersion(); break;
@@ -295,6 +322,9 @@ switch (command) {
     console.log('                                       overload detection) into <dir>/settings.json');
     console.log('                                       (default: $CLAUDE_CONFIG_DIR or ~/.claude)');
     console.log('  claude-auto-retry uninstall-hook [dir]  Remove the StopFailure hook');
+    console.log('  claude-auto-retry reconcile          Re-arm a monitor for every live tmux');
+    console.log('                                       claude session not already covered');
+    console.log('                                       (--dry-run to preview). Run after a crash.');
     console.log('  claude-auto-retry status             Show monitor status');
     console.log('  claude-auto-retry logs               Tail today\'s log');
     console.log('  claude-auto-retry version            Print version');
