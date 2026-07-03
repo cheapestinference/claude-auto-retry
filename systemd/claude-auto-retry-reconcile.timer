@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically reconcile claude-auto-retry monitors (self-healing coverage)
+Documentation=https://github.com/cheapestinference/claude-auto-retry
+
+[Timer]
+# First run shortly after the user session comes up (lets tmux settle)...
+OnStartupSec=2min
+# ...then every 5 min. A monitor that dies is re-armed within one interval; a
+# crash mid-window loses at most ~5 min of coverage on that pane.
+OnUnitActiveSec=5min
+# Catch up on a missed run (e.g. box asleep) instead of waiting a full interval.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

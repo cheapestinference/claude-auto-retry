@@ -266,6 +266,58 @@ async function cmdUninstallHook() {
   } catch { console.log('No settings file to modify.'); }
 }
 
+// --- systemd --user timer (self-healing monitor coverage) ---
+
+const SYSTEMD_DIR = join(SRC_DIR, '..', 'systemd');
+const UNIT_SERVICE = 'claude-auto-retry-reconcile.service';
+const UNIT_TIMER = 'claude-auto-retry-reconcile.timer';
+
+function userUnitDir() {
+  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user');
+}
+
+// Install the reconcile service+timer into the systemd --user unit dir, substituting the
+// node and CLI paths, then enable+start the timer. Makes monitor coverage self-healing:
+// every 5 min a missing monitor is re-armed. Requires systemd --user (Linux).
+async function cmdInstallTimer() {
+  const dest = userUnitDir();
+  await mkdir(dest, { recursive: true });
+  const nodePath = process.execPath;
+  const cliPath = __filename;
+
+  const svc = (await readFile(join(SYSTEMD_DIR, UNIT_SERVICE), 'utf-8'))
+    .replace(/__NODE_PATH__/g, nodePath)
+    .replace(/__CLI_PATH__/g, cliPath);
+  await writeFile(join(dest, UNIT_SERVICE), svc);
+  await writeFile(join(dest, UNIT_TIMER), await readFile(join(SYSTEMD_DIR, UNIT_TIMER), 'utf-8'));
+
+  try {
+    execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
+    execFileSync('systemctl', ['--user', 'enable', '--now', UNIT_TIMER], { stdio: 'inherit' });
+  } catch {
+    console.error(`\nUnits written to ${dest} but enabling failed. Enable manually:`);
+    console.error(`  systemctl --user daemon-reload && systemctl --user enable --now ${UNIT_TIMER}`);
+    process.exit(1);
+  }
+  console.log(`\nTimer installed and started. Monitor coverage now self-heals every 5 min.`);
+  console.log(`  status:  systemctl --user status ${UNIT_TIMER}`);
+  console.log(`  next run: systemctl --user list-timers ${UNIT_TIMER}`);
+  console.log(`  tip: for the timer to run while logged out, enable lingering once:`);
+  console.log(`       loginctl enable-linger $USER`);
+}
+
+async function cmdUninstallTimer() {
+  try {
+    execFileSync('systemctl', ['--user', 'disable', '--now', UNIT_TIMER], { stdio: 'inherit' });
+  } catch { /* not enabled — fine */ }
+  const dest = userUnitDir();
+  for (const u of [UNIT_TIMER, UNIT_SERVICE]) {
+    try { await (await import('node:fs/promises')).unlink(join(dest, u)); } catch { /* absent */ }
+  }
+  try { execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' }); } catch { /* ignore */ }
+  console.log('Timer removed. (Already-running monitors are unaffected.)');
+}
+
 // Re-arm a monitor for every live tmux pane running claude that isn't already covered.
 // Restores coverage after a crash/kill or for sessions started outside the wrapper.
 async function cmdReconcile() {
@@ -310,6 +362,8 @@ switch (command) {
   case 'uninstall-hook': await cmdUninstallHook(); break;
   case HOOK_MARKER: await cmdStopFailureHook(); break;
   case 'reconcile': await cmdReconcile(); break;
+  case 'install-timer': await cmdInstallTimer(); break;
+  case 'uninstall-timer': await cmdUninstallTimer(); break;
   case 'status': await cmdStatus(); break;
   case 'logs': await cmdLogs(); break;
   case 'version': case '--version': case '-v': await cmdVersion(); break;
@@ -325,6 +379,9 @@ switch (command) {
     console.log('  claude-auto-retry reconcile          Re-arm a monitor for every live tmux');
     console.log('                                       claude session not already covered');
     console.log('                                       (--dry-run to preview). Run after a crash.');
+    console.log('  claude-auto-retry install-timer      Install a systemd --user timer that runs');
+    console.log('                                       reconcile every 5 min (self-healing coverage)');
+    console.log('  claude-auto-retry uninstall-timer    Remove the reconcile timer');
     console.log('  claude-auto-retry status             Show monitor status');
     console.log('  claude-auto-retry logs               Tail today\'s log');
     console.log('  claude-auto-retry version            Print version');
