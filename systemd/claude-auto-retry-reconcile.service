@@ -1,0 +1,16 @@
+[Unit]
+Description=claude-auto-retry: re-arm monitors for all live claude tmux panes
+Documentation=https://github.com/cheapestinference/claude-auto-retry
+# Only meaningful once a graphical/user session (and thus the tmux server) exists.
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+# CRITICAL: reconcile spawns DETACHED monitor processes and exits. The default
+# KillMode=control-group would SIGKILL those monitors as soon as this oneshot
+# finishes (they share the unit's cgroup). KillMode=process kills only the main
+# reconcile process, leaving the freshly-armed monitors running.
+KillMode=process
+# __NODE_PATH__ and __CLI_PATH__ are substituted by `claude-auto-retry install-timer`.
+ExecStart=__NODE_PATH__ __CLI_PATH__ reconcile
+# tmux is reached via its default socket (/tmp/tmux-<uid>/default); no $TMUX needed.
