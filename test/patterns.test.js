@@ -86,6 +86,36 @@ describe('isRateLimited', () => {
   it('still detects "You\'ve hit your 5-hour limit" (no qualifier regression)', () => {
     assert.equal(isRateLimited("You've hit your 5-hour limit · resets 3pm (UTC)"), true);
   });
+
+  // --- Chrome-aware tail (tailLines > 0): a live banner pushed up by UI furniture is
+  //     still found; a stale/quoted banner with real work below it is not. ---
+  const withChrome = (banner) => [
+    banner,
+    "     /usage-credits to finish what you're working on.",
+    '', '✻ Brewed for 12m 3s', '',
+    '  8 tasks (4 done, 1 in progress, 3 open)',
+    '  ◼ a', '  □ b', '  □ c', '  ✓ d', '   … +3 completed',
+    '  new task? /clear to save 300k tokens',
+    '', '──────', '❯ ', '──────',
+    '  Opus 4.8 | repo@dev | v2.1.201', '  ⏵⏵ auto mode on',
+  ].join('\n');
+  it('finds a banner buried behind a task widget + input box (tail=12)', () => {
+    assert.equal(isRateLimited(withChrome("You've hit your session limit · resets 2am (Europe/Zurich)"), [], 12), true);
+  });
+  it('finds it via the /usage-credits companion even without the reset on the banner line', () => {
+    const pane = ['Ran 1 shell command', '  └ Session limit hit',
+      '     /usage-credits to finish what you\'re working on. resets 2am',
+      '', '  8 tasks', '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
+  it('does NOT fire on a quoted banner with real work below it (tail=12)', () => {
+    const pane = ["You've hit your session limit · resets 3pm (UTC)",
+      ...Array(15).fill('● wrote some code'), '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('full scan (tailLines=0, print mode) is unaffected by chrome logic', () => {
+    assert.equal(isRateLimited("You've hit your session limit · resets 3pm (UTC)", [], 0), true);
+  });
 });
 
 describe('stripAnsi (private-mode sequences)', () => {
