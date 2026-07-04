@@ -103,7 +103,10 @@ function enterOverload(state, overload, rand) {
 export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, rand = Math.random) {
   if (!isAlive()) return 'exit';
 
-  const raw = await tmuxAdapter.capturePane(pane, 20);
+  // Capture generously (was 20): a live banner can sit far above the bottom behind a tall
+  // task widget + input box + footer. The detectors chrome-strip and tail-window this, so
+  // extra lines are free headroom; 50 clears a large widget with margin.
+  const raw = await tmuxAdapter.capturePane(pane, 50);
   const stripped = stripAnsi(raw);
   const overload = config.overload;
 
