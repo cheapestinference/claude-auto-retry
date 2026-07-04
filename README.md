@@ -135,6 +135,13 @@ They may flag safe, normal content as well. … Claude Code can't respond to thi
 
 Custom patterns can be added via config for future message format changes.
 
+Detection is **chrome-aware**: it looks at the live bottom of the pane, but first skips
+past Claude Code's UI furniture — the input box, footer, key hints, the todo/task widget,
+the status spinner, and the `/usage-credits` hint. So a genuine limit banner still
+registers even when a tall task list or background-agent status pushes it well above the
+prompt, while a banner merely *quoted* in scrollback (with real output below it) does not
+trigger a retry.
+
 ## Configuration
 
 Optional. Create `~/.claude-auto-retry.json`:

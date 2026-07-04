@@ -17,6 +17,46 @@ export function stripAnsi(text) {
     .replace(CSI_REGEX, '');
 }
 
+// --- Chrome-aware tail ---
+// Claude Code renders UI chrome BELOW the meaningful content: the input box, the footer
+// (model/usage/version), key hints, the todo/task widget, the status spinner
+// ("✻ Brewed for …"), background-agent notices, and the "/usage-credits" hint. A live
+// error/limit banner sits ABOVE this chrome, so when there's a lot of it — e.g. a tall
+// task list — the banner is pushed well up the pane. A fixed last-N-lines tail then
+// scrolls right past a genuine banner (observed: a session-limit banner ~16 lines up
+// behind a task widget went undetected for ~54 min). Stripping trailing chrome first
+// makes the tail measure distance-in-CONTENT, not raw lines — which also keeps the
+// scrollback false-positive fixed (real work below a quoted banner is NOT chrome, so it
+// isn't stripped and the stale banner stays out of the window).
+//
+// NOTE: the working footer ("… (esc to interrupt)") is deliberately NOT treated as
+// chrome — isWorking must still see it — so it uses the raw tail, not this one.
+const CHROME_LINE = [
+  /^\s*$/,                                          // blank
+  /^[\s─│╭╮╰╯┌┐└┘├┤┬┴┼▏▕|]+$/,                       // box-drawing / rules
+  /^\s*[❯>]\s*$/,                                    // empty input prompt
+  /\bauto mode\b/i,                                 // footer: "⏵⏵ auto mode on…"
+  /\bv\d+\.\d+\.\d+\b/,                             // footer: version segment
+  /(?:ctrl|shift)\s*\+|shift\+tab|↑|↓|←|→|\bctrl\+o\b|\/rc\b/i, // key hints / footer glyphs
+  /^\s*[□◻■◼▢▪◽◾✓✔☐☑]\s+\S/,                          // todo/task items (checkbox glyphs only —
+                                                     // NOT ·/• which also separate "· resets 3pm")
+  /^\s*\d+\s+tasks?\b/i,                             // task widget header ("8 tasks (…)")
+  /^\s*…\s*\+\d+\b/,                                 // "… +N completed"
+  /new task\?|\/clear to save/i,                     // "new task? /clear to save …k tokens"
+  /\/usage-credits\b/i,                              // live-limit companion hint
+  /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
+  /Backgrounded agent|to manage · |Allowed by auto mode/i, // background-agent notices
+];
+const isChromeLine = (l) => CHROME_LINE.some((r) => r.test(l));
+
+// Last `n` lines AFTER dropping trailing chrome, so a tall widget / input box below a
+// banner doesn't consume the window budget. Operates on an array of already-split lines.
+function contentTail(lines, n) {
+  let end = lines.length;
+  while (end > 0 && isChromeLine(lines[end - 1])) end--;
+  return lines.slice(Math.max(0, end - n), end);
+}
+
 // Claude Code renders rate limits across multiple lines in its TUI, e.g.:
 //   "⚠ You've hit your limit"
 //   "· resets 3pm (UTC)"
@@ -54,15 +94,37 @@ function hasNearbyMatch(lines, idx, patterns) {
 // — a conversation discussing limits, a stale banner the session already moved past — are
 // NOT the current state and must not drive a retry. 0 = scan everything (print mode, where
 // the input is captured process output, not a scrolling TUI).
-export function isRateLimited(text, customPatterns = [], tailLines = 0) {
-  let lines = stripAnsi(text).split('\n');
-  if (tailLines > 0) lines = lines.slice(-tailLines);
+// The companion line Claude Code prints directly under a LIVE session/usage-limit banner.
+// It's a distinctive UI string (not something quoted casually), so finding it next to a
+// reset/limit line is a high-confidence live-limit signal even when a tall widget pushed
+// the banner past the content tail — a backstop against the chrome allowlist missing a
+// future UI element.
+const USAGE_CREDITS = /\/usage-credits\b/i;
 
-  // Custom patterns: check full text (user controls their own regex)
+export function isRateLimited(text, customPatterns = [], tailLines = 0) {
+  const all = stripAnsi(text).split('\n');
+  // Chrome-aware window: trailing UI furniture doesn't consume the tail budget.
+  const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
+
+  // Custom patterns: check the window text (user controls their own regex)
   if (customPatterns.length > 0) {
     const full = lines.join('\n');
     const custom = customPatterns.map(p => typeof p === 'string' ? new RegExp(p, 'i') : p);
     if (custom.some(p => p.test(full))) return true;
+  }
+
+  // Backstop for the modern render: a live limit prints "/usage-credits to finish…" right
+  // by the banner. Scan a wider raw window for it adjacent to a limit/reset line, so a
+  // banner buried behind an unrecognized widget is still caught. (Only when tail-scoped;
+  // print mode uses the full scan below.)
+  if (tailLines > 0) {
+    const wide = all.slice(-Math.max(tailLines * 3, 40));
+    for (let i = 0; i < wide.length; i++) {
+      if (USAGE_CREDITS.test(wide[i])
+          && (hasNearbyMatch(wide, i, RESET_PATTERNS) || hasNearbyMatch(wide, i, LIMIT_PATTERNS))) {
+        return true;
+      }
+    }
   }
 
   // Find a "limit" line with a "resets" line nearby (works for both
@@ -153,7 +215,16 @@ const WORKING_PATTERNS = [
   /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
 ];
 
+// Chrome-aware tail for the error/limit detectors: a terminal error can be pushed up by
+// the same widgets that pushed the limit banner, so strip trailing chrome first.
 function tail(text) {
+  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES);
+}
+
+// Raw tail (no chrome-strip) for isWorking: the working footer "… (esc to interrupt)"
+// and the "✻ … Retrying" indicator would otherwise be stripped as chrome, and isWorking
+// MUST still see them (they mean "do not act — Claude is mid-flight").
+function rawTail(text) {
   return stripAnsi(text).split('\n').slice(-OVERLOAD_TAIL_LINES);
 }
 
@@ -225,7 +296,7 @@ export function detectSafeguard(text, patterns = []) {
 }
 
 export function isWorking(text) {
-  const lines = tail(text);
+  const lines = rawTail(text);
   return lines.some(line => WORKING_PATTERNS.some(p => p.test(line)));
 }
 

@@ -163,6 +163,39 @@ describe('processOneTick', () => {
     const s = createMonitorState();
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
   });
+
+  // --- Regression: a LIVE limit banner pushed far up the pane by UI chrome (a tall task
+  //     widget + input box + footer) must still be detected. Observed live: a session-limit
+  //     banner ~16 lines up behind a task list went unretried for ~54 min because the fixed
+  //     12-line tail never reached it. Chrome-aware tail strips trailing furniture first. ---
+  it('detects a live limit banner buried behind a task widget + input box + footer', async () => {
+    const pane = [
+      '● Agent "Map LI drop-point" finished · 1m 5s',
+      "  └ You've hit your session limit · resets 2am (Europe/Zurich)",
+      "     /usage-credits to finish what you're working on.",
+      '',
+      '✻ Brewed for 54m 35s',
+      '',
+      '  8 tasks (4 done, 1 in progress, 3 open)',
+      '  ◼ FU-4(b): build + run per-order re-drive over remnant',
+      '  □ FU-4(a): cache OD inventory map per country',
+      '  □ FU-1: analyze tax-free/reverse-charge COGS netting',
+      '  □ FU-2: LI routing gap fix',
+      '  ✓ Restore sqlrun webhook for DB queries',
+      '   … +3 completed',
+      '                              new task? /clear to save 468.1k tokens',
+      '',
+      '───────────────────────────────',
+      '❯ ',
+      '───────────────────────────────',
+      '  Opus 4.8 1M | automation-monorepo@dev | 5h 100% @02:00 | v2.1.201',
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+    ].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.status, 'waiting');
+  });
   it('retries when Claude process is in foreground (fixes macOS zsh issue)', async () => {
     const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'zsh', true);
     const s = createMonitorState();
