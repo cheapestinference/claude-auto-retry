@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parsePanes, parseProcesses, parseRunningMonitors, planReconcile, runningFromPgrep,
+  pruneExcludeEntries,
 } from '../src/reconcile.js';
 
 describe('reconcile parsing', () => {
@@ -68,6 +69,26 @@ function fixture() {
   ];
   return { panes, processes };
 }
+
+// --- Finding 5: exclude entries claimed to be self-expiring but a dead PID was never
+//     pruned and matched by bare string compare, so kernel PID reuse could mute a future
+//     claude forever. pruneExcludeEntries drops numeric entries whose process is gone,
+//     while keeping pane ids (%N, hand-managed) and live PIDs. ---
+describe('pruneExcludeEntries (Finding 5)', () => {
+  const alive = (pid) => new Set([200, 400]).has(pid);
+  it('drops a dead PID entry', () => {
+    assert.deepEqual(pruneExcludeEntries(['200', '999'], alive), ['200']);
+  });
+  it('keeps pane-id entries untouched (user-managed)', () => {
+    assert.deepEqual(pruneExcludeEntries(['%2', '999'], alive), ['%2']);
+  });
+  it('keeps live PIDs and drops only the dead ones', () => {
+    assert.deepEqual(pruneExcludeEntries(['200', '400', '999', '%3'], alive), ['200', '400', '%3']);
+  });
+  it('is a no-op on an empty list', () => {
+    assert.deepEqual(pruneExcludeEntries([], alive), []);
+  });
+});
 
 describe('planReconcile', () => {
   it('arms a monitor for each live claude pane', () => {
