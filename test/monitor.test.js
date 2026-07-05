@@ -146,6 +146,29 @@ describe('processOneTick', () => {
     assert.equal(t._sent.length, 0);
   });
 
+  // --- Regression (Finding 3): isWorking and isRateLimited must measure the same bottom.
+  //     A live "esc to interrupt" footer pushed up by a chrome stack was invisible to the
+  //     raw-tail isWorking while chrome-aware isRateLimited still saw a lingering banner →
+  //     retry text into a mid-flight session. Both are chrome-aware now. ---
+  it('does NOT re-send when Claude is working above a chrome stack (banner still lingering)', async () => {
+    const pane = [
+      "You've hit your session limit · resets 3pm (UTC)",
+      '✻ Cogitating… (12s · esc to interrupt)',
+      '  10 tasks (2 done, 1 in progress, 7 open)',
+      '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g',
+      '   … +2 completed', '  new task? /clear to save 300k tokens', '',
+      '───────────────', '❯ ', '───────────────',
+      '  Opus 4.8 | repo@dev | v2.1.201',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n');   // working footer sits >12 raw lines above the bottom
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(t._sent.length, 0);
+    assert.equal(s.status, 'monitoring');
+  });
+
   // --- Regression: self-referential false positive. A limit banner only quoted in
   //     scrollback (a conversation discussing limits, a stale banner scrolled past) is
   //     NOT the live state. Tail-anchoring stops it from driving a retry. ---

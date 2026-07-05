@@ -88,6 +88,31 @@ describe('isWorking', () => {
   // Claude's internal-retry indicator means retries are NOT exhausted → not terminal.
   it('treats the "Retrying in" suffix as still-working', () => assert.equal(isWorking('API Error: 529 Overloaded · Retrying in 5s · attempt 3/10'), true));
   it('treats an "attempt n/m" indicator as still-working', () => assert.equal(isWorking('thinking… attempt 2/10'), true));
+
+  // --- Finding 3: isWorking must measure the SAME bottom as isRateLimited (both
+  //     chrome-aware). A live working footer pushed up by a tall chrome stack below it was
+  //     invisible to the old raw tail, while chrome-aware isRateLimited still saw a
+  //     lingering banner → the waiting branch injected retry text into a mid-flight
+  //     session. contentTail strips the chrome stack and reaches the working footer. ---
+  it('sees a working footer even when a tall chrome stack is rendered below it', () => {
+    const pane = [
+      '✻ Cogitating… (12s · esc to interrupt)',
+      '  10 tasks (2 done, 1 in progress, 7 open)',
+      '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g',
+      '   … +2 completed',
+      '  new task? /clear to save 300k tokens',
+      '',
+      '───────────────',
+      '❯ ',
+      '───────────────',
+      '  Opus 4.8 | repo@dev | v2.1.201',
+      '  ⏵⏵ auto mode on (shift+tab to cycle)',
+    ].join('\n');   // 17 lines: footer at index 0 is >12 raw lines from the bottom
+    assert.equal(isWorking(pane), true);
+  });
+  it('does not treat the idle "✻ Brewed for …" spinner as working', () => {
+    assert.equal(isWorking('✻ Brewed for 54m 35s\n❯ '), false);
+  });
 });
 
 describe('DEFAULT_OVERLOAD config', () => {
