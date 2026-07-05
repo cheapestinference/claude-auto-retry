@@ -1,8 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { writeFile, unlink, readFile } from 'node:fs/promises';
 import {
   parsePanes, parseProcesses, parseRunningMonitors, planReconcile, runningFromPgrep,
-  pruneExcludeEntries,
+  pruneExcludeEntries, acquireLock,
 } from '../src/reconcile.js';
 
 describe('reconcile parsing', () => {
@@ -54,6 +57,29 @@ describe('runningFromPgrep (Finding 2)', () => {
   it('throws when pgrep succeeds but prints no parseable monitor args (macOS PID-only)', () => {
     // pgrep matched processes (non-empty output) but -a gave no args → cannot verify.
     assert.throws(() => runningFromPgrep(null, '1866839\n1866840\n'), /pgrep/i);
+  });
+});
+
+// --- Finding 4: a manual reconcile overlapping a timer fire both sample coverage once
+//     and both spawn the same arm set (nothing reaps the extras). A single-instance lock
+//     makes the second run a no-op. ---
+describe('acquireLock (Finding 4)', () => {
+  const lockPath = join(tmpdir(), `car-lock-${process.pid}-${Date.now()}`);
+  it('is exclusive: a second acquire fails while held, and succeeds after release', async () => {
+    const a = await acquireLock(lockPath);
+    assert.equal(a.ok, true);
+    const b = await acquireLock(lockPath);
+    assert.equal(b.ok, false);              // another run holds it
+    await a.release();
+    const c = await acquireLock(lockPath);
+    assert.equal(c.ok, true);               // free again
+    await c.release();
+  });
+  it('steals a stale lock whose holder pid is dead', async () => {
+    await writeFile(lockPath, '2147483646');  // a pid that is not alive
+    const a = await acquireLock(lockPath);
+    assert.equal(a.ok, true);               // stole the stale lock
+    await a.release();
   });
 });
 
