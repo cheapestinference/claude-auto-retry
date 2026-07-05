@@ -116,6 +116,45 @@ describe('isRateLimited', () => {
   it('full scan (tailLines=0, print mode) is unaffected by chrome logic', () => {
     assert.equal(isRateLimited("You've hit your session limit · resets 3pm (UTC)", [], 0), true);
   });
+
+  // --- Finding 2: chrome classifiers must not match ordinary content. Each probe below is
+  //     a real output line the reviewer showed being wrongly stripped as chrome, which
+  //     lets contentTail "see through" it and pull a STALE banner above back into the
+  //     window. Scenario: stale banner, then 13 copies of the probe (the "real work
+  //     below"), then the input box. If the probe is correctly CONTENT, contentTail stops
+  //     at it and the stale banner stays out (→ false). If wrongly chrome, all get
+  //     stripped and the banner re-enters the window (→ true, the false positive). ---
+  const CONTENT_PROBES = [
+    'Press ctrl+c to stop the dev server',   // contains "ctrl+"
+    '⎿ Renamed a.js → b.js',                  // contains arrow →
+    '✓ Fixed the bug',                        // checkmark bullet, no leading indent
+    'Released v0.5.1',                        // bare semver, no footer pipe
+    'Run /rc to reconnect',                   // contains /rc
+  ];
+  for (const probe of CONTENT_PROBES) {
+    it(`does not strip "${probe}" as chrome, so a stale banner above it stays out (tail=12)`, () => {
+      const pane = [
+        "You've hit your session limit · resets 3pm (UTC)",
+        ...Array(13).fill(probe),
+        '───────────────────────────────',
+        '❯ ',
+      ].join('\n');
+      assert.equal(isRateLimited(pane, [], 12), false);
+    });
+  }
+  // The genuine footer/widget lines these patterns replaced must still classify as chrome,
+  // so a banner behind them is still reachable.
+  it('still strips the real version footer and mode footer (banner behind them detected)', () => {
+    const pane = [
+      "You've hit your session limit · resets 2am (Europe/Zurich)",
+      '───────────────────────────────',
+      '❯ ',
+      '───────────────────────────────',
+      '  Opus 4.8 1M | automation-monorepo@dev | 5h 100% @02:00 | v2.1.201',
+      '  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents',
+    ].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
 });
 
 describe('stripAnsi (private-mode sequences)', () => {
