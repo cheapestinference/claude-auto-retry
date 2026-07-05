@@ -31,21 +31,28 @@ export function stripAnsi(text) {
 //
 // NOTE: the working footer ("… (esc to interrupt)") is deliberately NOT treated as
 // chrome — isWorking must still see it — so it uses the raw tail, not this one.
+// Each entry must be ANCHORED to how Claude Code actually renders the furniture — a
+// full-line shape, leading indentation, or a footer position — not just "the line
+// contains this glyph." The miss cost here is a false retry (stripping content lets a
+// stale banner re-enter the window), so a loose glyph match (a bare "ctrl+", a stray
+// arrow, any semver) is unacceptable. See Finding 2 in the PR review.
 const CHROME_LINE = [
   /^\s*$/,                                          // blank
   /^[\s─│╭╮╰╯┌┐└┘├┤┬┴┼▏▕|]+$/,                       // box-drawing / rules
   /^\s*[❯>]\s*$/,                                    // empty input prompt
-  /\bauto mode\b/i,                                 // footer: "⏵⏵ auto mode on…"
-  /\bv\d+\.\d+\.\d+\b/,                             // footer: version segment
-  /(?:ctrl|shift)\s*\+|shift\+tab|↑|↓|←|→|\bctrl\+o\b|\/rc\b/i, // key hints / footer glyphs
-  /^\s*[□◻■◼▢▪◽◾✓✔☐☑]\s+\S/,                          // todo/task items (checkbox glyphs only —
-                                                     // NOT ·/• which also separate "· resets 3pm")
+  /^\s*⏵⏵/,                                          // mode footer ("⏵⏵ auto mode on…", "⏵⏵ accept edits…")
+  /\bauto mode\b/i,                                 // footer mode text / "Allowed by auto mode" notice
+  /shift\+tab to (?:cycle|select)/i,                // tab-cycle footer hint (anchored to the phrase)
+  /^\s*\?\s+for shortcuts\b/i,                       // "? for shortcuts" footer hint
+  /\|\s*v\d+\.\d+\.\d+\b/,                           // footer version segment ("… | v2.1.201"), pipe-anchored
+  /^\s+[□◻■◼▢▪◽◾✓✔☐☑]\s+\S/,                          // INDENTED todo/task items (leading ws required — a
+                                                     // flush-left "✓ Fixed the bug" summary is content)
   /^\s*\d+\s+tasks?\b/i,                             // task widget header ("8 tasks (…)")
   /^\s*…\s*\+\d+\b/,                                 // "… +N completed"
   /new task\?|\/clear to save/i,                     // "new task? /clear to save …k tokens"
   /\/usage-credits\b/i,                              // live-limit companion hint
   /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
-  /Backgrounded agent|to manage · |Allowed by auto mode/i, // background-agent notices
+  /Backgrounded agent|to manage · /i,                // background-agent notices
 ];
 const isChromeLine = (l) => CHROME_LINE.some((r) => r.test(l));
 
