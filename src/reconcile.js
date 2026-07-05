@@ -86,6 +86,26 @@ export function parseRunningMonitors(out) {
   return covered;
 }
 
+// Interpret a pgrep invocation for the running-monitor probe. The ONLY benign failure is
+// exit code 1 with no output ("no processes matched") → zero monitors running. Every other
+// failure — ENOENT (pgrep absent), a non-1 exit (busybox usage error / no `-a` support), or
+// a success that yields no parseable monitor args (macOS/BSD `pgrep -af` prints PIDs only)
+// — means we CANNOT verify current coverage. Reporting "zero" there would arm a duplicate
+// monitor per pane on every timer fire (Finding 2), so we throw and let reconcile abort
+// loudly instead. `err` is the rejected-execFile error (with .code) or null on success.
+export function runningFromPgrep(err, stdout) {
+  const out = stdout || '';
+  if (err) {
+    if (err.code === 1 && !out.trim()) return new Map();  // no matches — nothing running
+    throw new Error(`pgrep probe failed (code ${err.code}): ${err.message}. Refusing to reconcile — reporting "zero monitors" here would arm duplicate monitors.`);
+  }
+  const covered = parseRunningMonitors(out);
+  if (out.trim() && covered.size === 0) {
+    throw new Error('pgrep matched processes but printed no monitor args (needs `pgrep -a`; busybox/macOS print PIDs only). Refusing to reconcile — cannot verify coverage without risking duplicate monitors.');
+  }
+  return covered;
+}
+
 // Walk pid → ppid chain until we hit a process that is a tmux pane_pid; return that pane.
 function paneForPid(pid, byPid, panePidToPane) {
   let cur = pid, hops = 0;
@@ -159,12 +179,13 @@ async function gather() {
     execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid}']),
     execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=,args=']),
   ]);
-  let monOut = '';
-  try { monOut = (await execFile('pgrep', ['-af', 'node .*src/monitor\\.js'])).stdout; } catch { /* none running → pgrep exits 1 */ }
+  let pgrepErr = null, monOut = '';
+  try { monOut = (await execFile('pgrep', ['-af', 'node .*src/monitor\\.js'])).stdout; }
+  catch (err) { pgrepErr = err; monOut = err.stdout || ''; }
   return {
     panes: parsePanes(panesOut),
     processes: parseProcesses(psOut),
-    running: parseRunningMonitors(monOut),
+    running: runningFromPgrep(pgrepErr, monOut),  // throws on unverifiable coverage (Finding 2)
   };
 }
 
