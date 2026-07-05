@@ -17,6 +17,20 @@ export function stripAnsi(text) {
     .replace(CSI_REGEX, '');
 }
 
+// Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
+// Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
+// While either is on screen the request's retries are not exhausted — acting now would
+// interrupt Claude's backoff. Defined up here because isChromeLine excludes these lines
+// (a live working footer must never be stripped as furniture) and isWorking scans for
+// them; both need the predicate.
+const WORKING_PATTERNS = [
+  /esc to interrupt/i,        // the working/streaming footer ("… (esc to interrupt)")
+  /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
+  /Retrying in\b/i,           // internal-retry suffix — retries not yet exhausted
+  /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
+];
+const isWorkingLine = (l) => WORKING_PATTERNS.some((p) => p.test(l));
+
 // --- Chrome-aware tail ---
 // Claude Code renders UI chrome BELOW the meaningful content: the input box, the footer
 // (model/usage/version), key hints, the todo/task widget, the status spinner
@@ -29,8 +43,6 @@ export function stripAnsi(text) {
 // scrollback false-positive fixed (real work below a quoted banner is NOT chrome, so it
 // isn't stripped and the stale banner stays out of the window).
 //
-// NOTE: the working footer ("… (esc to interrupt)") is deliberately NOT treated as
-// chrome — isWorking must still see it — so it uses the raw tail, not this one.
 // Each entry must be ANCHORED to how Claude Code actually renders the furniture — a
 // full-line shape, leading indentation, or a footer position — not just "the line
 // contains this glyph." The miss cost here is a false retry (stripping content lets a
@@ -54,7 +66,9 @@ const CHROME_LINE = [
   /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
   /Backgrounded agent|to manage · /i,                // background-agent notices
 ];
-const isChromeLine = (l) => CHROME_LINE.some((r) => r.test(l));
+// A live working footer ("✻ Cogitating… (esc to interrupt)") matches the spinner glyph
+// pattern above, so it must be excluded explicitly — it is live content, never furniture.
+const isChromeLine = (l) => !isWorkingLine(l) && CHROME_LINE.some((r) => r.test(l));
 
 // Last `n` lines AFTER dropping trailing chrome, so a tall widget / input box below a
 // banner doesn't consume the window budget. Operates on an array of already-split lines.
@@ -212,30 +226,10 @@ export function menuStepsToWaitOption(text, tailLines = 0) {
 // still trimming the top ~8 lines of the 20-line capture (where stale scrollback lives).
 const OVERLOAD_TAIL_LINES = 12;
 
-// Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
-// Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
-// While either is on screen the request's retries are not exhausted — acting now would
-// interrupt Claude's backoff. The transient error render is "API Error (529 …) ·
-// Retrying in 5s · attempt 3/10"; the colon form can also carry the "· Retrying" suffix
-// until exhausted, so we gate on the suffix itself, not just the parens form.
-const WORKING_PATTERNS = [
-  /esc to interrupt/i,        // the working/streaming footer ("… (esc to interrupt)")
-  /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
-  /Retrying in\b/i,           // internal-retry suffix — retries not yet exhausted
-  /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
-];
-
 // Chrome-aware tail for the error/limit detectors: a terminal error can be pushed up by
 // the same widgets that pushed the limit banner, so strip trailing chrome first.
 function tail(text) {
   return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES);
-}
-
-// Raw tail (no chrome-strip) for isWorking: the working footer "… (esc to interrupt)"
-// and the "✻ … Retrying" indicator would otherwise be stripped as chrome, and isWorking
-// MUST still see them (they mean "do not act — Claude is mid-flight").
-function rawTail(text) {
-  return stripAnsi(text).split('\n').slice(-OVERLOAD_TAIL_LINES);
 }
 
 // Compile a config pattern (string → case-insensitive RegExp) once per call. Invalid
@@ -305,9 +299,13 @@ export function detectSafeguard(text, patterns = []) {
   return safeguardMatch(text, patterns) !== null;
 }
 
+// Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
+// live working footer pushed up by a tall chrome stack below it (task widget + input box
+// + footer) would be invisible to a raw last-N tail while the chrome-aware detectors still
+// saw a lingering banner — the asymmetry that let retry text land in a mid-flight session
+// (Finding 3). isChromeLine excludes working lines, so contentTail never strips the footer.
 export function isWorking(text) {
-  const lines = rawTail(text);
-  return lines.some(line => WORKING_PATTERNS.some(p => p.test(line)));
+  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES).some(isWorkingLine);
 }
 
 export function findRateLimitMessage(text, customPatterns = []) {
