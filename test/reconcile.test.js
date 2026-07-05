@@ -9,9 +9,15 @@ describe('reconcile parsing', () => {
     const p = parsePanes('%1 460807\n%10 1642861\n\n');
     assert.deepEqual(p, [{ pane: '%1', panePid: 460807 }, { pane: '%10', panePid: 1642861 }]);
   });
-  it('parses ps output with multi-word comm', () => {
-    const p = parseProcesses('1842917 460471 Sl+ claude\n460471 1 Ss bash\n');
-    assert.deepEqual(p[0], { pid: 1842917, ppid: 460471, stat: 'Sl+', comm: 'claude' });
+  it('parses ps output with comm and args (args is the trailing field)', () => {
+    const p = parseProcesses('1842917 460471 Sl+ claude claude -p "do a thing"\n460471 1 Ss bash -bash\n');
+    assert.deepEqual(p[0], { pid: 1842917, ppid: 460471, stat: 'Sl+', comm: 'claude', args: 'claude -p "do a thing"' });
+    assert.equal(p[1].comm, 'bash');
+  });
+  it('tolerates a missing args column (comm-only ps output)', () => {
+    const p = parseProcesses('1842917 460471 Sl+ claude\n');
+    assert.equal(p[0].comm, 'claude');
+    assert.equal(p[0].args, '');
   });
   it('extracts covered pane/pid keys from pgrep output', () => {
     const c = parseRunningMonitors('1866839 node /x/src/monitor.js %1 2453159\n1866840 node /x/src/monitor.js %10 1842917\n');
@@ -136,6 +142,43 @@ describe('planReconcile', () => {
     ];
     const { arm } = planReconcile({ panes, processes, running: new Map() });
     assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+  });
+
+  // --- Finding 8: a `claude -p` (print mode) pane must NOT get a send-keys monitor — the
+  //     wrapper never arms one there, and retry text injected into piped/scripted output
+  //     would corrupt it. Filter processes whose argv carries -p/--print. ---
+  it('does not arm a monitor for a claude running in print mode (-p)', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Rl+', comm: 'claude', args: 'claude -p "summarize the diff"' },
+    ];
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm, []);
+  });
+  it('does not arm for the --print long form either', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Rl+', comm: 'claude', args: 'claude --print "hi"' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+  it('still arms an interactive claude (args present, no -p)', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Sl+', comm: 'claude', args: 'claude --resume' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%1', pid: 200 }]);
+  });
+  it('does not mistake a prompt word for the -p flag', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Sl+', comm: 'claude', args: 'claude add a -pretty flag' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%1', pid: 200 }]);
   });
 
   it('resolves a claude nested several levels below the pane shell', () => {
