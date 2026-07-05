@@ -243,6 +243,36 @@ describe('isRateLimitOptionsPrompt (#19)', () => {
   });
 });
 
+describe('isRateLimitOptionsPrompt / menuStepsToWaitOption chrome-aware (Finding 5)', () => {
+  // A live menu pushed up by a tall widget below it must still be detected — otherwise the
+  // menu branch is skipped, a usage-wait is entered, and the later sendKeys types into the
+  // open menu where Enter confirms the highlighted default ("Upgrade your plan"). All four
+  // detectors must share the chrome-aware window.
+  const MENU_BEHIND_WIDGET = [
+    'What do you want to do?',
+    '❯ 1. Upgrade your plan',
+    '  2. Stop and wait for limit to reset',
+    'Enter to confirm · Esc to cancel',
+    '',
+    '  8 tasks (2 done, 6 open)',
+    '  □ a', '  □ b', '  □ c', '  □ d',
+    '───────────────',
+    '❯ ',
+    '───────────────',
+    '  ⏵⏵ auto mode on',
+  ].join('\n');
+  it('detects a live menu pushed up by a widget below it (tail-scoped)', () => {
+    assert.equal(isRateLimitOptionsPrompt(MENU_BEHIND_WIDGET, 6), true);
+  });
+  it('counts steps to the wait option on a menu behind a widget (tail-scoped)', () => {
+    assert.equal(menuStepsToWaitOption(MENU_BEHIND_WIDGET, 6), 1);
+  });
+  it('still ignores a menu only quoted above live work (tail-scoped)', () => {
+    const pane = [...MENU_UPGRADE_FIRST.split('\n'), ...Array(10).fill('● unrelated work'), '❯ '].join('\n');
+    assert.equal(isRateLimitOptionsPrompt(pane, 6), false);
+  });
+});
+
 describe('menuStepsToWaitOption (#19)', () => {
   it('returns +1 when "Stop and wait" is one below the cursor (Upgrade first)', () => {
     assert.equal(menuStepsToWaitOption(MENU_UPGRADE_FIRST), 1);

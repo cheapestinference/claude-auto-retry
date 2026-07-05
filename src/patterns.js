@@ -185,8 +185,12 @@ const MENU_OPTION_REGEX = /^\s*❯?\s*\d+\.\s/;
 // same menu text quoted in scrollback (a conversation about limits) must not make us
 // drive arrow keys + Enter into whatever is actually on screen.
 export function isRateLimitOptionsPrompt(text, tailLines = 0) {
-  let lines = stripAnsi(text).split('\n');
-  if (tailLines > 0) lines = lines.slice(-tailLines);
+  const all = stripAnsi(text).split('\n');
+  // Chrome-aware, like the banner detectors (Finding 5): a live menu pushed up by a tall
+  // widget below it must still be seen, or the menu branch is skipped and a later sendKeys
+  // types into the open menu (Enter confirms the default "Upgrade your plan"). Menu lines
+  // are not chrome, so contentTail keeps them.
+  const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
   const t = lines.join('\n');
   return /what do you want to do\?/i.test(t)
     && WAIT_OPTION_REGEX.test(t)
@@ -199,8 +203,8 @@ export function isRateLimitOptionsPrompt(text, tailLines = 0) {
 // caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
 // tailLines mirrors isRateLimitOptionsPrompt so option counting ignores quoted menus.
 export function menuStepsToWaitOption(text, tailLines = 0) {
-  let lines = stripAnsi(text).split('\n');
-  if (tailLines > 0) lines = lines.slice(-tailLines);
+  const all = stripAnsi(text).split('\n');
+  const lines = tailLines > 0 ? contentTail(all, tailLines) : all;  // chrome-aware, matches isRateLimitOptionsPrompt (Finding 5)
   const optionLines = lines.filter(l => MENU_OPTION_REGEX.test(l));
   if (optionLines.length === 0) return null;
   const cursorPos = optionLines.findIndex(l => l.includes(MENU_CURSOR));
