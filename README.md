@@ -142,6 +142,11 @@ registers even when a tall task list or background-agent status pushes it well a
 prompt, while a banner merely *quoted* in scrollback (with real output below it) does not
 trigger a retry.
 
+Your own `customPatterns` are the exception: they are matched against the **raw** last-N
+lines (not the chrome-skipped view), so a pattern keyed on footer text — a usage
+percentage, a model name — keeps firing. You own the false-positive tradeoff for your
+regexes; the built-in detection keeps the chrome-aware discipline.
+
 ## Configuration
 
 Optional. Create `~/.claude-auto-retry.json`:
