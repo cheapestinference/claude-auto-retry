@@ -98,6 +98,11 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
   const excluded = new Set(exclude);
   if (selfPane) excluded.add(selfPane);
+  // Coverage is keyed PER PANE, not per (pane,pid) (Finding 3): a stopped claude keeps its
+  // monitor alive, so if we keyed on pid we'd arm a SECOND monitor for the new foreground
+  // claude in that pane and both would send keys. One monitor per pane suffices — a
+  // monitor whose target pid has exited already shuts itself down (isAlive check).
+  const coveredPanes = new Set([...running.keys()].map(k => k.split(' ')[0]));
 
   // Every claude/node process that is claude (comm === 'claude'); map to its pane.
   const claudes = processes.filter(p => p.comm === 'claude');
@@ -126,7 +131,7 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
       continue;
     }
 
-    if (running.has(`${pane} ${target.pid}`)) {
+    if (coveredPanes.has(pane)) {
       skipped.push({ pane, pid: target.pid, reason: 'already monitored' });
     } else {
       arm.push({ pane, pid: target.pid });

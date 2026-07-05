@@ -87,6 +87,23 @@ describe('planReconcile', () => {
     assert.deepEqual(arm, [{ pane: '%1', pid: 201 }]);
   });
 
+  // --- Finding 3: coverage is keyed PER PANE, not per (pane,pid). A SIGSTOP'd claude
+  //     keeps its monitor alive (kill(pid,0) succeeds on stopped procs); without per-pane
+  //     keying, reconcile arms a SECOND monitor for the new foreground claude in the same
+  //     pane and both send retry keys on a banner. One monitor per pane, whatever the pid. ---
+  it('does not arm a second monitor for a pane that already has one (stopped + new foreground)', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'T', comm: 'claude' },    // SIGSTOP'd — its monitor is still alive
+      { pid: 201, ppid: 100, stat: 'Sl+', comm: 'claude' },  // new foreground claude
+    ];
+    const running = parseRunningMonitors('9 node src/monitor.js %1 200\n');  // monitor covers the pane (for pid 200)
+    const { arm, skipped } = planReconcile({ panes, processes, running });
+    assert.deepEqual(arm, []);   // pane already covered — do NOT arm a second
+    assert.equal(skipped.find(s => s.pane === '%1').reason, 'already monitored');
+  });
+
   it('pane-id reuse: prefers the FOREGROUND claude when two share a pane', () => {
     // Two claudes resolve to pane %1 (pane-id was reused); only 201 is foreground ('+').
     const panes = [{ pane: '%1', panePid: 100 }];
