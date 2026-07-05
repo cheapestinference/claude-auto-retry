@@ -349,6 +349,10 @@ async function cmdReconcile() {
     console.error('(needs a running tmux server; run from a machine with your claude sessions)');
     process.exit(1);
   }
+  if (result.locked) {
+    console.log('Another reconcile is already running (lock held). Nothing to do.');
+    return;
+  }
   const { armed, skipped } = result;
   if (armed.length === 0 && skipped.length === 0) {
     console.log('No tmux panes running claude found. Nothing to reconcile.');

@@ -11,7 +11,7 @@
 
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile } from 'node:fs/promises';
+import { readFile, open, unlink, mkdir, appendFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -37,6 +37,33 @@ export const EXCLUDE_FILE = join(homedir(), '.claude-auto-retry', 'reconcile-exc
 function isProcessAlive(pid) {
   try { process.kill(pid, 0); return true; }
   catch (err) { return err.code === 'EPERM'; }  // exists but not ours → still alive
+}
+
+// Single-instance lock (Finding 4). A manual reconcile overlapping a timer fire would
+// otherwise both sample coverage once and both spawn the same arm set, with nothing
+// reaping the extras. Uses an atomic O_CREAT|O_EXCL open; on contention it reads the
+// holder pid and STEALS the lock only if that process is dead (crash-safe), so a stale
+// lock never wedges the timer permanently. Returns { ok, release } — release() is a no-op
+// when ok is false, so callers can always call it.
+export const LOCK_FILE = join(homedir(), '.claude-auto-retry', 'reconcile.lock');
+
+export async function acquireLock(lockPath = LOCK_FILE) {
+  await mkdir(dirname(lockPath), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fh = await open(lockPath, 'wx');   // wx = O_CREAT|O_EXCL: fails if it exists
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      return { ok: true, release: async () => { try { await unlink(lockPath); } catch { /* already gone */ } } };
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      let holder = null;
+      try { holder = Number((await readFile(lockPath, 'utf-8')).trim()); } catch { /* unreadable */ }
+      if (holder && isProcessAlive(holder)) return { ok: false, release: async () => {} };
+      try { await unlink(lockPath); } catch { /* someone else won the race */ }  // stale → steal and retry
+    }
+  }
+  return { ok: false, release: async () => {} };
 }
 
 // Prune numeric PID entries whose process is gone: a dead PID can never legitimately match
@@ -217,17 +244,28 @@ function armMonitor(pane, pid) {
 // Returns { armed: [...], skipped: [...] }. `selfPane` (default $TMUX_PANE) is never armed,
 // so reconciling from inside a session doesn't monitor its own pane.
 export async function reconcile({ selfPane = process.env.TMUX_PANE || null, dryRun = false } = {}) {
-  const { panes, processes, running } = await gather();
-  const exclude = await readExcludeFile();
-  const plan = planReconcile({ panes, processes, running, selfPane, exclude });
-  const armed = [];
+  // dry-run only reads state, so it needs no lock. A real run takes the single-instance
+  // lock so an overlapping manual+timer invocation can't both spawn the same monitors.
+  let lock = null;
   if (!dryRun) {
-    for (const { pane, pid } of plan.arm) {
-      const monitorPid = armMonitor(pane, pid);
-      armed.push({ pane, pid, monitorPid });
-    }
+    lock = await acquireLock();
+    if (!lock.ok) return { armed: [], skipped: [], dryRun, locked: true };
   }
-  return { armed: dryRun ? plan.arm : armed, skipped: plan.skipped, dryRun };
+  try {
+    const { panes, processes, running } = await gather();
+    const exclude = await readExcludeFile();
+    const plan = planReconcile({ panes, processes, running, selfPane, exclude });
+    const armed = [];
+    if (!dryRun) {
+      for (const { pane, pid } of plan.arm) {
+        const monitorPid = armMonitor(pane, pid);
+        armed.push({ pane, pid, monitorPid });
+      }
+    }
+    return { armed: dryRun ? plan.arm : armed, skipped: plan.skipped, dryRun };
+  } finally {
+    if (lock) await lock.release();
+  }
 }
 
 // Resolve the claude PID for a given pane from live process state (same mapping
@@ -252,8 +290,6 @@ export async function excludeSelf(pane = process.env.TMUX_PANE || null, path = E
   if (!pid) return { ok: false, reason: `no claude process found for pane ${pane}` };
   const existing = await readExcludeFile(path);
   if (existing.includes(String(pid))) return { ok: true, pane, pid, already: true };
-  const { mkdir } = await import('node:fs/promises');
-  const { appendFile } = await import('node:fs/promises');
   await mkdir(dirname(path), { recursive: true });
   await appendFile(path, `${pid}\t# pane ${pane}, excluded by exclude-self\n`);
   return { ok: true, pane, pid };
