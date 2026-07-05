@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
-import { reconcile, excludeSelf } from '../src/reconcile.js';
+import { reconcile, excludeSelf, parseRunningMonitors } from '../src/reconcile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -343,12 +343,11 @@ async function cmdExcludeSelf() {
     : `Excluded this session: claude PID ${r.pid} (pane ${r.pane}). reconcile/timer will skip it.`);
   console.log('The entry self-expires when this claude exits (no cleanup needed).');
   // Kill any monitor already covering this pane so exclusion takes effect immediately.
+  // Reuse parseRunningMonitors (same parser reconcile uses) instead of a bespoke one.
   try {
-    const out = execFileSync('pgrep', ['-af', `src/monitor\\.js ${r.pane} ${r.pid}`], { encoding: 'utf-8' });
-    for (const line of out.split('\n')) {
-      const mpid = line.trim().split(/\s+/)[0];
-      if (mpid && /^\d+$/.test(mpid)) { try { process.kill(Number(mpid)); console.log(`Stopped existing monitor ${mpid}.`); } catch {} }
-    }
+    const out = execFileSync('pgrep', ['-af', 'node .*src/monitor\\.js'], { encoding: 'utf-8' });
+    const mpid = parseRunningMonitors(out).get(`${r.pane} ${r.pid}`);
+    if (mpid) { try { process.kill(mpid); console.log(`Stopped existing monitor ${mpid}.`); } catch {} }
   } catch { /* no monitor running for this pane — nothing to stop */ }
 }
 

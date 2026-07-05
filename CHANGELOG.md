@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`reconcile` / `install-timer` / `exclude-self`** for self-healing monitor coverage: a
+  monitor killed (or a `claude` started outside the wrapper) is re-armed from live tmux +
+  process state, on demand or via a `systemd --user` timer (#32).
 - Safeguard/AUP false-positive auto-retry: when the model's safeguards flag a
   message ("safeguards flagged this message"), re-send a short retry up to
   `safeguard.maxRetries` times, then give up loudly once. Detection is anchored
@@ -23,11 +26,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actual poll interval, not a fixed constant).
 
 ### Fixed
+- `install-timer` no longer crashes on npm installs — `systemd/` is shipped in the package
+  and the template reads fail with a clear message instead of ENOENT (#32).
+- `reconcile` distinguishes a real `pgrep` failure (ENOENT, busybox without `-a`, macOS
+  PID-only output) from "no monitors running", and aborts loudly rather than arming a
+  duplicate monitor per pane every run (#32).
+- Monitor coverage is keyed per-pane, so a stopped `claude` keeping its monitor can't lead
+  to a second monitor on the same pane (#32).
+- A single-instance lock (pid + start-token identity) stops an overlapping manual + timer
+  run from double-spawning, and can't wedge on PID reuse (#32).
+- Exclude-file PID entries are pruned when dead, so kernel PID reuse can't permanently mute
+  a future session (the self-expiring behavior the docs promised) (#32).
+- Print-mode panes (`claude -p` / `--print`) are no longer given a send-keys monitor (#32).
+- The generated systemd unit quotes the node/CLI paths (spaces no longer break it), drops
+  the no-op `Persistent=true`, and `install-timer` prints an nvm re-run caveat (#32).
 - `rate_limit` StopFailure events are no longer routed through the seconds-scale
   overload path — a session/usage limit is an hours-scale wait owned by the
   usage path, and the misroute made the two fight (futile `Continue` retries
   into a session-limited pane). The marker error type is validated at the
   consumer too, so an outdated installed hook can't reintroduce it (#31).
+
+### Changed
+- Removed the dead `CLAUDE_COMMANDS` constant; documented that reconcile matches
+  `comm === 'claude'` (a bare-`node` session without `process.title` isn't detected) (#32).
 
 ## [0.5.1] - 2026-06-30
 
