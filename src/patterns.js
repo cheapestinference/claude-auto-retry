@@ -72,10 +72,16 @@ const isChromeLine = (l) => !isWorkingLine(l) && CHROME_LINE.some((r) => r.test(
 
 // Last `n` lines AFTER dropping trailing chrome, so a tall widget / input box below a
 // banner doesn't consume the window budget. Operates on an array of already-split lines.
-function contentTail(lines, n) {
+// maxRaw (optional) additionally caps how far above the FULL bottom the window may reach:
+// with it set, a line further than maxRaw raw lines from the bottom is excluded even if
+// chrome-stripping would otherwise expose it — bounding content-distance for the overload
+// path (Finding 6), where a terminal error sits just above the input box and anything
+// reachable only past a tall widget is stale scrollback, not a live error.
+function contentTail(lines, n, maxRaw = Infinity) {
   let end = lines.length;
   while (end > 0 && isChromeLine(lines[end - 1])) end--;
-  return lines.slice(Math.max(0, end - n), end);
+  const start = Math.max(0, end - n, lines.length - maxRaw);
+  return lines.slice(start, end);
 }
 
 // Claude Code renders rate limits across multiple lines in its TUI, e.g.:
@@ -234,11 +240,18 @@ export function menuStepsToWaitOption(text, tailLines = 0) {
 // its anchor line can land ~10 rows from the bottom. 12 covers that with margin while
 // still trimming the top ~8 lines of the 20-line capture (where stale scrollback lives).
 const OVERLOAD_TAIL_LINES = 12;
+// Hard raw-distance cap for the overload path. A terminal API error renders just above
+// the input box; an error only reachable by chrome-stripping past a tall widget is stale
+// scrollback, not live. Bounds the deeper (50-line) capture so overload — seconds-scale
+// and more false-positive-prone than the reset-anchored limit path — can't reach an old
+// quoted error. 20 matches master's original capture depth. (Finding 6.)
+const OVERLOAD_MAX_RAW_LINES = 20;
 
-// Chrome-aware tail for the error/limit detectors: a terminal error can be pushed up by
-// the same widgets that pushed the limit banner, so strip trailing chrome first.
+// Chrome-aware tail for the overload detectors: a terminal error can be pushed up by the
+// same widgets that pushed the limit banner, so strip trailing chrome first — but bound
+// the reach so a widget-buried stale error stays out.
 function tail(text) {
-  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES);
+  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES, OVERLOAD_MAX_RAW_LINES);
 }
 
 // Compile a config pattern (string → case-insensitive RegExp) once per call. Invalid

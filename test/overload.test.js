@@ -66,6 +66,26 @@ describe('detectOverload', () => {
     const pane = ['some earlier output', 'more output', 'API Error: 529 Overloaded'].join('\n');
     assert.equal(detectOverload(pane, PATS), true);
   });
+
+  // --- Finding 6: the 50-line capture + chrome-strip let an old quoted error be reached
+  //     from far up when everything below it is chrome (a tall task widget). Unlike the
+  //     content-below case above (contentTail stops at the content), chrome is all
+  //     stripped, so an error 20+ raw lines up would re-enter the window. A terminal error
+  //     sits just above the input box; bound overload to a max raw distance from the
+  //     bottom so a widget-buried stale error stays out. ---
+  it('does NOT match an API error buried >20 raw lines up behind a tall chrome widget', () => {
+    const pane = [
+      'API Error: 529 Overloaded',
+      '  20 tasks (0 done, 20 open)',
+      ...Array(22).fill('  □ pending task'),
+      '───────────────', '❯ ',
+    ].join('\n');
+    assert.equal(detectOverload(pane, PATS), false);
+  });
+  it('still matches a terminal API error just above the input box', () => {
+    const pane = ['API Error: 529 Overloaded', '───────────────', '❯ ', '───────────────', '  ⏵⏵ auto mode on'].join('\n');
+    assert.equal(detectOverload(pane, PATS), true);
+  });
 });
 
 describe('overloadMatch (observability)', () => {
