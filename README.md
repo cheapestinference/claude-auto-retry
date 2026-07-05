@@ -440,9 +440,12 @@ is started outside the wrapper — that session ends up unmonitored, and only *n
 sessions get a monitor. Two commands restore and maintain full coverage:
 
 - **`reconcile`** re-arms a monitor for every live tmux pane running `claude` that isn't
-  already covered. It maps each `claude` to its pane from live process state, skips
-  panes already monitored (idempotent — safe to run anytime), and handles tmux pane-id
-  reuse. Run it after a crash, or use `--dry-run` to see what it would do.
+  already covered. It maps each `claude` to its pane from live process state, keeps one
+  monitor per pane (idempotent — safe to run anytime, and a single-instance lock stops an
+  overlapping manual+timer run from double-arming), and handles tmux pane-id reuse. Print-
+  mode sessions (`claude -p`) are skipped, and a `claude` that doesn't set its process
+  title to `claude` (a bare `node` shebang) isn't detected — use the wrapper for those.
+  Run it after a crash, or use `--dry-run` to see what it would do.
 - **`install-timer`** wires `reconcile` to a `systemd --user` timer that runs every 5
   minutes, so a monitor that dies is re-armed within one interval — coverage self-heals
   with no manual step. (Enable `loginctl enable-linger $USER` once if you want it to run

@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/usage-credits` hint) before reading the live tail, so a genuine banner behind a tall
   task widget is still detected (fixes a ~54-min stall) while a banner merely quoted in
   scrollback is not (#34).
+- **`reconcile` / `install-timer` / `exclude-self`** for self-healing monitor coverage: a
+  monitor killed (or a `claude` started outside the wrapper) is re-armed from live tmux +
+  process state, on demand or via a `systemd --user` timer (#32).
 - Safeguard/AUP false-positive auto-retry: when the model's safeguards flag a
   message ("safeguards flagged this message"), re-send a short retry up to
   `safeguard.maxRetries` times, then give up loudly once. Detection is anchored
@@ -47,6 +50,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Chrome classifiers are anchored to real footer/widget renders (pipe-anchored version,
   indented task items, `⏵⏵` mode footer), so ordinary content — `Press ctrl+c…`, a
   `→` rename, a flush-left `✓ …` summary, `Released v0.5.1` — is no longer stripped (#34).
+- `install-timer` no longer crashes on npm installs — `systemd/` is shipped in the package
+  and the template reads fail with a clear message instead of ENOENT (#32).
+- `reconcile` distinguishes a real `pgrep` failure (ENOENT, busybox without `-a`, macOS
+  PID-only output) from "no monitors running", and aborts loudly rather than arming a
+  duplicate monitor per pane every run (#32).
+- Monitor coverage is keyed per-pane, so a stopped `claude` keeping its monitor can't lead
+  to a second monitor on the same pane (#32).
+- A single-instance lock (pid + start-token identity) stops an overlapping manual + timer
+  run from double-spawning, and can't wedge on PID reuse (#32).
+- Exclude-file PID entries are pruned when dead, so kernel PID reuse can't permanently mute
+  a future session (the self-expiring behavior the docs promised) (#32).
+- Print-mode panes (`claude -p` / `--print`) are no longer given a send-keys monitor (#32).
+- The generated systemd unit quotes the node/CLI paths (spaces no longer break it), drops
+  the no-op `Persistent=true`, and `install-timer` prints an nvm re-run caveat (#32).
 - `rate_limit` StopFailure events are no longer routed through the seconds-scale
   overload path — a session/usage limit is an hours-scale wait owned by the
   usage path, and the misroute made the two fight (futile `Continue` retries
@@ -56,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `customPatterns` are matched against the raw last-N lines (unchanged from pre-#34
   semantics), not the chrome-skipped view — the user owns their own tradeoff (#34).
+- Removed the dead `CLAUDE_COMMANDS` constant; documented that reconcile matches
+  `comm === 'claude'` (a bare-`node` session without `process.title` isn't detected) (#32).
 
 ## [0.5.1] - 2026-06-30
 
