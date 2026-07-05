@@ -3,7 +3,39 @@ import assert from 'node:assert/strict';
 import { writeFile, readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { injectWrapper, removeWrapper, MARKER_START, MARKER_END } from '../bin/cli.js';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit } from '../bin/cli.js';
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+// --- Finding 7: the generated systemd unit was fragile — unquoted ExecStart paths broke
+//     on spaces, and Persistent=true is a no-op on a monotonic (OnUnitActiveSec) timer. ---
+describe('renderReconcileUnit (Finding 7)', () => {
+  it('substitutes into the quoted ExecStart so a path with spaces survives', () => {
+    const out = renderReconcileUnit(
+      'ExecStart="__NODE_PATH__" "__CLI_PATH__" reconcile\n',
+      '/home/a b/.nvm/node', '/home/a b/cli.js',
+    );
+    assert.match(out, /ExecStart="\/home\/a b\/\.nvm\/node" "\/home\/a b\/cli\.js" reconcile/);
+    assert.ok(!out.includes('__NODE_PATH__') && !out.includes('__CLI_PATH__'));
+  });
+  it('the shipped .service template quotes the ExecStart placeholders', async () => {
+    const svc = await readFile(join(REPO_ROOT, 'systemd', 'claude-auto-retry-reconcile.service'), 'utf-8');
+    assert.match(svc, /ExecStart="__NODE_PATH__" "__CLI_PATH__" reconcile/);
+  });
+  it('the shipped .timer template has no no-op Persistent=true', async () => {
+    const timer = await readFile(join(REPO_ROOT, 'systemd', 'claude-auto-retry-reconcile.timer'), 'utf-8');
+    assert.ok(!/Persistent\s*=\s*true/.test(timer));
+  });
+});
+
+describe('package.json files whitelist (Finding 1)', () => {
+  it('includes systemd/ so install-timer works from an npm install', async () => {
+    const pkg = JSON.parse(await readFile(join(REPO_ROOT, 'package.json'), 'utf-8'));
+    assert.ok(pkg.files.includes('systemd/'), 'package.json "files" must include "systemd/"');
+  });
+});
 
 describe('injectWrapper', () => {
   const testFile = join(tmpdir(), `car-rc-test-${Date.now()}`);

@@ -12,5 +12,6 @@ Type=oneshot
 # reconcile process, leaving the freshly-armed monitors running.
 KillMode=process
 # __NODE_PATH__ and __CLI_PATH__ are substituted by `claude-auto-retry install-timer`.
-ExecStart=__NODE_PATH__ __CLI_PATH__ reconcile
+# Quoted so a path containing spaces (e.g. an nvm dir under "/home/My User/") survives.
+ExecStart="__NODE_PATH__" "__CLI_PATH__" reconcile
 # tmux is reached via its default socket (/tmp/tmux-<uid>/default); no $TMUX needed.

@@ -8,8 +8,9 @@ OnStartupSec=2min
 # ...then every 5 min. A monitor that dies is re-armed within one interval; a
 # crash mid-window loses at most ~5 min of coverage on that pane.
 OnUnitActiveSec=5min
-# Catch up on a missed run (e.g. box asleep) instead of waiting a full interval.
-Persistent=true
+# NOTE: no Persistent= here — it only affects OnCalendar= (wall-clock) timers. These are
+# monotonic (OnStartupSec/OnUnitActiveSec), which pause across suspend and resume on wake,
+# so there is nothing for Persistent to "catch up".
 
 [Install]
 WantedBy=timers.target
