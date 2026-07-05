@@ -121,16 +121,19 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   }
 
   // Backstop for the modern render: a live limit prints "/usage-credits to finish…" right
-  // by the banner. Scan a wider raw window for it adjacent to a limit/reset line, so a
-  // banner buried behind an unrecognized widget is still caught. (Only when tail-scoped;
-  // print mode uses the full scan below.)
+  // by the banner, so finding that companion next to a reset/limit line catches a banner
+  // buried behind a widget the chrome allowlist doesn't recognize. But it needs the SAME
+  // liveness discipline as the main path: only trust the companion when it sits in the
+  // live region — nothing but chrome below it. A resumed session's scrollback always
+  // contains the stale banner+companion with real work rendered below; without this gate
+  // the backstop fires on that (up to maxRetries injections + a ~24h wait). (Only when
+  // tail-scoped; print mode uses the full scan below.)
   if (tailLines > 0) {
-    const wide = all.slice(-Math.max(tailLines * 3, 40));
-    for (let i = 0; i < wide.length; i++) {
-      if (USAGE_CREDITS.test(wide[i])
-          && (hasNearbyMatch(wide, i, RESET_PATTERNS) || hasNearbyMatch(wide, i, LIMIT_PATTERNS))) {
-        return true;
-      }
+    const companionIdx = all.findLastIndex((l) => USAGE_CREDITS.test(l));
+    if (companionIdx !== -1
+        && all.slice(companionIdx + 1).every(isChromeLine)
+        && (hasNearbyMatch(all, companionIdx, RESET_PATTERNS) || hasNearbyMatch(all, companionIdx, LIMIT_PATTERNS))) {
+      return true;
     }
   }
 

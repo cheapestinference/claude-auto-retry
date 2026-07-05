@@ -108,6 +108,30 @@ describe('isRateLimited', () => {
       '', '  8 tasks', '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '❯ '].join('\n');
     assert.equal(isRateLimited(pane, [], 12), true);
   });
+  // --- Finding 1: the /usage-credits backstop must have the same liveness discipline as
+  //     the main path. A resumed session's scrollback always contains the stale
+  //     banner+companion (the live render prints the companion), with real work rendered
+  //     BELOW it. The backstop must not fire on that — otherwise up to maxRetries bogus
+  //     injections and (since "resets 2am" has passed) a ~24h wait rolled to tomorrow. ---
+  it('does NOT fire on a stale banner+companion with real work rendered below (resumed session)', () => {
+    const pane = [
+      "You've hit your session limit · resets 2am (Europe/Zurich)",
+      "     /usage-credits to finish what you're working on.",
+      ...Array(15).fill('● wrote some code'),
+      '❯ ',
+    ].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('does NOT fire when a stale companion sits above later non-chrome output', () => {
+    const pane = [
+      "  └ Session limit hit · /usage-credits to finish. resets 2am",
+      '● Ran a shell command',
+      '  └ done',
+      ...Array(12).fill('● more real work after the resume'),
+      '❯ ',
+    ].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
   it('does NOT fire on a quoted banner with real work below it (tail=12)', () => {
     const pane = ["You've hit your session limit · resets 3pm (UTC)",
       ...Array(15).fill('● wrote some code'), '❯ '].join('\n');
