@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parsePanes, parseProcesses, parseRunningMonitors, planReconcile,
+  parsePanes, parseProcesses, parseRunningMonitors, planReconcile, runningFromPgrep,
 } from '../src/reconcile.js';
 
 describe('reconcile parsing', () => {
@@ -26,6 +26,34 @@ describe('reconcile parsing', () => {
     assert.equal(c.size, 2);
   });
   it('empty pgrep output → no covered', () => assert.equal(parseRunningMonitors('').size, 0));
+});
+
+// --- Finding 2: the impure gather() used an unconditional catch, so ANY pgrep failure
+//     (ENOENT, busybox pgrep with no -a, macOS pgrep printing PIDs only) collapsed to
+//     "zero monitors running" → the 5-min timer armed a duplicate monitor per pane every
+//     run, unbounded. runningFromPgrep distinguishes the benign case (exit 1, no matches)
+//     from real failures, and refuses to proceed when it can't verify coverage. ---
+describe('runningFromPgrep (Finding 2)', () => {
+  it('exit code 1 with no output → empty coverage (nothing running, the benign case)', () => {
+    const err = Object.assign(new Error('Command failed'), { code: 1, stdout: '' });
+    assert.equal(runningFromPgrep(err, '').size, 0);
+  });
+  it('parses monitor lines on success', () => {
+    const out = '1866839 node /x/src/monitor.js %1 2453159\n';
+    assert.equal(runningFromPgrep(null, out).get('%1 2453159'), 1866839);
+  });
+  it('throws on ENOENT (pgrep missing) rather than reporting zero', () => {
+    const err = Object.assign(new Error('spawn pgrep ENOENT'), { code: 'ENOENT' });
+    assert.throws(() => runningFromPgrep(err, ''), /pgrep/i);
+  });
+  it('throws on a non-1 exit code (e.g. busybox usage error)', () => {
+    const err = Object.assign(new Error('unrecognized option -a'), { code: 2, stdout: '' });
+    assert.throws(() => runningFromPgrep(err, ''), /reconcile/i);
+  });
+  it('throws when pgrep succeeds but prints no parseable monitor args (macOS PID-only)', () => {
+    // pgrep matched processes (non-empty output) but -a gave no args → cannot verify.
+    assert.throws(() => runningFromPgrep(null, '1866839\n1866840\n'), /pgrep/i);
+  });
 });
 
 // A small fixture: pane %1 (pane_pid 100) has a claude (200) as a child; pane %2 (300)
