@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Chrome-aware detection.** Limit/overload/menu detectors now skip trailing UI
+  furniture (input box, footer, key hints, todo/task widget, status spinner,
+  `/usage-credits` hint) before reading the live tail, so a genuine banner behind a tall
+  task widget is still detected (fixes a ~54-min stall) while a banner merely quoted in
+  scrollback is not (#34).
 - Safeguard/AUP false-positive auto-retry: when the model's safeguards flag a
   message ("safeguards flagged this message"), re-send a short retry up to
   `safeguard.maxRetries` times, then give up loudly once. Detection is anchored
@@ -28,11 +33,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manually typed `continue` to unstick a wrong/stale wait) now drops back to
   monitoring immediately, so a second, genuine limit that follows is detected
   instead of being masked until the old timer expires (#39).
+- The `/usage-credits` backstop no longer reopens the scrollback false positive: it only
+  fires when the companion sits in the live region (nothing but chrome below it), so a
+  resumed session's stale banner+companion can't drive spurious retries or a ~24h wait (#34).
+- `isWorking` is chrome-aware, matching `isRateLimited`: a live "esc to interrupt" footer
+  pushed up by a chrome stack is no longer missed, so retry text can't land in a
+  mid-flight session (#34).
+- The `/rate-limit-options` menu detectors are chrome-aware too, so a live menu behind a
+  widget is driven to "Stop and wait" instead of skipped (which risked confirming
+  "Upgrade your plan") (#34).
+- Overload detection is bounded to a max raw distance from the prompt, so the deeper
+  50-line capture can't reach an old quoted `API Error` buried behind a tall widget (#34).
+- Chrome classifiers are anchored to real footer/widget renders (pipe-anchored version,
+  indented task items, `⏵⏵` mode footer), so ordinary content — `Press ctrl+c…`, a
+  `→` rename, a flush-left `✓ …` summary, `Released v0.5.1` — is no longer stripped (#34).
 - `rate_limit` StopFailure events are no longer routed through the seconds-scale
   overload path — a session/usage limit is an hours-scale wait owned by the
   usage path, and the misroute made the two fight (futile `Continue` retries
   into a session-limited pane). The marker error type is validated at the
   consumer too, so an outdated installed hook can't reintroduce it (#31).
+
+### Changed
+- `customPatterns` are matched against the raw last-N lines (unchanged from pre-#34
+  semantics), not the chrome-skipped view — the user owns their own tradeoff (#34).
 
 ## [0.5.1] - 2026-06-30
 
