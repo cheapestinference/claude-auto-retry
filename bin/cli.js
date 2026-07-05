@@ -276,6 +276,12 @@ function userUnitDir() {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user');
 }
 
+// Substitute the node/CLI paths into a unit template. The template quotes the placeholders
+// (see the .service), so a path with spaces produces a valid quoted ExecStart.
+export function renderReconcileUnit(template, nodePath, cliPath) {
+  return template.replace(/__NODE_PATH__/g, nodePath).replace(/__CLI_PATH__/g, cliPath);
+}
+
 // Install the reconcile service+timer into the systemd --user unit dir, substituting the
 // node and CLI paths, then enable+start the timer. Makes monitor coverage self-healing:
 // every 5 min a missing monitor is re-armed. Requires systemd --user (Linux).
@@ -285,11 +291,18 @@ async function cmdInstallTimer() {
   const nodePath = process.execPath;
   const cliPath = __filename;
 
-  const svc = (await readFile(join(SYSTEMD_DIR, UNIT_SERVICE), 'utf-8'))
-    .replace(/__NODE_PATH__/g, nodePath)
-    .replace(/__CLI_PATH__/g, cliPath);
-  await writeFile(join(dest, UNIT_SERVICE), svc);
-  await writeFile(join(dest, UNIT_TIMER), await readFile(join(SYSTEMD_DIR, UNIT_TIMER), 'utf-8'));
+  let svcTemplate, timerTemplate;
+  try {
+    svcTemplate = await readFile(join(SYSTEMD_DIR, UNIT_SERVICE), 'utf-8');
+    timerTemplate = await readFile(join(SYSTEMD_DIR, UNIT_TIMER), 'utf-8');
+  } catch (err) {
+    console.error(`Could not read the systemd unit templates from ${SYSTEMD_DIR} (${err.code || err.message}).`);
+    console.error('If you installed from npm, upgrade to a version that ships the systemd/ directory,');
+    console.error('or run install-timer from a git checkout of the repo.');
+    process.exit(1);
+  }
+  await writeFile(join(dest, UNIT_SERVICE), renderReconcileUnit(svcTemplate, nodePath, cliPath));
+  await writeFile(join(dest, UNIT_TIMER), timerTemplate);
 
   try {
     execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'inherit' });
@@ -304,6 +317,8 @@ async function cmdInstallTimer() {
   console.log(`  next run: systemctl --user list-timers ${UNIT_TIMER}`);
   console.log(`  tip: for the timer to run while logged out, enable lingering once:`);
   console.log(`       loginctl enable-linger $USER`);
+  console.log(`\nNote: the unit pins this Node path (${nodePath}). If you switch Node`);
+  console.log(`versions (nvm), re-run: claude-auto-retry install-timer`);
 }
 
 async function cmdUninstallTimer() {
