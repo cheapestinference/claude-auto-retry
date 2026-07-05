@@ -43,7 +43,17 @@ async function readExcludeFile(path = EXCLUDE_FILE) {
   } catch { return []; }
 }
 
-const CLAUDE_COMMANDS = ['claude', 'node'];  // pane_current_command / comm can be either
+// Reconcile matches a session by `comm === 'claude'`, which works because Claude Code
+// sets its process.title to "claude". A session launched via a `#!/usr/bin/env node`
+// shebang that does NOT set process.title shows comm "node" and is invisible to reconcile
+// — install the shell wrapper for those. (Matching bare "node" here would arm a monitor on
+// every unrelated node process, so it is deliberately not attempted.)
+const CLAUDE_COMM = 'claude';
+// Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
+// interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
+// retry text would be injected into that output (Finding 8). Anchored so a prompt word
+// like "-pretty" doesn't false-match.
+const PRINT_MODE = /(?:^|\s)(?:-p|--print)(?:[\s=]|$)/;
 
 // --- Pure parsing ---
 
@@ -55,12 +65,13 @@ export function parsePanes(out) {
   }).filter(p => p.pane && Number.isFinite(p.panePid));
 }
 
-// ps "-eo pid=,ppid=,stat=,comm=" → [{ pid, ppid, stat, comm }]
+// ps "-eo pid=,ppid=,stat=,comm=,args=" → [{ pid, ppid, stat, comm, args }]. args is the
+// trailing field (may contain spaces); absent → '' (tolerates comm-only ps output).
 export function parseProcesses(out) {
   return out.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
-    const m = l.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/);
+    const m = l.match(/^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/);
     if (!m) return null;
-    return { pid: Number(m[1]), ppid: Number(m[2]), stat: m[3], comm: m[4].trim() };
+    return { pid: Number(m[1]), ppid: Number(m[2]), stat: m[3], comm: m[4], args: (m[5] || '').trim() };
   }).filter(Boolean);
 }
 
@@ -104,8 +115,9 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
   // monitor whose target pid has exited already shuts itself down (isAlive check).
   const coveredPanes = new Set([...running.keys()].map(k => k.split(' ')[0]));
 
-  // Every claude/node process that is claude (comm === 'claude'); map to its pane.
-  const claudes = processes.filter(p => p.comm === 'claude');
+  // Every interactive claude (comm === 'claude'), excluding print-mode sessions; map to
+  // its pane.
+  const claudes = processes.filter(p => p.comm === CLAUDE_COMM && !(p.args && PRINT_MODE.test(p.args)));
   const byPane = new Map();  // pane -> [claudeProc]
   for (const c of claudes) {
     const pane = paneForPid(c.pid, byPid, panePidToPane);
@@ -145,7 +157,7 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 async function gather() {
   const [{ stdout: panesOut }, { stdout: psOut }] = await Promise.all([
     execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid}']),
-    execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=']),
+    execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=,args=']),
   ]);
   let monOut = '';
   try { monOut = (await execFile('pgrep', ['-af', 'node .*src/monitor\\.js'])).stdout; } catch { /* none running → pgrep exits 1 */ }
@@ -190,7 +202,8 @@ export async function claudePidForPane(pane) {
   const { panes, processes } = await gather();
   const byPid = new Map(processes.map(p => [p.pid, p]));
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
-  const here = processes.filter(p => p.comm === 'claude'
+  const here = processes.filter(p => p.comm === CLAUDE_COMM
+    && !(p.args && PRINT_MODE.test(p.args))
     && paneForPid(p.pid, byPid, panePidToPane) === pane);
   if (here.length === 0) return null;
   return (here.find(p => p.stat.includes('+')) ?? here.sort((a, b) => b.pid - a.pid)[0]).pid;
