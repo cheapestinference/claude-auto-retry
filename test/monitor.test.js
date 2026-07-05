@@ -164,6 +164,24 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
   });
 
+  // --- Regression (Finding 1): the /usage-credits backstop must not resurrect the
+  //     scrollback false positive. A resumed session shows the stale banner+companion
+  //     with real work rendered below it — that is NOT the live limit state and must not
+  //     drive a retry (previously: up to maxRetries injections + a ~24h wait to tomorrow). ---
+  it('does NOT enter a wait via the /usage-credits backstop when real work is below it', async () => {
+    const pane = [
+      "You've hit your session limit · resets 2am (Europe/Zurich)",
+      "     /usage-credits to finish what you're working on.",
+      ...Array(15).fill('● wrote some code after resuming'),
+      '❯ ',
+    ].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(t._sent.length, 0);
+  });
+
   // --- Regression: a LIVE limit banner pushed far up the pane by UI chrome (a tall task
   //     widget + input box + footer) must still be detected. Observed live: a session-limit
   //     banner ~16 lines up behind a task list went unretried for ~54 min because the fixed
