@@ -452,10 +452,11 @@ sessions get a monitor. Two commands restore and maintain full coverage:
 pasting rate-limit text and don't want any auto-retry), run `claude-auto-retry
 exclude-self` from inside it. This records the session's `claude` PID in
 `~/.claude-auto-retry/reconcile-exclude`; both `reconcile` and the timer skip it. Keying
-on the PID makes the entry **self-expiring** — once that `claude` exits it matches
-nothing, so it can never accidentally mute a later session (tmux reuses pane ids, so a
-pane-based exclude could). You can also hand-add a `%pane` id or a PID to that file.
->>>>>>> 3113474 (docs(readme): document reconcile, install-timer, exclude-self + monitor coverage)
+on the PID makes the entry **self-expiring**: dead PIDs are pruned when the file is read,
+so once that `claude` exits its entry is dropped and can never accidentally mute a later
+session (tmux reuses pane ids, so a hand-added `%pane` exclude could — pane ids are not
+pruned, since staleness can't be detected). Prefer the PID form; you can also hand-add a
+`%pane` id or a PID to that file.
 
 ## Platform Support
 

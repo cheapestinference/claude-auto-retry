@@ -23,24 +23,38 @@ const MONITOR_PATH = join(dirname(fileURLToPath(import.meta.url)), 'monitor.js')
 // timer (the timer has no $TMUX_PANE, so a durable file is the only self-exclusion path).
 // One entry per line; two forms:
 //   <pid>   e.g. "1842917" — the claude PID. PREFERRED: unique while alive and
-//                            SELF-EXPIRING — once that claude exits the entry matches no
-//                            live process, so it can never mute a different future
-//                            session. Immune to tmux pane-id reuse. Written by
-//                            `exclude-self`.
+//                            SELF-EXPIRING — dead PIDs are pruned on read (see
+//                            pruneExcludeEntries), so once that claude exits the entry is
+//                            dropped and can never mute a different future session. Immune
+//                            to tmux pane-id reuse. Written by `exclude-self`.
 //   %<pane> e.g. "%2"       — a tmux pane id. Convenient to hand-edit, but tmux REUSES
 //                            pane ids, so a stale entry can silently mute a later,
-//                            unrelated session in that pane. Prefer the PID form.
+//                            unrelated session in that pane (and pane ids are NOT pruned —
+//                            we can't know if one is stale). Prefer the PID form.
 // '#' comments and blank lines are ignored.
 export const EXCLUDE_FILE = join(homedir(), '.claude-auto-retry', 'reconcile-exclude');
 
+function isProcessAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return err.code === 'EPERM'; }  // exists but not ours → still alive
+}
+
+// Prune numeric PID entries whose process is gone: a dead PID can never legitimately match
+// again, and keeping it risks muting a future claude that the kernel hands the reused PID
+// (Finding 5). Pane ids (%N) and any non-numeric token are hand-managed and kept as-is.
+export function pruneExcludeEntries(entries, isAlive = isProcessAlive) {
+  return entries.filter(e => !/^\d+$/.test(e) || isAlive(Number(e)));
+}
+
 async function readExcludeFile(path = EXCLUDE_FILE) {
-  try {
-    return (await readFile(path, 'utf-8'))
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l && !l.startsWith('#'))
-      .map(l => l.split(/[\s#]/)[0]);  // take the first token; allow "1234  # note"
-  } catch { return []; }
+  let raw;
+  try { raw = await readFile(path, 'utf-8'); } catch { return []; }
+  const entries = raw
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'))
+    .map(l => l.split(/[\s#]/)[0]);  // take the first token; allow "1234  # note"
+  return pruneExcludeEntries(entries);
 }
 
 // Reconcile matches a session by `comm === 'claude'`, which works because Claude Code
