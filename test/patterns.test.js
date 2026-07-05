@@ -68,6 +68,19 @@ describe('isRateLimited', () => {
   it('matches custom patterns', () => {
     assert.equal(isRateLimited('custom error xyz', [/custom error/i]), true);
   });
+  // --- Finding 4: customPatterns test the RAW tail window (master's semantics), not the
+  //     chrome-stripped one — the user owns their own false-positive tradeoff. A pattern
+  //     keyed on footer text (e.g. a usage percentage) must still fire even though the
+  //     footer is furniture the chrome path strips. ---
+  it('matches a footer-keyed custom pattern in the raw tail (not chrome-stripped)', () => {
+    const pane = [
+      ...Array(6).fill('● ordinary work'),
+      '  Opus 4.8 | repo@dev | 5h 3% left @02:00 | v2.1.201',
+      '  ⏵⏵ auto mode on',
+      '❯ ',
+    ].join('\n');
+    assert.equal(isRateLimited(pane, [/\b3% left\b/i], 12), true);
+  });
   it('detects "You\'ve hit your limit" (real Claude Code message)', () => {
     assert.equal(isRateLimited("You've hit your limit · resets 3pm (Asia/Tbilisi)"), true);
   });
