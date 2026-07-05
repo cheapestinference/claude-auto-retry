@@ -17,6 +17,12 @@ export function stripAnsi(text) {
     .replace(CSI_REGEX, '');
 }
 
+// The companion line Claude Code prints directly under a LIVE session/usage-limit banner
+// ("… /usage-credits to finish what you're working on."). A distinctive UI string, so it
+// doubles as furniture in the chrome allowlist and as the high-confidence live-limit
+// backstop signal below — one source of truth for both.
+const USAGE_CREDITS = /\/usage-credits\b/i;
+
 // Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
 // Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
 // While either is on screen the request's retries are not exhausted — acting now would
@@ -62,7 +68,7 @@ const CHROME_LINE = [
   /^\s*\d+\s+tasks?\b/i,                             // task widget header ("8 tasks (…)")
   /^\s*…\s*\+\d+\b/,                                 // "… +N completed"
   /new task\?|\/clear to save/i,                     // "new task? /clear to save …k tokens"
-  /\/usage-credits\b/i,                              // live-limit companion hint
+  USAGE_CREDITS,                                     // live-limit companion hint (shared w/ the backstop)
   /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
   /Backgrounded agent|to manage · /i,                // background-agent notices
 ];
@@ -120,14 +126,9 @@ function hasNearbyMatch(lines, idx, patterns) {
 // banner sits at the prompt (the last thing printed); the same words quoted in scrollback
 // — a conversation discussing limits, a stale banner the session already moved past — are
 // NOT the current state and must not drive a retry. 0 = scan everything (print mode, where
-// the input is captured process output, not a scrolling TUI).
-// The companion line Claude Code prints directly under a LIVE session/usage-limit banner.
-// It's a distinctive UI string (not something quoted casually), so finding it next to a
-// reset/limit line is a high-confidence live-limit signal even when a tall widget pushed
-// the banner past the content tail — a backstop against the chrome allowlist missing a
-// future UI element.
-const USAGE_CREDITS = /\/usage-credits\b/i;
-
+// the input is captured process output, not a scrolling TUI). The USAGE_CREDITS companion
+// (defined above) backstops a banner buried behind a widget the chrome allowlist doesn't
+// recognize — trusted only when it sits in the live region (nothing but chrome below it).
 export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   const all = stripAnsi(text).split('\n');
   // Chrome-aware window: trailing UI furniture doesn't consume the tail budget.
@@ -232,13 +233,14 @@ export function menuStepsToWaitOption(text, tailLines = 0) {
 //      or the "overloaded_error" JSON type) — never a bare status number.
 //   2. Only the TAIL of the pane is inspected. A *terminal* error is the last thing
 //      Claude printed; the same digits sitting in scrollback the user scrolled past
-//      are not an error. Matching the full 20-line capture is what drove the false
-//      positives — a 503 far up the buffer kept re-triggering during unrelated work.
+//      are not an error. Scanning the whole capture is what drove the false positives —
+//      a 503 far up the buffer kept re-triggering during unrelated work.
 
 // A real terminal error sits just above the input box (~5-6 variable lines: box
 // borders + input row(s) + footer). A multi-line JSON error body adds a few more, so
-// its anchor line can land ~10 rows from the bottom. 12 covers that with margin while
-// still trimming the top ~8 lines of the 20-line capture (where stale scrollback lives).
+// its anchor line can land ~10 rows from the bottom. 12 content lines cover that with
+// margin; the monitor captures 50 raw lines, so trailing chrome is stripped and this
+// keeps only the live error region (bounded further by OVERLOAD_MAX_RAW_LINES below).
 const OVERLOAD_TAIL_LINES = 12;
 // Hard raw-distance cap for the overload path. A terminal API error renders just above
 // the input box; an error only reachable by chrome-stripping past a tall widget is stale
