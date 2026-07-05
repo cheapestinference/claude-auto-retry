@@ -127,9 +127,14 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   // Chrome-aware window: trailing UI furniture doesn't consume the tail budget.
   const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
 
-  // Custom patterns: check the window text (user controls their own regex)
+  // Custom patterns test the RAW tail, not the chrome-stripped window (Finding 4). The
+  // user owns their own false-positive tradeoff, so a pattern keyed on footer text (a
+  // usage percentage, a model name) must still fire even though the footer is furniture
+  // the built-in path strips — and it stays bounded to the same tailLines so it can't
+  // reach deeper into scrollback than before. Matches master's semantics.
   if (customPatterns.length > 0) {
-    const full = lines.join('\n');
+    const raw = tailLines > 0 ? all.slice(-tailLines) : all;
+    const full = raw.join('\n');
     const custom = customPatterns.map(p => typeof p === 'string' ? new RegExp(p, 'i') : p);
     if (custom.some(p => p.test(full))) return true;
   }
