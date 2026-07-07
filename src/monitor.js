@@ -359,8 +359,16 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   }
 
   // --- monitoring ---
-  // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale).
-  if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+  // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale). Gate on
+  // !isWorking: a session actively streaming or awaiting a subagent can't be blocked by a
+  // live limit at the same instant, so a banner visible while it works is stale scrollback —
+  // entering a wait on it just re-detects (and, past the reset, re-cycles every grace window)
+  // without ever legitimately retrying. The waiting-branch already has this `|| isWorking`
+  // guard; mirroring it here also closes the re-detection loop. NOTE: this widens every
+  // WORKING_PATTERN from "skip one injection" to "don't detect while it matches", so those
+  // patterns are all LIVE-ONLY renders by construction (see WORKING_PATTERNS) to bound the
+  // blast radius of any over-match.
+  if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) && !isWorking(stripped)) {
     return enterUsageWait(state, stripped, config);
   }
 

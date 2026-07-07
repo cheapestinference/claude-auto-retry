@@ -169,6 +169,36 @@ describe('processOneTick', () => {
     assert.equal(s.status, 'monitoring');
   });
 
+  // --- Background-agent activity: a session awaiting a subagent is progressing; a stale
+  //     banner above it must not drive retries. The monitoring tick doesn't even enter a
+  //     wait (no re-detection cycle), and a waiting tick returns user-continued. ---
+  it('does NOT enter a wait on a stale banner while a background agent runs (monitoring)', async () => {
+    const pane = [
+      "You've hit your session limit · resets 3pm (Europe/Zurich)", '',
+      '● gsd:gsd-executor(Execute plan 24.1-10)', '',
+      '✻ Waiting for 1 background agent to finish', '',
+      '───────────────', '❯ ', '───────────────', '  Fable 5 | repo@dev | 5h 9% @20:00 | v2.1.202',
+    ].join('\n');
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, mockTmux(pane), '%0', DEFAULT_CONFIG, () => true), 'monitoring');
+    assert.equal(s.status, 'monitoring');
+  });
+  // Counter-repro: a genuinely limited, IDLE session whose scrollback contains a finished
+  // agent's "Backgrounded agent" transcript line MUST still be retried — the transcript
+  // notice is not working state.
+  it('still retries a limited idle session with a finished-agent transcript in scrollback', async () => {
+    const pane = [
+      '● Task(build the parser)', '  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)',
+      '● Done. The parser passes all 14 tests.',
+      "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+    ].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(t._sent.length, 1);   // NOT suppressed — the transcript line isn't "working"
+  });
+
   // --- Regression: self-referential false positive. A limit banner only quoted in
   //     scrollback (a conversation discussing limits, a stale banner scrolled past) is
   //     NOT the live state. Tail-anchoring stops it from driving a retry. ---
