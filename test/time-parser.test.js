@@ -84,6 +84,27 @@ describe('calculateWaitMs', () => {
     );
     assert.ok(wait > 0 && wait <= 3 * 3600_000);
   });
+  // Ambiguous, BOTH interpretations past & outside grace: roll to the EARLIEST next
+  // occurrence (tomorrow's am), not the pm one. "resets 10" at 23:30 Zurich — 10pm passed
+  // 1.5h ago (outside grace), 10am passed 13.5h ago → target 10am tomorrow (~10.5h), not
+  // 10pm tomorrow (~22.5h). The grace check uses the most-recent interpretation, but the
+  // roll must use the earliest.
+  it('ambiguous both-past outside grace rolls to the earliest occurrence (am), not pm', () => {
+    const now = new Date('2026-07-07T21:30:00Z'); // 23:30 Zurich
+    const wait = calculateWaitMs(
+      { hour: 10, minute: 0, timezone: 'Europe/Zurich', ambiguous: true }, 60, 5, now
+    );
+    const hours = wait / 3600_000;
+    assert.ok(hours > 10 && hours < 11, `expected ~10.5h (10am tomorrow), got ${hours.toFixed(2)}h`);
+  });
+  // Ambiguous, most-recent interpretation just passed (within grace): retry promptly.
+  it('ambiguous within-grace (most-recent interpretation just passed) retries promptly', () => {
+    const now = new Date('2026-07-07T20:30:00Z'); // 22:30 Zurich, 30 min after the 10pm interpretation
+    const wait = calculateWaitMs(
+      { hour: 10, minute: 0, timezone: 'Europe/Zurich', ambiguous: true }, 60, 5, now
+    );
+    assert.ok(wait / 60_000 < 5, `expected a prompt retry (~margin), got ${(wait / 60_000).toFixed(1)}min`);
+  });
   it('handles relative time correctly', () => {
     const wait = calculateWaitMs({ relative: true, waitMs: 300_000 }, 60, 5);
     assert.ok(Math.abs(wait - 360_000) < 2000); // 5 min + 60s margin

@@ -115,7 +115,13 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     if (d1 > 0 && d2 > 0) target = Math.min(d1, d2);
     else if (d1 > 0) target = d1;
     else if (d2 > 0) target = d2;
-    else target = rollPastReset(Math.max(d1, d2)); // both past → take the more recent, grace-windowed
+    else {
+      // Both interpretations are past. Grace-check the MOST RECENT one (is it just-passed?);
+      // but if we roll to tomorrow, roll to the EARLIEST occurrence (t1 < t2 always, so
+      // Math.min), not the later pm one — otherwise we wait ~12h longer than necessary.
+      const recent = Math.max(d1, d2);
+      target = recent > -RESET_GRACE_MS ? 0 : Math.min(d1, d2) + 86400_000;
+    }
 
     return Math.max(0, target) + marginSeconds * 1000;
   }
