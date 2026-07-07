@@ -112,6 +112,23 @@ describe('acquireLock (Finding 4)', () => {
     assert.match(still, /someone-else/);
     await unlink(lockPath);
   });
+  // --- Review follow-up: the unlink-based steal double-held (reviewer reproduced 1/120).
+  //     link()-create + rename()-steal grant to exactly one racer. In-process contention
+  //     exercises the interleaving. ---
+  it('grants the lock to exactly one of many concurrent acquirers (no contention)', async () => {
+    const results = await Promise.all(Array.from({ length: 8 }, () => acquireLock(lockPath)));
+    assert.equal(results.filter(r => r.ok).length, 1);
+    // whoever won leaves exactly one lock file; content is never empty
+    const held = (await readFile(lockPath, 'utf-8'));
+    assert.ok(held.trim().length > 0);
+    await Promise.all(results.map(r => r.release()));
+  });
+  it('grants to exactly one when a stale lock is contended', async () => {
+    await writeFile(lockPath, '2147483646');   // stale, dead pid
+    const results = await Promise.all(Array.from({ length: 8 }, () => acquireLock(lockPath)));
+    assert.equal(results.filter(r => r.ok).length, 1);
+    await Promise.all(results.map(r => r.release()));
+  });
 });
 
 // A small fixture: pane %1 (pane_pid 100) has a claude (200) as a child; pane %2 (300)
