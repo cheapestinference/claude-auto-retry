@@ -52,6 +52,23 @@ describe('detectOverload', () => {
   it('does NOT match a "status.claude.com" mention in prose/comments', () => assert.equal(detectOverload('see status.claude.com for incidents', PATS), false));
   it('does NOT match a bare "500 Internal server error" without the API Error frame', () => assert.equal(detectOverload('500 Internal server error · try again', PATS), false));
 
+  // --- Self-referential: the phrase patterns must not fire when merely quoted/discussed in
+  //     the pane (a session explaining this tool, or a chat about API errors). The real
+  //     render always carries an `API Error` line, like the safeguard path requires.
+  //     (Observed live: the tool's own diagnostic text matched /temporarily limiting requests/.) ---
+  it('does NOT match "temporarily limiting requests" in prose (no API Error nearby)', () => {
+    assert.equal(detectOverload('the "temporarily limiting requests" pattern is a built-in overload signal', PATS), false);
+  });
+  it('does NOT match a quoted "overloaded_error" in prose (no API Error nearby)', () => {
+    assert.equal(detectOverload('the overloaded_error JSON type is what we anchor on', PATS), false);
+  });
+  it('still matches the real API-429 render (API Error on the line)', () => {
+    assert.equal(detectOverload('● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited', PATS), true);
+  });
+  it('still matches a multi-line overloaded_error body (API Error one line up)', () => {
+    assert.equal(detectOverload('API Error: 529\n{"type":"error","error":{"type":"overloaded_error"}}', PATS), true);
+  });
+
   // --- Terminal vs transient: the parens form means Claude is STILL retrying. Acting
   //     on it would interrupt Claude's own backoff. Only the colon form is terminal. ---
   it('does NOT match the transient parens retry form', () => assert.equal(detectOverload('API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10', PATS), false));
