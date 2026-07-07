@@ -57,7 +57,13 @@ const isWorkingLine = (l) => WORKING_PATTERNS.some((p) => p.test(l));
 const CHROME_LINE = [
   /^\s*$/,                                          // blank
   /^[\s─│╭╮╰╯┌┐└┘├┤┬┴┼▏▕|]+$/,                       // box-drawing / rules
-  /^\s*[❯>]\s*$/,                                    // empty input prompt
+  /^\s*│\s*[>❯].*│\s*$/,                             // boxed input row ("│ > … │"): anchored to
+                                                     // the PROMPT GLYPH, not "anything between two
+                                                     // bars" — a bare │…│ rule matches unicode-
+                                                     // border tool output (psql/duf tables) and
+                                                     // would strip it as chrome, pulling a stale
+                                                     // banner back in. The glyph is the discriminator.
+  /^\s*[❯>]\s*$/,                                    // empty input prompt (bare, unboxed)
   /^\s*⏵⏵/,                                          // mode footer ("⏵⏵ auto mode on…", "⏵⏵ accept edits…")
   /\bauto mode\b/i,                                 // footer mode text / "Allowed by auto mode" notice
   /shift\+tab to (?:cycle|select)/i,                // tab-cycle footer hint (anchored to the phrase)

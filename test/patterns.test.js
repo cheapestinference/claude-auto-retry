@@ -154,6 +154,39 @@ describe('isRateLimited', () => {
     assert.equal(isRateLimited("You've hit your session limit · resets 3pm (UTC)", [], 0), true);
   });
 
+  // --- Review follow-up: the flagship "banner behind a widget" fix must also fire for the
+  //     BOXED input render Claude Code actually uses. contentTail stops at the first
+  //     non-chrome line from the bottom; the box middle row "│ >          │" isn't matched
+  //     by the all-box-chars rule (the `>` breaks it) nor the empty-prompt rule (starts
+  //     with `│`), so the strip halted at the input box and never reached the widget/banner
+  //     above. Classifying the "│ … │" row as chrome fixes it. ---
+  const widget = ['  8 tasks (4 done, 1 in progress, 3 open)',
+    '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '   … +3 completed',
+    '  new task? /clear to save 300k tokens'];
+  const banner = "You've hit your session limit · resets 3pm (UTC)";
+  it('finds a banner behind a widget above a BARE prompt (tail=12)', () => {
+    const bare = ['───────', '❯ ', '───────', '  ⏵⏵ auto mode on'];
+    assert.equal(isRateLimited([banner, ...widget, ...bare].join('\n'), [], 12), true);
+  });
+  it('finds a banner behind a widget above a BOXED input "│ > │" (tail=12)', () => {
+    const boxed = ['╭────────────────────────╮', '│ >                      │', '╰────────────────────────╯', '  ? for shortcuts'];
+    assert.equal(isRateLimited([banner, ...widget, ...boxed].join('\n'), [], 12), true);
+  });
+  it('boxed input with typed text is still chrome (box row stripped)', () => {
+    const boxed = ['╭────────────────────────╮', '│ > continue the task    │', '╰────────────────────────╯'];
+    assert.equal(isRateLimited([banner, ...widget, ...boxed].join('\n'), [], 12), true);
+  });
+  // The rule must NOT strip unicode-border tool output (psql/mysql/duf tables). Those rows
+  // (`│ 0 │ user0 │`, no prompt glyph) are content — stripping them would collapse the
+  // content distance and pull a stale, scrolled-past banner back into the window.
+  it('does NOT strip a psql unicode-border table, so a stale banner above it stays out', () => {
+    const table = ['  ⎿  ┌────────┬───────────┐', '     │ id     │ name      │', '     ├────────┼───────────┤',
+      ...Array(10).fill('     │ 0      │ user0     │'), '     └────────┴───────────┘'];
+    const pane = ["You've hit your session limit · resets 3pm (UTC)",
+      '● Bash(psql -c "select * from users limit 8")', ...table, '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+
   // --- Finding 2: chrome classifiers must not match ordinary content. Each probe below is
   //     a real output line the reviewer showed being wrongly stripped as chrome, which
   //     lets contentTail "see through" it and pull a STALE banner above back into the
