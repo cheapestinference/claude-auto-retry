@@ -11,7 +11,7 @@
 
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, open, unlink, mkdir, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, unlink, link, rename, mkdir, appendFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -52,6 +52,10 @@ export const LOCK_FILE = join(homedir(), '.claude-auto-retry', 'reconcile.lock')
 // as "alive" forever, wedging acquireLock at {ok:false} and silently disabling self-heal).
 // Linux: /proc/<pid>/stat field 22 (starttime; the "(comm)" field may contain spaces/parens,
 // so slice past the last ')'). Fallback (macOS/BSD, no /proc): `ps -o lstart=`. null if gone.
+// NOTE: `ps -o lstart=` is locale-dependent (LC_TIME), so on non-Linux a checker running
+// under a different locale than the writer (e.g. cron vs shell) could misjudge a live holder
+// as stale. Linux always takes the /proc path on both sides, and this tool targets
+// Linux/systemd, so it's unaffected in practice.
 export async function processStartToken(pid) {
   try {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf-8');
@@ -78,34 +82,64 @@ async function holderIsLive(holderId) {
 }
 
 // Only remove the lock if it still holds OUR identity — never cross-delete a lock a
-// concurrent run has since taken over (so a run that was stolen from can't delete the
-// new holder's lock on release).
+// concurrent run has since taken over. Compare trimmed (a null-token id is a bare "<pid>",
+// so this also matches its own file content without a trailing-tab mismatch).
 async function releaseLock(lockPath, myId) {
   try {
     if ((await readFile(lockPath, 'utf-8')).trim() === myId) await unlink(lockPath);
   } catch { /* already gone or unreadable */ }
 }
 
+// Single-instance lock with an unforgeable holder identity ("<pid>\t<startToken>", or a bare
+// "<pid>" when no token is available). Two atomicity properties close the double-hold windows
+// a plain open('wx')+write left open:
+//   • CREATE atomically with content — write the id to a private temp file, then link() it
+//     into place. link() fails EEXIST if a lock exists, and a racer never sees an empty or
+//     half-written lock (the gap between open and write).
+//   • STEAL a stale lock via rename() to a graveyard name — rename of a given path succeeds
+//     for exactly ONE racer; the loser ENOENTs and retries. No unconditional unlink that
+//     could delete a lock another run just legitimately created.
 export async function acquireLock(lockPath = LOCK_FILE) {
-  await mkdir(dirname(lockPath), { recursive: true });
-  const myId = `${process.pid}\t${(await processStartToken(process.pid)) ?? ''}`;
+  const dir = dirname(lockPath);
+  await mkdir(dir, { recursive: true });
+  const token = await processStartToken(process.pid);
+  const myId = token ? `${process.pid}\t${token}` : String(process.pid);
+  const uniq = `${process.pid}.${Date.now()}`;
   const noop = { ok: false, release: async () => {} };
-  for (let attempt = 0; attempt < 2; attempt++) {
+
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const tmp = join(dir, `.lock.${uniq}.${attempt}.tmp`);
     try {
-      const fh = await open(lockPath, 'wx');   // wx = O_CREAT|O_EXCL: atomic create-or-fail
-      await fh.writeFile(myId);
-      await fh.close();
-      // Re-read: if a concurrent stale-steal clobbered our write between create and now, we
-      // don't actually hold it — back off rather than double-hold.
-      if ((await readFile(lockPath, 'utf-8')).trim() !== myId) return noop;
+      await writeFile(tmp, myId);
+      await link(tmp, lockPath);              // atomic create-or-EEXIST, content already present
+      await unlink(tmp).catch(() => {});
       return { ok: true, release: () => releaseLock(lockPath, myId) };
     } catch (err) {
+      await unlink(tmp).catch(() => {});
       if (err.code !== 'EEXIST') throw err;
-      let holderId = '';
-      try { holderId = (await readFile(lockPath, 'utf-8')).trim(); } catch { /* unreadable */ }
-      if (holderId && await holderIsLive(holderId)) return noop;   // genuine live holder
-      try { await unlink(lockPath); } catch { /* someone else won the steal */ }  // stale → steal + retry
     }
+
+    // A lock exists. Genuine live holder → back off; otherwise steal it atomically.
+    let holderId = '';
+    try { holderId = (await readFile(lockPath, 'utf-8')).trim(); }
+    catch { continue; }                       // vanished between link-fail and read → retry create
+    if (holderId && await holderIsLive(holderId)) return noop;
+
+    const grave = join(dir, `.lock.${uniq}.${attempt}.grave`);
+    try { await rename(lockPath, grave); }
+    catch (err) {
+      if (err.code === 'ENOENT') continue;    // lost the steal race → retry create
+      throw err;
+    }
+    // Won the rename. Confirm we took the SAME stale lock we evaluated; if a racer replaced
+    // it with a LIVE one in the gap, restore it rather than steal a live holder.
+    let stolen = '';
+    try { stolen = (await readFile(grave, 'utf-8')).trim(); } catch { /* empty/gone */ }
+    if (stolen && stolen !== holderId && await holderIsLive(stolen)) {
+      await rename(grave, lockPath).catch(() => {});
+      return noop;
+    }
+    await unlink(grave).catch(() => {});      // stale confirmed → drop it, loop to create
   }
   return noop;
 }
