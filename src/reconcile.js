@@ -47,23 +47,67 @@ function isProcessAlive(pid) {
 // when ok is false, so callers can always call it.
 export const LOCK_FILE = join(homedir(), '.claude-auto-retry', 'reconcile.lock');
 
+// Process START TOKEN — an identity that survives PID reuse (a bare PID cannot: the kernel
+// reuses PIDs, so a stale lock's PID may later belong to an unrelated live process and read
+// as "alive" forever, wedging acquireLock at {ok:false} and silently disabling self-heal).
+// Linux: /proc/<pid>/stat field 22 (starttime; the "(comm)" field may contain spaces/parens,
+// so slice past the last ')'). Fallback (macOS/BSD, no /proc): `ps -o lstart=`. null if gone.
+export async function processStartToken(pid) {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf-8');
+    const after = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+    if (after[19]) return after[19];   // field 22 overall = index 19 after "state"
+  } catch { /* not Linux, or process gone */ }
+  try {
+    const { stdout } = await execFile('ps', ['-o', 'lstart=', '-p', String(pid)]);
+    return stdout.trim() || null;
+  } catch { return null; }
+}
+
+// Is the recorded lock holder still the SAME live process (not just a reused PID)? Identity
+// is "<pid>\t<startToken>". A dead PID → stale. A live PID whose start token no longer
+// matches → the PID was reused → stale. A legacy bare-PID lock (no token) → respect it if
+// the PID is alive (can't disambiguate; don't risk stealing a real holder's lock).
+async function holderIsLive(holderId) {
+  const tab = holderId.indexOf('\t');
+  const pid = Number(tab === -1 ? holderId : holderId.slice(0, tab));
+  if (!pid || !isProcessAlive(pid)) return false;
+  const recordedStart = tab === -1 ? '' : holderId.slice(tab + 1);
+  if (!recordedStart) return true;
+  return (await processStartToken(pid)) === recordedStart;
+}
+
+// Only remove the lock if it still holds OUR identity — never cross-delete a lock a
+// concurrent run has since taken over (so a run that was stolen from can't delete the
+// new holder's lock on release).
+async function releaseLock(lockPath, myId) {
+  try {
+    if ((await readFile(lockPath, 'utf-8')).trim() === myId) await unlink(lockPath);
+  } catch { /* already gone or unreadable */ }
+}
+
 export async function acquireLock(lockPath = LOCK_FILE) {
   await mkdir(dirname(lockPath), { recursive: true });
+  const myId = `${process.pid}\t${(await processStartToken(process.pid)) ?? ''}`;
+  const noop = { ok: false, release: async () => {} };
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const fh = await open(lockPath, 'wx');   // wx = O_CREAT|O_EXCL: fails if it exists
-      await fh.writeFile(String(process.pid));
+      const fh = await open(lockPath, 'wx');   // wx = O_CREAT|O_EXCL: atomic create-or-fail
+      await fh.writeFile(myId);
       await fh.close();
-      return { ok: true, release: async () => { try { await unlink(lockPath); } catch { /* already gone */ } } };
+      // Re-read: if a concurrent stale-steal clobbered our write between create and now, we
+      // don't actually hold it — back off rather than double-hold.
+      if ((await readFile(lockPath, 'utf-8')).trim() !== myId) return noop;
+      return { ok: true, release: () => releaseLock(lockPath, myId) };
     } catch (err) {
       if (err.code !== 'EEXIST') throw err;
-      let holder = null;
-      try { holder = Number((await readFile(lockPath, 'utf-8')).trim()); } catch { /* unreadable */ }
-      if (holder && isProcessAlive(holder)) return { ok: false, release: async () => {} };
-      try { await unlink(lockPath); } catch { /* someone else won the race */ }  // stale → steal and retry
+      let holderId = '';
+      try { holderId = (await readFile(lockPath, 'utf-8')).trim(); } catch { /* unreadable */ }
+      if (holderId && await holderIsLive(holderId)) return noop;   // genuine live holder
+      try { await unlink(lockPath); } catch { /* someone else won the steal */ }  // stale → steal + retry
     }
   }
-  return { ok: false, release: async () => {} };
+  return noop;
 }
 
 // Prune numeric PID entries whose process is gone: a dead PID can never legitimately match

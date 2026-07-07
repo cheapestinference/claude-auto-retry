@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { writeFile, unlink, readFile } from 'node:fs/promises';
 import {
   parsePanes, parseProcesses, parseRunningMonitors, planReconcile, runningFromPgrep,
-  pruneExcludeEntries, acquireLock,
+  pruneExcludeEntries, acquireLock, processStartToken,
 } from '../src/reconcile.js';
 
 describe('reconcile parsing', () => {
@@ -80,6 +80,37 @@ describe('acquireLock (Finding 4)', () => {
     const a = await acquireLock(lockPath);
     assert.equal(a.ok, true);               // stole the stale lock
     await a.release();
+  });
+
+  // --- Review follow-up: a bare-PID lock can't survive PID reuse. A stale lock holding a
+  //     PID the kernel later reuses for an UNRELATED live process would read as "alive"
+  //     forever → acquireLock wedged at {ok:false} → self-healing silently off. The lock
+  //     identity now includes the process START TOKEN, so a reused PID (different start)
+  //     is correctly seen as stale and stolen. ---
+  it('does not wedge on PID reuse: steals a lock whose PID is alive but start-token differs', async () => {
+    // our own live PID, but a start token that can't match this process → must be stealable
+    await writeFile(lockPath, `${process.pid}\tSTALE-START-TOKEN-0000`);
+    const a = await acquireLock(lockPath);
+    assert.equal(a.ok, true);               // recognized stale via start-token mismatch, stolen
+    await a.release();
+  });
+  it('respects a genuine live holder whose start token matches (does not steal)', async () => {
+    // our live PID WITH its real start token = a genuine live holder; must not be stolen.
+    await writeFile(lockPath, `${process.pid}\t${await processStartToken(process.pid)}`);
+    const a = await acquireLock(lockPath);
+    assert.equal(a.ok, false);              // live holder, matching identity → back off
+    await unlink(lockPath);
+  });
+  // --- Review follow-up: release() must not cross-delete. If we were stolen from (the lock
+  //     now holds someone else's identity), releasing must leave their lock intact. ---
+  it('release only removes the lock when we still own it (no cross-delete)', async () => {
+    const a = await acquireLock(lockPath);
+    assert.equal(a.ok, true);
+    await writeFile(lockPath, '999999\tsomeone-else');  // a concurrent run replaced it
+    await a.release();                                   // must NOT delete their lock
+    const still = await readFile(lockPath, 'utf-8');
+    assert.match(still, /someone-else/);
+    await unlink(lockPath);
   });
 });
 
