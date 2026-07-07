@@ -109,6 +109,22 @@ describe('isWorking', () => {
   it('treats the "Retrying in" suffix as still-working', () => assert.equal(isWorking('API Error: 529 Overloaded · Retrying in 5s · attempt 3/10'), true));
   it('treats an "attempt n/m" indicator as still-working', () => assert.equal(isWorking('thinking… attempt 2/10'), true));
 
+  // The main thread awaiting a subagent is working — injecting a retry there spams a
+  // progressing session. LIVE-ONLY render, so it's safe (see the counter-repro below).
+  it('treats "Waiting for N background agent(s) to finish" as working', () => {
+    assert.equal(isWorking('✻ Waiting for 1 background agent to finish'), true);
+    assert.equal(isWorking('✻ Waiting for 3 background agents to finish'), true);
+  });
+  // Counter-repro (reviewer): the "Backgrounded agent" NOTICE is a transcript line that
+  // lingers after the agent finished. It must NOT be treated as working, or a genuinely
+  // limited idle session (banner live below the stale notice) would never be retried.
+  it('does NOT treat the lingering "Backgrounded agent" transcript notice as working', () => {
+    const pane = ['● Task(build the parser)', '  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)',
+      '● Done. The parser passes all 14 tests.',
+      "You've hit your session limit · resets 3pm (Europe/Zurich)", '❯ '].join('\n');
+    assert.equal(isWorking(pane), false);   // agent finished; the pane is idle at a live limit
+  });
+
   // --- Finding 3: isWorking must measure the SAME bottom as isRateLimited (both
   //     chrome-aware). A live working footer pushed up by a tall chrome stack below it was
   //     invisible to the old raw tail, while chrome-aware isRateLimited still saw a

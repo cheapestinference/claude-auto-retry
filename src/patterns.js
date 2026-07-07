@@ -34,6 +34,11 @@ const WORKING_PATTERNS = [
   /\besc\b.*\binterrupt\b/i,  // tolerate reordering/spacing in the same footer
   /Retrying in\b/i,           // internal-retry suffix — retries not yet exhausted
   /\battempt\s+\d+\/\d+/i,    // "attempt 3/10" companion to the retry suffix
+  // The main thread is blocked awaiting a subagent — actively working, even though the
+  // streaming footer isn't on this thread. LIVE-ONLY render (it disappears the moment the
+  // agent finishes), so it's safe to treat as working: unlike the "Backgrounded agent"
+  // transcript notice, it can't linger and pin isWorking on an idle, genuinely-limited pane.
+  /waiting for \d+ background agents? to finish/i,
 ];
 const isWorkingLine = (l) => WORKING_PATTERNS.some((p) => p.test(l));
 
