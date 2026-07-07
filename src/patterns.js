@@ -292,17 +292,28 @@ function toRegexes(patterns) {
   return out;
 }
 
-// Returns { pattern, line } for the first overload pattern matching a tail line, else
-// null. Per-line (not whole-tail) so we can report WHICH line tripped it — invaluable
-// for diagnosing a future false positive (the original bug logged no reason at all).
+// A REAL overload always renders as an `API Error:` line ("API Error: 529 …", "API Error:
+// Server is temporarily limiting requests …", or "API Error: …" one line above a JSON
+// `overloaded_error` body). Requiring that line nearby — the same discipline safeguardMatch
+// uses — keeps the phrase patterns ("temporarily limiting requests", "overloaded_error")
+// from firing when they're merely quoted/discussed in the pane (e.g. a session explaining
+// this tool, or a chat about API errors). Mirrors SAFEGUARD_ANCHOR.
+const OVERLOAD_ANCHOR = [/\bAPI Error\b/i];
+
+// Returns { pattern, line } for the first overload pattern matching a tail line (with an
+// `API Error` line nearby), else null. Per-line (not whole-tail) so we can report WHICH
+// line tripped it — invaluable for diagnosing a future false positive (the original bug
+// logged no reason at all).
 export function overloadMatch(text, patterns = []) {
   if (!patterns || patterns.length === 0) return null;
   const lines = tail(text);
   if (!lines.join('').trim()) return null;
   const regexes = toRegexes(patterns);
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
     for (const r of regexes) {
-      if (r.test(line)) return { pattern: r.source, line: line.trim().slice(0, 200) };
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, OVERLOAD_ANCHOR)) {
+        return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
+      }
     }
   }
   return null;
