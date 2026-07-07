@@ -115,7 +115,8 @@ describe('calculateWaitMs', () => {
   });
 
   // Regression (#6): reset already passed today → target tomorrow (~22.6h),
-  // not 48h. Symmetric case for the off-by-a-day bug.
+  // not 48h. Symmetric case for the off-by-a-day bug. (1h20m past → beyond the grace
+  // window below, so it still rolls to tomorrow.)
   it('targets tomorrow when reset time already passed today', () => {
     const now = new Date('2026-05-03T15:00:00Z'); // 1:00 AM next day in Melbourne
     const wait = calculateWaitMs(
@@ -123,5 +124,34 @@ describe('calculateWaitMs', () => {
     );
     const hours = wait / 3600_000;
     assert.ok(hours > 22 && hours < 23, `expected ~22.6h, got ${hours.toFixed(2)}h`);
+  });
+
+  // Reset-boundary grace window: detecting a limit banner whose reset time only JUST
+  // passed (the monitor can settle on the banner minutes-to-~an-hour after the reset,
+  // e.g. a session that kept working past it) must retry promptly — the limit has
+  // effectively reset — not park ~24h by rolling to tomorrow. Reproduces the live
+  // "resets 10am" stall: detected 10:03 Zurich, previously waited 86273s (~24h).
+  it('retries promptly when the reset time only just passed (grace window)', () => {
+    const now = new Date('2026-07-07T08:03:06Z'); // 10:03 Zurich, 3 min after a 10am reset
+    const wait = calculateWaitMs(
+      { hour: 10, minute: 0, timezone: 'Europe/Zurich' }, 60, 5, now
+    );
+    const mins = wait / 60_000;
+    assert.ok(mins < 5, `expected a prompt retry (~margin), got ${mins.toFixed(1)}min`);
+  });
+  it('applies the grace window within the hour after the reset', () => {
+    const now = new Date('2026-07-07T08:55:00Z'); // 10:55 Zurich, 55 min after a 10am reset
+    const wait = calculateWaitMs(
+      { hour: 10, minute: 0, timezone: 'Europe/Zurich' }, 60, 5, now
+    );
+    assert.ok(wait / 60_000 < 5, 'within 1h grace → prompt retry');
+  });
+  it('still rolls to tomorrow once the reset is well over an hour past', () => {
+    const now = new Date('2026-07-07T10:00:00Z'); // 12:00 Zurich, 2h after a 10am reset
+    const wait = calculateWaitMs(
+      { hour: 10, minute: 0, timezone: 'Europe/Zurich' }, 60, 5, now
+    );
+    const hours = wait / 3600_000;
+    assert.ok(hours > 21 && hours < 23, `expected ~22h (tomorrow), got ${hours.toFixed(2)}h`);
   });
 });

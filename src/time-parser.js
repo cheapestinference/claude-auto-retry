@@ -30,6 +30,21 @@ export function parseResetTime(text) {
   return null;
 }
 
+// Reset-boundary grace window. A live limit banner whose parsed reset time is already in
+// the PAST almost always means the reset just happened: the monitor can settle on the
+// banner minutes-to-an-hour after the reset (a session that kept working past it — see the
+// chrome-aware anti-spam guard), and Claude's session limits reset on short cadences, so a
+// past reset time is recent, not "tomorrow". Rolling a just-passed reset a full day forward
+// parks the session ~24h even though the limit has effectively cleared (observed live:
+// "resets 10am" detected at 10:03 → 86273s wait). rollPastReset retries promptly instead
+// (diff→0, so the wait is just the margin); only a reset MORE than the grace window in the
+// past plausibly means the next occurrence is tomorrow.
+const RESET_GRACE_MS = 60 * 60 * 1000; // 1 hour
+function rollPastReset(diffMs) {
+  if (diffMs >= 0) return diffMs;
+  return diffMs > -RESET_GRACE_MS ? 0 : diffMs + 86400_000;
+}
+
 export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, now = new Date()) {
   if (!parsed) return (fallbackHours * 3600 + marginSeconds) * 1000;
 
@@ -100,13 +115,12 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     if (d1 > 0 && d2 > 0) target = Math.min(d1, d2);
     else if (d1 > 0) target = d1;
     else if (d2 > 0) target = d2;
-    else target = d1 + 86400_000; // tomorrow
+    else target = rollPastReset(Math.max(d1, d2)); // both past → take the more recent, grace-windowed
 
     return Math.max(0, target) + marginSeconds * 1000;
   }
 
-  let diff = getTargetTimestamp(parsed.hour, parsed.minute) - now.getTime();
-  if (diff < 0) diff += 86400_000; // tomorrow
+  const diff = rollPastReset(getTargetTimestamp(parsed.hour, parsed.minute) - now.getTime());
 
   return diff + marginSeconds * 1000;
 }
