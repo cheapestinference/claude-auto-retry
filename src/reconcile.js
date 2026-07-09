@@ -11,7 +11,7 @@
 
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, writeFile, unlink, link, rename, mkdir, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, unlink, link, mkdir, appendFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -90,56 +90,75 @@ async function releaseLock(lockPath, myId) {
   } catch { /* already gone or unreadable */ }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Atomic create-with-content: write `id` to a private temp file, then hardlink it into
+// place. link() is atomic and fails EEXIST if the path already exists — so a racer never
+// sees an empty or half-written file (the gap a plain open('wx')+write left). Returns true
+// iff we now own `path`.
+async function linkCreate(path, tmp, id) {
+  try {
+    await writeFile(tmp, id);
+    await link(tmp, path);
+    return true;
+  } catch (err) {
+    if (err.code === 'EEXIST') return false;
+    throw err;
+  } finally {
+    await unlink(tmp).catch(() => {});
+  }
+}
+
 // Single-instance lock with an unforgeable holder identity ("<pid>\t<startToken>", or a bare
-// "<pid>" when no token is available). Two atomicity properties close the double-hold windows
-// a plain open('wx')+write left open:
-//   • CREATE atomically with content — write the id to a private temp file, then link() it
-//     into place. link() fails EEXIST if a lock exists, and a racer never sees an empty or
-//     half-written lock (the gap between open and write).
-//   • STEAL a stale lock via rename() to a graveyard name — rename of a given path succeeds
-//     for exactly ONE racer; the loser ENOENTs and retries. No unconditional unlink that
-//     could delete a lock another run just legitimately created.
+// "<pid>" when no token is available). Creating the lock is a plain atomic linkCreate. The
+// hard part is breaking a STALE lock (a run SIGKILLed before release) without two runs both
+// breaking + recreating it — the double-hold class. We serialize the break through a second
+// "breaker" lock, so exactly one run ever removes and recreates a stale main lock; everyone
+// else either backs off (live holder) or waits for the breaker. No rename/steal of a lock
+// whose liveness we haven't re-verified while holding the breaker, so a live holder's lock is
+// never moved out from under it.
 export async function acquireLock(lockPath = LOCK_FILE) {
   const dir = dirname(lockPath);
   await mkdir(dir, { recursive: true });
   const token = await processStartToken(process.pid);
   const myId = token ? `${process.pid}\t${token}` : String(process.pid);
+  const breakerPath = `${lockPath}.breaker`;
   const uniq = `${process.pid}.${Date.now()}`;
   const noop = { ok: false, release: async () => {} };
 
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const tmp = join(dir, `.lock.${uniq}.${attempt}.tmp`);
-    try {
-      await writeFile(tmp, myId);
-      await link(tmp, lockPath);              // atomic create-or-EEXIST, content already present
-      await unlink(tmp).catch(() => {});
+  for (let attempt = 0; attempt < 8; attempt++) {
+    // Fast path: create the lock outright.
+    if (await linkCreate(lockPath, join(dir, `.acq.${uniq}.${attempt}`), myId)) {
       return { ok: true, release: () => releaseLock(lockPath, myId) };
-    } catch (err) {
-      await unlink(tmp).catch(() => {});
-      if (err.code !== 'EEXIST') throw err;
     }
-
-    // A lock exists. Genuine live holder → back off; otherwise steal it atomically.
+    // Exists. Genuine live holder → back off.
     let holderId = '';
-    try { holderId = (await readFile(lockPath, 'utf-8')).trim(); }
-    catch { continue; }                       // vanished between link-fail and read → retry create
+    try { holderId = (await readFile(lockPath, 'utf-8')).trim(); } catch { continue; }
     if (holderId && await holderIsLive(holderId)) return noop;
 
-    const grave = join(dir, `.lock.${uniq}.${attempt}.grave`);
-    try { await rename(lockPath, grave); }
-    catch (err) {
-      if (err.code === 'ENOENT') continue;    // lost the steal race → retry create
-      throw err;
+    // Stale. Take the breaker to serialize removal+recreation.
+    if (!(await linkCreate(breakerPath, join(dir, `.brk.${uniq}.${attempt}`), myId))) {
+      // Someone else is breaking. Only clear the breaker if IT is stale (crashed mid-break).
+      let bId = '';
+      try { bId = (await readFile(breakerPath, 'utf-8')).trim(); } catch {}
+      if (!bId || !(await holderIsLive(bId))) await unlink(breakerPath).catch(() => {});
+      await sleep(10);
+      continue;
     }
-    // Won the rename. Confirm we took the SAME stale lock we evaluated; if a racer replaced
-    // it with a LIVE one in the gap, restore it rather than steal a live holder.
-    let stolen = '';
-    try { stolen = (await readFile(grave, 'utf-8')).trim(); } catch { /* empty/gone */ }
-    if (stolen && stolen !== holderId && await holderIsLive(stolen)) {
-      await rename(grave, lockPath).catch(() => {});
-      return noop;
+    try {
+      // We hold the breaker. Re-verify the lock is still stale (a prior breaker may have
+      // already replaced it with a live one), then remove it and create ours.
+      let cur = '';
+      try { cur = (await readFile(lockPath, 'utf-8')).trim(); } catch {}
+      if (cur && await holderIsLive(cur)) return noop;      // became live → back off
+      await unlink(lockPath).catch(() => {});               // remove the stale lock (sole breaker)
+      if (await linkCreate(lockPath, join(dir, `.acqb.${uniq}.${attempt}`), myId)) {
+        return { ok: true, release: () => releaseLock(lockPath, myId) };
+      }
+      // A fresh acquirer won the empty path in the unlink→create gap; loop and re-evaluate.
+    } finally {
+      await releaseLock(breakerPath, myId);                 // release the breaker (identity-checked)
     }
-    await unlink(grave).catch(() => {});      // stale confirmed → drop it, loop to create
   }
   return noop;
 }

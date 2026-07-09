@@ -2,11 +2,30 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { writeFile, unlink, readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { writeFile, unlink, readFile, mkdtemp, rm } from 'node:fs/promises';
 import {
   parsePanes, parseProcesses, parseRunningMonitors, planReconcile, runningFromPgrep,
   pruneExcludeEntries, acquireLock, processStartToken,
 } from '../src/reconcile.js';
+
+const RECONCILE_URL = new URL('../src/reconcile.js', import.meta.url).href;
+// A worker that acquires the lock, records its exact hold interval (hrtime), then releases —
+// run as a separate PROCESS so it exercises real cross-process syscall interleaving (an
+// in-process caller shares one PID/identity and just sees its own live lock).
+const LOCK_WORKER = `
+import { acquireLock } from ${JSON.stringify(RECONCILE_URL)};
+import { appendFile } from 'node:fs/promises';
+const [LOCK, LOG, iter] = process.argv.slice(2);
+const r = await acquireLock(LOCK);
+if (!r.ok) process.exit(0);
+const a = process.hrtime.bigint();
+await new Promise((res) => setTimeout(res, 15));
+const b = process.hrtime.bigint();
+await appendFile(LOG, iter + ' ' + a + ' ' + b + '\\n');
+await r.release();
+process.exit(0);
+`;
 
 describe('reconcile parsing', () => {
   it('parses tmux pane list', () => {
@@ -112,22 +131,38 @@ describe('acquireLock (Finding 4)', () => {
     assert.match(still, /someone-else/);
     await unlink(lockPath);
   });
-  // --- Review follow-up: the unlink-based steal double-held (reviewer reproduced 1/120).
-  //     link()-create + rename()-steal grant to exactly one racer. In-process contention
-  //     exercises the interleaving. ---
-  it('grants the lock to exactly one of many concurrent acquirers (no contention)', async () => {
-    const results = await Promise.all(Array.from({ length: 8 }, () => acquireLock(lockPath)));
-    assert.equal(results.filter(r => r.ok).length, 1);
-    // whoever won leaves exactly one lock file; content is never empty
-    const held = (await readFile(lockPath, 'utf-8'));
-    assert.ok(held.trim().length > 0);
-    await Promise.all(results.map(r => r.release()));
-  });
-  it('grants to exactly one when a stale lock is contended', async () => {
-    await writeFile(lockPath, '2147483646');   // stale, dead pid
-    const results = await Promise.all(Array.from({ length: 8 }, () => acquireLock(lockPath)));
-    assert.equal(results.filter(r => r.ok).length, 1);
-    await Promise.all(results.map(r => r.release()));
+  // --- Review follow-up: the unlink/rename-based steal double-held under real cross-process
+  //     contention (reviewer reproduced it; an in-process test can't — all callers share one
+  //     PID and just see their own live lock). The serialized-breaker design grants strict
+  //     mutual exclusion. Spawn real processes, seed a STALE lock each round to force the
+  //     break path, and assert no two hold intervals overlap in time. ---
+  it('grants mutual exclusion across real concurrent processes (breaks a stale lock safely)', async () => {
+    const wdir = await mkdtemp(join(tmpdir(), 'car-lockx-'));
+    const worker = join(wdir, 'w.mjs'), LOCK = join(wdir, 'x.lock'), LOG = join(wdir, 'x.log');
+    await writeFile(worker, LOCK_WORKER);
+    await writeFile(LOG, '');
+    const run = (it) => new Promise((res) =>
+      spawn(process.execPath, [worker, LOCK, LOG, String(it)], { stdio: 'ignore' }).on('exit', res));
+    const ITER = 12, N = 6;
+    for (let i = 0; i < ITER; i++) {
+      await writeFile(LOCK, '2147483646');                 // stale, dead-pid lock → force the break path
+      await Promise.all(Array.from({ length: N }, () => run(i)));
+      await unlink(LOCK).catch(() => {});
+    }
+    const byIter = {};
+    for (const line of (await readFile(LOG, 'utf-8')).trim().split('\n').filter(Boolean)) {
+      const [it, a, b] = line.split(' ');
+      (byIter[it] ??= []).push([BigInt(a), BigInt(b)]);
+    }
+    let overlaps = 0;
+    for (const it in byIter) {
+      const h = byIter[it];
+      for (let x = 0; x < h.length; x++)
+        for (let y = x + 1; y < h.length; y++)
+          if (h[x][0] < h[y][1] && h[y][0] < h[x][1]) overlaps++;   // intervals intersect → concurrent hold
+    }
+    await rm(wdir, { recursive: true, force: true });
+    assert.equal(overlaps, 0, `expected no time-overlapping holds across processes, got ${overlaps}`);
   });
 });
 
