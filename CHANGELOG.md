@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flag stays bounded (#33).
 
 ### Fixed
+- Monitor no longer stays parked on a stale wait timer once the session resumes:
+  while counting down a usage wait, a pane that has resumed working (e.g. the user
+  manually typed `continue` to unstick a wrong/stale wait) now drops back to
+  monitoring immediately, so a second, genuine limit that follows is detected
+  instead of being masked until the old timer expires (#39).
 - `rate_limit` StopFailure events are no longer routed through the seconds-scale
   overload path — a session/usage limit is an hours-scale wait owned by the
   usage path, and the misroute made the two fight (futile `Continue` retries

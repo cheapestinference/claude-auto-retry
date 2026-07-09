@@ -145,7 +145,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   }
 
   if (state.status === 'waiting') {
-    if (Date.now() < state.waitUntil) return 'waiting';
+    // Keep counting down UNLESS the session has resumed working. A working pane means
+    // the user manually continued (often to unstick a wrong/stale wait) — falling through
+    // to the isWorking gate below returns us to monitoring, so a SECOND, genuine limit that
+    // follows is detected instead of being masked until the old timer expires (issue #39).
+    if (Date.now() < state.waitUntil && !isWorking(stripped)) return 'waiting';
     if (!isAlive()) return 'exit';
 
     // Stop driving the session if the limit cleared OR Claude has already resumed and

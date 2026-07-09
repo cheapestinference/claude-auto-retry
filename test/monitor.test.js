@@ -132,6 +132,20 @@ describe('processOneTick', () => {
     assert.equal(s.attempts, 0);
   });
 
+  // --- Regression (#39): while the wait timer is still counting down, a session that
+  //     has resumed working (the user manually typed "continue" to unstick a wrong/stale
+  //     wait) must drop back to monitoring immediately — otherwise the monitor is parked
+  //     blind on the old timer and never detects a SECOND, genuine limit that follows. ---
+  it('drops out of the wait as soon as Claude resumes working, before the timer expires (#39)', async () => {
+    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)\n· Doing… (esc to interrupt)');
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + 60 * 60 * 1000; s.attempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s.attempts, 0);
+    assert.equal(t._sent.length, 0);
+  });
+
   // --- Regression: self-referential false positive. A limit banner only quoted in
   //     scrollback (a conversation discussing limits, a stale banner scrolled past) is
   //     NOT the live state. Tail-anchoring stops it from driving a retry. ---
