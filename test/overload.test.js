@@ -364,7 +364,6 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     const s = createMonitorState();
     const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
     assert.equal(r, 'overload-detected');
-    assert.equal(s.eventMode, true);    // latched
     assert.equal(s.viaEvent, true);
     assert.equal(t._cleared, true);     // marker consumed
     assert.equal(t._sent.length, 0);    // no send yet — backoff first
@@ -401,29 +400,40 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     assert.equal(t._sent.length, 0);
   });
 
-  it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook) without latching eventMode', async () => {
+  it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook)', async () => {
     // Regression: settings.json freezes the hook's cli.js path + matcher at install time,
     // so an old hook binary can still write rate_limit markers after an upgrade. The
-    // daemon must not enter overload backoff off it, and must NOT latch eventMode (that
-    // would disable the scraper paths off a misclassified event).
+    // daemon must not enter overload backoff off it — just consume it so it can't re-fire
+    // (the scraper still gets its normal shot on the next tick).
     for (const bad of ['rate_limit', 'billing_error', 'invalid_request']) {
       const t = mockTmux('idle prompt', 'node', true, { error: bad, ts: Date.now() });
       const s = createMonitorState();
       const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
       assert.equal(r, 'event-ignored', bad);
-      assert.equal(s.eventMode, false, bad);   // NOT latched
       assert.equal(s.status, 'monitoring', bad);
       assert.equal(t._cleared, true, bad);     // consumed so it can't re-fire
       assert.equal(t._sent.length, 0, bad);
     }
   });
 
-  it('once eventMode is latched, the scraper path is disabled', async () => {
-    const t = mockTmux('API Error: 529 Overloaded', 'node', true, null);  // scraper WOULD match
+  // --- Regression: the overload scraper must stay a live safety net AFTER the hook has
+  //     fired. The event path only covers overloaded/server_error; a transient API 429
+  //     ("temporarily limiting requests · Rate limited") emits no retryable marker, so ONLY
+  //     the scraper can catch it. It was being permanently disabled once any StopFailure
+  //     latched eventMode, so a genuinely-stuck 429 was never retried (had to be resumed by
+  //     hand). ---
+  it('keeps the overload scraper active after the hook has fired (transient 429 with no marker is still retried)', async () => {
     const s = createMonitorState();
-    s.eventMode = true;
-    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER), 'monitoring');
-    assert.equal(t._sent.length, 0);
+    // 1. A retryable StopFailure fires — the hook is now known live for this pane.
+    const t1 = mockTmux('idle prompt', 'node', true, { error: 'server_error', ts: Date.now() });
+    assert.equal(await processOneTick(s, t1, '%0', cfg(), () => true, NO_JITTER), 'overload-detected');
+    s.status = 'monitoring';  // recovered from that incident, back to watching
+    // 2. Later, a transient API 429 the event path can't emit (no marker) appears. Only the
+    //    scraper can catch it; the earlier event must not have disabled it.
+    const render = '● API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited\n\n✻ Cogitated for 37s\n\n❯ ';
+    const t2 = mockTmux(render, 'node', true, null);
+    assert.equal(await processOneTick(s, t2, '%0', cfg(), () => true, NO_JITTER), 'overload-detected');
+    assert.equal(s.status, 'overload');
   });
 
   it('does not send into a shell on an event (foreground gate still applies)', async () => {

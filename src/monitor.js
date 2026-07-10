@@ -18,10 +18,9 @@ export function createMonitorState() {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null,
     // Overload-retry sub-state, kept distinct from the usage-reset fields above.
     overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0,
-    // Event-driven overload: eventMode latches true once a StopFailure marker is ever
-    // seen (proves the hook is live → stop trusting the scraper). viaEvent marks the
-    // current backoff window as event-triggered (edge: one send per failure).
-    eventMode: false, viaEvent: false,
+    // viaEvent marks the current backoff window as event-triggered (edge: one send per
+    // failure). The scraper stays active alongside the event path — see the tick logic.
+    viaEvent: false,
     // Safeguard/AUP false-positive retry sub-state (bounded, seconds-scale).
     safeguardAttempts: 0, safeguardWaitUntil: 0,
   };
@@ -371,23 +370,24 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     return enterUsageWait(state, stripped, config);
   }
 
-  // Event-driven overload (authoritative; see DESIGN-NOTES §1). A StopFailure marker for
-  // this pane means the turn ended in a retryable API error — no scraping, no ambiguity.
-  // Latches eventMode so the scraper path is disabled once we know the hook is live.
+  // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
+  // marker for this pane means the turn ended in a retryable API error — no scraping, no
+  // ambiguity. It runs first, but does NOT replace the scraper below: the event path only
+  // covers overloaded/server_error, so a transient render the hook can't emit (an API 429,
+  // "temporarily limiting requests") is still caught by the scraper.
   if (overload && overload.enabled && tmuxAdapter.readEvent) {
     const ev = await tmuxAdapter.readEvent();
     if (ev) {
       // Consume-side guard: trust no writer. The hook entry in settings.json freezes the
       // cli.js path + matcher at install time, so an OLDER hook binary (whose matcher and
       // RETRYABLE set still include rate_limit) can keep writing markers after an upgrade.
-      // Consume-and-ignore anything non-retryable, and do NOT latch eventMode off it —
-      // a misclassified marker must not start a backoff nor disable the scraper paths.
+      // Consume-and-ignore anything non-retryable — a misclassified marker must not start a
+      // backoff (the scraper below still gets its normal shot on the next tick).
       if (!isRetryableError(ev.error)) {
         await tmuxAdapter.clearEvent();             // consume so it can't re-fire
         state._ignoredEventError = ev.error;
         return 'event-ignored';
       }
-      state.eventMode = true;
       await tmuxAdapter.clearEvent();               // consume
       if (isWorking(stripped)) { resetOverload(state); return 'overload-cleared'; } // self-recovered
       const capMs = overload.maxTotalWaitMinutes * 60_000;
@@ -402,8 +402,13 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     }
   }
 
-  // Scraper fallback — only while eventMode hasn't latched (hook absent or not yet fired).
-  if (!state.eventMode && overload && overload.enabled && !isWorking(stripped)) {
+  // Scraper safety net. Runs on every monitoring tick, even when the hook is live: the
+  // event path can't emit some terminal renders (an API 429, "temporarily limiting
+  // requests"), and the anchored overload patterns can't misfire on a session/usage limit
+  // (no "API Error" line). Already isWorking-gated + raw-distance-bounded, so it won't
+  // re-fire on a recovered/scrolled overload; and while a backoff is active (status ===
+  // 'overload') the tick returns above before reaching here, so no double-detection.
+  if (overload && overload.enabled && !isWorking(stripped)) {
     const match = overloadMatch(stripped, overload.patterns);
     if (match) {
       state._overloadMatch = match;  // surfaced in the 'overload-detected' log line
