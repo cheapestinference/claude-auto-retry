@@ -57,7 +57,7 @@ const isWorkingLine = (l) => WORKING_PATTERNS.some((p) => p.test(l));
 const CHROME_LINE = [
   /^\s*$/,                                          // blank
   /^[\s─│╭╮╰╯┌┐└┘├┤┬┴┼▏▕|]+$/,                       // box-drawing / rules
-  /^\s*│\s*[>❯].*│\s*$/,                             // boxed input row ("│ > … │"): anchored to
+  /^\s*│\s*[>❯][^│]*│\s*$/,                          // boxed input row ("│ > … │"): anchored to
                                                      // the PROMPT GLYPH, not "anything between two
                                                      // bars" — a bare │…│ rule matches unicode-
                                                      // border tool output (psql/duf tables) and
@@ -162,9 +162,13 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   // tail-scoped; print mode uses the full scan below.)
   if (tailLines > 0) {
     const companionIdx = all.findLastIndex((l) => USAGE_CREDITS.test(l));
+    // Require a RESET line nearby — NOT just a LIMIT line. A live limit banner always prints
+    // its reset time next to the companion; a session merely *explaining* usage limits ("when
+    // you hit your usage limit you can run /usage-credits …") has the companion + a loose
+    // "usage limit" LIMIT match but no reset time, and would otherwise false-fire a retry.
     if (companionIdx !== -1
         && all.slice(companionIdx + 1).every(isChromeLine)
-        && (hasNearbyMatch(all, companionIdx, RESET_PATTERNS) || hasNearbyMatch(all, companionIdx, LIMIT_PATTERNS))) {
+        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS)) {
       return true;
     }
   }

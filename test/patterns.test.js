@@ -121,6 +121,13 @@ describe('isRateLimited', () => {
       '', '  8 tasks', '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '❯ '].join('\n');
     assert.equal(isRateLimited(pane, [], 12), true);
   });
+  // Fable review F3: a session EXPLAINING /usage-credits (companion + a loose "usage limit"
+  // LIMIT match, but no reset time) must not fire the backstop.
+  it('does NOT backstop-fire on a conversation explaining /usage-credits (no reset nearby)', () => {
+    const pane = ['When you hit your usage limit you can run',
+      '/usage-credits to purchase extra usage.', '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
   // --- Finding 1: the /usage-credits backstop must have the same liveness discipline as
   //     the main path. A resumed session's scrollback always contains the stale
   //     banner+companion (the live render prints the companion), with real work rendered
@@ -184,6 +191,14 @@ describe('isRateLimited', () => {
       ...Array(10).fill('     │ 0      │ user0     │'), '     └────────┴───────────┘'];
     const pane = ["You've hit your session limit · resets 3pm (UTC)",
       '● Bash(psql -c "select * from users limit 8")', ...table, '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  // Fable review F4a: the boxed-input rule must not match a table row whose FIRST cell is a
+  // ">"/prompt glyph (`│ >  │ … │`) — the `[^│]*` (was `.*`) forbids an internal bar.
+  it('does NOT strip a psql row whose first cell is ">" (internal bar guard)', () => {
+    const table = ['  ⎿  ┌────────┬───────────┐', '     │ op     │ meaning   │', '     ├────────┼───────────┤',
+      ...Array(10).fill('     │ >      │ greater-than op │'), '     └────────┴───────────┘'];
+    const pane = ["You've hit your session limit · resets 3pm (UTC)", '● Bash(psql)', ...table, '❯ '].join('\n');
     assert.equal(isRateLimited(pane, [], 12), false);
   });
 
