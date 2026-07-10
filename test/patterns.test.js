@@ -118,7 +118,7 @@ describe('isRateLimited', () => {
   it('finds it via the /usage-credits companion even without the reset on the banner line', () => {
     const pane = ['Ran 1 shell command', '  └ Session limit hit',
       '     /usage-credits to finish what you\'re working on. resets 2am',
-      '', '  8 tasks', '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '❯ '].join('\n');
+      '', '  8 tasks (4 done, 1 in progress, 3 open)', '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '❯ '].join('\n');
     assert.equal(isRateLimited(pane, [], 12), true);
   });
   // Fable review F3: a session EXPLAINING /usage-credits (companion + a loose "usage limit"
@@ -240,6 +240,48 @@ describe('isRateLimited', () => {
     ].join('\n');
     assert.equal(isRateLimited(pane, [], 12), true);
   });
+
+  // --- Fable review F4b: four CHROME_LINE patterns still matched ordinary PROSE as a
+  //     last-content-line, so a stale banner exactly at the content boundary could be
+  //     stripped back into the window (same false-positive class as Finding 2). Anchor each
+  //     to its actual render: the auto-mode notice, the "N tasks (" widget header, the
+  //     "Backgrounded agent (" notice, and the "/clear to save" save hint. ---
+  const F4B_PROSE_PROBES = [
+    'auto mode is enabled in your settings',   // matched bare /\bauto mode\b/
+    '3 tasks remain in the backlog',           // matched /^\s*\d+\s+tasks?\b/ (no widget "(")
+    'Backgrounded agent finished the lint run', // matched bare /Backgrounded agent/
+    'Should I start the new task?',            // matched standalone /new task\?/
+  ];
+  for (const probe of F4B_PROSE_PROBES) {
+    it(`does not strip prose "${probe}" as chrome, so a stale banner above it stays out (tail=12)`, () => {
+      const pane = [
+        "You've hit your session limit · resets 3pm (UTC)",
+        ...Array(13).fill(probe),
+        '───────────────────────────────',
+        '❯ ',
+      ].join('\n');
+      assert.equal(isRateLimited(pane, [], 12), false);
+    });
+  }
+  // The genuine renders these anchors target must STILL classify as chrome (banner behind
+  // them detected): the auto-mode footer/notice, the "N tasks (" header, the backgrounded-
+  // agent notice, and the "new task? /clear to save" hint.
+  const F4B_CHROME_RENDERS = [
+    '  Allowed by auto mode',
+    '  8 tasks (4 done, 1 in progress, 3 open)',
+    '  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)',
+    '  new task? /clear to save 300k tokens',
+  ];
+  for (const render of F4B_CHROME_RENDERS) {
+    it(`still strips genuine render "${render.trim()}" as chrome (banner behind it detected)`, () => {
+      const pane = [
+        "You've hit your session limit · resets 2am (Europe/Zurich)",
+        ...Array(13).fill(render),
+        '❯ ',
+      ].join('\n');
+      assert.equal(isRateLimited(pane, [], 12), true);
+    });
+  }
 });
 
 describe('stripAnsi (private-mode sequences)', () => {
