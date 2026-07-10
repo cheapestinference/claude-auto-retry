@@ -95,8 +95,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `customPatterns` are matched against the raw last-N lines (unchanged from pre-#34
   semantics), not the chrome-skipped view — the user owns their own tradeoff (#34).
-- Removed the dead `CLAUDE_COMMANDS` constant; documented that reconcile matches
-  `comm === 'claude'` (a bare-`node` session without `process.title` isn't detected) (#32).
+- Removed the dead `CLAUDE_COMMANDS` constant (#32). Reconcile's session detection was
+  since extended beyond `comm === 'claude'` to also cover node-launched and launcher-wrapped
+  claude — see the Finding 6 entry under Fixed.
 
 ## [0.5.1] - 2026-06-30
 
