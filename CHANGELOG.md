@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actual poll interval, not a fixed constant).
 
 ### Fixed
+- `reconcile` now also re-arms claude sessions whose process command isn't `claude`
+  (Finding 6): a claude CLI run under `node` with its process.title unset (shows comm
+  `node`), and a session our own launcher wraps in an agent harness that embeds claude
+  (e.g. `happier claude`) — both were invisible to the `comm === 'claude'` match, so the
+  self-healing timer never re-armed them once their monitor died. Detection stays
+  conservative: only a node process that IS the claude CLI (script basename `claude` or
+  the `claude-code` cli entry) or a pane our `launcher.js` wraps — never a bare node
+  process. `exclude-self` recognizes these sessions too.
 - Monitor no longer stays parked on a stale wait timer once the session resumes:
   while counting down a usage wait, a pane that has resumed working (e.g. the user
   manually typed `continue` to unstick a wrong/stale wait) now drops back to

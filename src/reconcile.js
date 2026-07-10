@@ -192,11 +192,11 @@ async function readExcludeFile(path = EXCLUDE_FILE) {
   return pruneExcludeEntries(entries);
 }
 
-// Reconcile matches a session by `comm === 'claude'`, which works because Claude Code
-// sets its process.title to "claude". A session launched via a `#!/usr/bin/env node`
-// shebang that does NOT set process.title shows comm "node" and is invisible to reconcile
-// — install the shell wrapper for those. (Matching bare "node" here would arm a monitor on
-// every unrelated node process, so it is deliberately not attempted.)
+// Reconcile matches a session three ways (Finding 6). The primary is `comm === 'claude'`,
+// which works because Claude Code sets its process.title to "claude". Two more cover the
+// cases that used to be invisible — a session whose title isn't set (shows comm "node")
+// and one our own launcher embeds in an agent wrapper — WITHOUT matching bare "node" (that
+// would arm a monitor on every unrelated node process). See isNodeClaudeCli / isLauncher.
 const CLAUDE_COMM = 'claude';
 // ps `comm=` is the bare process name on Linux (procps), but on macOS/BSD it is the
 // executable's full path — TRUNCATED to 16 chars ("/Users/x/.local/bin/claude" prints
@@ -211,6 +211,45 @@ export function isClaudeProc(p) {
   if (p.comm === CLAUDE_COMM || basename(p.comm || '') === CLAUDE_COMM) return true;
   const argv0 = (p.args || '').trim().split(/\s+/)[0] || '';
   return basename(argv0) === CLAUDE_COMM;
+}
+
+// The executed script of a `node [flags] <script> …` invocation (skip node + its flags).
+function nodeScript(args) {
+  const toks = (args || '').trim().split(/\s+/);
+  let i = 1;                                       // toks[0] = "node"
+  while (i < toks.length && toks[i].startsWith('-')) i++;
+  return toks[i] || '';
+}
+const baseName = (p) => p.split('/').pop();
+
+// A node process that IS the claude CLI even though comm shows "node" (process.title unset
+// — exactly Finding 6's shebang case). The executed SCRIPT is the discriminator: its
+// basename is "claude", or it is the claude-code package cli entry. Never a generic node
+// process (`node server.js`), and never a bare "claude" appearing as an argument.
+function isNodeClaudeCli(p) {
+  if (p.comm !== 'node') return false;
+  const s = nodeScript(p.args);
+  return s !== '' && (baseName(s) === 'claude' || /claude-code\/(?:.*\/)?cli\.(?:js|mjs|cjs)$/.test(s));
+}
+// Our own launcher (`node …/src/launcher.js`). It only ever wraps a claude session, so its
+// presence in a pane is a zero-false-positive marker — used to reach an agent wrapper that
+// embeds claude (e.g. `happier claude`, comm "node") which no comm/script check would find.
+function isLauncher(p) {
+  return p.comm === 'node' && baseName(nodeScript(p.args)) === 'launcher.js';
+}
+// The detached monitor we spawn (`node …/src/monitor.js <pane> <pid>`). Excluded when
+// picking a launcher's session child so we never target the monitor as the session.
+function isMonitorProc(p) {
+  return p.comm === 'node' && baseName(nodeScript(p.args)) === 'monitor.js';
+}
+// The claude-relative arg string, so isPrintMode (which skips arg[0] = the command) sees
+// the same shape for a node-launched claude as for a bare `claude …`: drop "node <script>".
+function claudeArgs(p) {
+  if (p.comm === CLAUDE_COMM) return p.args;
+  const toks = (p.args || '').trim().split(/\s+/);
+  let i = 1;
+  while (i < toks.length && toks[i].startsWith('-')) i++;   // past node flags
+  return ['claude', ...toks.slice(i + 1)].join(' ');        // fake command token + real args
 }
 // Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
 // interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
@@ -299,6 +338,41 @@ function paneForPid(pid, byPid, panePidToPane) {
   return null;
 }
 
+// Map each tmux pane to its candidate claude session process(es). Shared by planReconcile
+// (arming) and claudePidForPane (exclude-self) so both see the same sessions. Detection:
+//   1. comm === 'claude'                — Claude Code with process.title set (the common case)
+//   2. isNodeClaudeCli                  — the claude CLI run under node with title unset (F6)
+//   3. our launcher wrapping an agent   — target the launcher's spawned child (not the monitor)
+// (1)/(2) are direct; (3) only fills panes with no direct candidate, so a plain
+// launcher→claude chain isn't double-counted (the claude child is already a direct hit).
+export function sessionTargetsByPane(processes, byPid, panePidToPane) {
+  const byPane = new Map();
+  const push = (pane, proc) => {
+    if (!pane) return;
+    if (!byPane.has(pane)) byPane.set(pane, []);
+    byPane.get(pane).push(proc);
+  };
+  for (const p of processes) {
+    // Direct claude: comm 'claude', or a macOS full-path/truncated-comm claude reached via
+    // argv0 (isClaudeProc). Node-launched claude CLI (comm 'node') via isNodeClaudeCli.
+    const direct = isClaudeProc(p);
+    const nodeCli = !direct && isNodeClaudeCli(p);
+    if (!direct && !nodeCli) continue;
+    // Print-mode arg shape: a direct claude's own args (isPrintMode skips arg0); a
+    // node-launched one must be normalized ("node <script> …" → "claude …") first.
+    if (isPrintMode(nodeCli ? claudeArgs(p) : p.args)) continue;
+    push(paneForPid(p.pid, byPid, panePidToPane), p);
+  }
+  for (const p of processes) {
+    if (!isLauncher(p)) continue;
+    const pane = paneForPid(p.pid, byPid, panePidToPane);
+    if (!pane || byPane.has(pane)) continue;               // a direct candidate already owns it
+    const child = processes.find(c => c.ppid === p.pid && !isMonitorProc(c));
+    if (child && !isPrintMode(claudeArgs(child))) push(pane, child);
+  }
+  return byPane;
+}
+
 // --- Pure planning ---
 // Given tmux panes, ps processes, and already-running monitors, decide which
 // (pane, claudePid) pairs need a monitor armed. Handles pane-id reuse: when >1 claude
@@ -316,16 +390,10 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
   // monitor whose target pid has exited already shuts itself down (isAlive check).
   const coveredPanes = new Set([...running.keys()].map(k => k.split(' ')[0]));
 
-  // Every interactive claude (comm === 'claude'), excluding print-mode sessions; map to
-  // its pane.
-  const claudes = processes.filter(p => isClaudeProc(p) && !(isPrintMode(p.args)));
-  const byPane = new Map();  // pane -> [claudeProc]
-  for (const c of claudes) {
-    const pane = paneForPid(c.pid, byPid, panePidToPane);
-    if (!pane) continue;
-    if (!byPane.has(pane)) byPane.set(pane, []);
-    byPane.get(pane).push(c);
-  }
+  // Every interactive claude session, mapped to its pane (comm 'claude', a macOS
+  // full-path/argv0 claude, a node-launched claude CLI, or an agent our launcher wraps),
+  // excluding print-mode sessions.
+  const byPane = sessionTargetsByPane(processes, byPid, panePidToPane);
 
   const arm = [], skipped = [];
   for (const [pane, procs] of byPane) {
@@ -415,9 +483,7 @@ export async function claudePidForPane(pane) {
   const { panes, processes } = await gather();
   const byPid = new Map(processes.map(p => [p.pid, p]));
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
-  const here = processes.filter(p => isClaudeProc(p)
-    && !(isPrintMode(p.args))
-    && paneForPid(p.pid, byPid, panePidToPane) === pane);
+  const here = sessionTargetsByPane(processes, byPid, panePidToPane).get(pane) || [];
   if (here.length === 0) return null;
   return (here.find(p => p.stat.includes('+')) ?? here.sort((a, b) => b.pid - a.pid)[0]).pid;
 }
