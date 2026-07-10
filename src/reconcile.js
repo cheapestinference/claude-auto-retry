@@ -138,16 +138,25 @@ export async function acquireLock(lockPath = LOCK_FILE) {
 
     // Stale. Take the breaker to serialize removal+recreation.
     if (!(await linkCreate(breakerPath, join(dir, `.brk.${uniq}.${attempt}`), myId))) {
-      // Someone else is breaking. Only clear the breaker if IT is stale (crashed mid-break).
+      // Someone else is breaking. Only clear the breaker if IT is stale (crashed mid-break) —
+      // and clear it via an IDENTITY-CHECKED unlink (releaseLock re-reads and only removes it
+      // if it STILL holds the dead id we saw). An unconditional unlink could delete a fresh,
+      // LIVE breaker a racer created between our read and our unlink — breaking serialization
+      // and letting two runs both break the lock (double-hold).
       let bId = '';
       try { bId = (await readFile(breakerPath, 'utf-8')).trim(); } catch {}
-      if (!bId || !(await holderIsLive(bId))) await unlink(breakerPath).catch(() => {});
+      if (!bId || !(await holderIsLive(bId))) await releaseLock(breakerPath, bId);
       await sleep(10);
       continue;
     }
     try {
-      // We hold the breaker. Re-verify the lock is still stale (a prior breaker may have
-      // already replaced it with a live one), then remove it and create ours.
+      // We hold the breaker — but re-confirm that (a racing stale-breaker cleanup could have
+      // cleared ours in the gap) before touching the main lock.
+      let mine = '';
+      try { mine = (await readFile(breakerPath, 'utf-8')).trim(); } catch {}
+      if (mine !== myId) continue;                          // lost the breaker → retry from the top
+      // Re-verify the lock is still stale (a prior breaker may have already replaced it with
+      // a live one), then remove it and create ours.
       let cur = '';
       try { cur = (await readFile(lockPath, 'utf-8')).trim(); } catch {}
       if (cur && await holderIsLive(cur)) return noop;      // became live → back off
@@ -189,9 +198,22 @@ async function readExcludeFile(path = EXCLUDE_FILE) {
 const CLAUDE_COMM = 'claude';
 // Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
 // interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
-// retry text would be injected into that output (Finding 8). Anchored so a prompt word
-// like "-pretty" doesn't false-match.
-const PRINT_MODE = /(?:^|\s)(?:-p|--print)(?:[\s=]|$)/;
+// retry text would be injected into that output (Finding 8). Only treat -p/--print as print
+// mode when it appears as a FLAG — before the first non-flag positional argument — so a
+// PROMPT that merely contains "-p" (`claude "explain the -p flag"`) isn't misread as print
+// mode and left silently unmonitored. (ps strips quotes, so this is a heuristic: a
+// value-taking flag before -p, e.g. `claude --model x -p`, is the rare miss — which errs
+// toward arming a monitor, the safe direction, not toward an invisible session.)
+function isPrintMode(args) {
+  if (!args) return false;
+  const toks = args.trim().split(/\s+/);
+  for (let i = 1; i < toks.length; i++) {          // skip toks[0] = the command ("claude")
+    const t = toks[i];
+    if (t === '-p' || t === '--print' || t.startsWith('--print=')) return true;
+    if (!t.startsWith('-')) return false;          // first positional (the prompt) → stop scanning
+  }
+  return false;
+}
 
 // --- Pure parsing ---
 
@@ -275,7 +297,7 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 
   // Every interactive claude (comm === 'claude'), excluding print-mode sessions; map to
   // its pane.
-  const claudes = processes.filter(p => p.comm === CLAUDE_COMM && !(p.args && PRINT_MODE.test(p.args)));
+  const claudes = processes.filter(p => p.comm === CLAUDE_COMM && !(isPrintMode(p.args)));
   const byPane = new Map();  // pane -> [claudeProc]
   for (const c of claudes) {
     const pane = paneForPid(c.pid, byPid, panePidToPane);
@@ -373,7 +395,7 @@ export async function claudePidForPane(pane) {
   const byPid = new Map(processes.map(p => [p.pid, p]));
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
   const here = processes.filter(p => p.comm === CLAUDE_COMM
-    && !(p.args && PRINT_MODE.test(p.args))
+    && !(isPrintMode(p.args))
     && paneForPid(p.pid, byPid, panePidToPane) === pane);
   if (here.length === 0) return null;
   return (here.find(p => p.stat.includes('+')) ?? here.sort((a, b) => b.pid - a.pid)[0]).pid;
