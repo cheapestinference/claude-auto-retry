@@ -31,6 +31,15 @@ describe('parseResetTime', () => {
   it('returns null for unparseable text', () => {
     assert.equal(parseResetTime('some random text'), null);
   });
+  // Fable review F6: an out-of-range clock ("resets 30") must not parse a bad hour that
+  // later makes calculateWaitMs build an Invalid Date and throw (crashing the monitor).
+  it('returns null for an out-of-range hour ("resets 30")', () => {
+    assert.equal(parseResetTime('resets 30'), null);
+  });
+  it('parses a 24h-style "resets 12:30" without an am/pm as ambiguous noon/midnight', () => {
+    const r = parseResetTime('resets 12:30');
+    assert.equal(r.hour, 12); assert.equal(r.minute, 30); assert.equal(r.ambiguous, true);
+  });
   it('parses "try again in 5 minutes" as relative time', () => {
     const r = parseResetTime('try again in 5 minutes');
     assert.ok(r.relative);
@@ -76,6 +85,14 @@ describe('calculateWaitMs', () => {
   it('returns fallback when parsed is null', () => {
     const wait = calculateWaitMs(null, 60, 5);
     assert.ok(Math.abs(wait - (5 * 3600 + 60) * 1000) < 2000);
+  });
+  // Fable review F6: an ambiguous hour of 12 → the pm interpretation is (12+12)%24 = 0
+  // (midnight), NOT hour 24 (which makes `new Date("…T24:…Z")` Invalid → throw → monitor
+  // crash-loop). Must return a finite wait, never throw.
+  it('does not throw on an ambiguous 12:30 (12+12 → midnight, not hour 24)', () => {
+    const now = new Date('2026-07-07T09:00:00Z');
+    const wait = calculateWaitMs({ hour: 12, minute: 30, timezone: 'UTC', ambiguous: true }, 60, 5, now);
+    assert.ok(Number.isFinite(wait) && wait > 0);
   });
   it('handles ambiguous hour by picking soonest future', () => {
     const now = new Date('2026-03-18T13:00:00Z');

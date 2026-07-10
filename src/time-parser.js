@@ -13,6 +13,10 @@ export function parseResetTime(text) {
     if (ampm === 'pm' && hour !== 12) hour += 12;
     if (ampm === 'am' && hour === 12) hour = 0;
 
+    // Reject an out-of-range clock (e.g. a bare "resets 30"): a bad hour/minute would make
+    // calculateWaitMs build an invalid Date and throw, crashing the monitor. null → fallback.
+    if (hour > 23 || hour < 0 || minute > 59) return null;
+
     const ambiguous = !ampm && hour >= 1 && hour <= 12;
     return { hour, minute, timezone, ambiguous };
   }
@@ -107,7 +111,7 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
 
   if (parsed.ambiguous) {
     const t1 = getTargetTimestamp(parsed.hour, parsed.minute);
-    const t2 = getTargetTimestamp(parsed.hour + 12, parsed.minute);
+    const t2 = getTargetTimestamp((parsed.hour + 12) % 24, parsed.minute);  // %24: 12→0 (midnight), never hour 24 (→ Invalid Date)
     const d1 = t1 - now.getTime();
     const d2 = t2 - now.getTime();
 
