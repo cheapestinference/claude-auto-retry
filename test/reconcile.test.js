@@ -387,4 +387,64 @@ describe('planReconcile', () => {
     const { arm } = planReconcile({ panes, processes, running: new Map() });
     assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
   });
+
+  // --- Finding 6: reconcile matched only `comm === 'claude'`, so a claude session whose
+  //     process.title isn't set (shows comm "node") or one embedded by our own launcher in
+  //     an agent wrapper (e.g. `happier claude`, comm "node") was invisible — never
+  //     re-armed by the self-healing timer once its monitor died. Detect these too, but
+  //     conservatively: only a node process that IS the claude CLI, or a pane our launcher
+  //     wraps — never a bare node process. ---
+  it('arms a node-launched claude CLI whose comm shows "node" (process.title unset)', () => {
+    const panes = [{ pane: '%5', panePid: 500 }];
+    const processes = [
+      { pid: 500, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 510, ppid: 500, stat: 'Sl+', comm: 'node', args: 'node /home/u/.local/bin/claude --resume' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%5', pid: 510 }]);
+  });
+  it('arms a claude-code cli.js run directly under node', () => {
+    const panes = [{ pane: '%5', panePid: 500 }];
+    const processes = [
+      { pid: 500, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 510, ppid: 500, stat: 'Sl+', comm: 'node', args: 'node /x/node_modules/@anthropic-ai/claude-code/cli.js' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%5', pid: 510 }]);
+  });
+  it('arms a launcher-wrapped agent that embeds claude (e.g. happier), targeting the launcher child', () => {
+    const panes = [{ pane: '%6', panePid: 600 }];
+    const processes = [
+      { pid: 600, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 610, ppid: 600, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js -c' },
+      { pid: 620, ppid: 610, stat: 'Sl+', comm: 'node', args: 'node /home/u/.local/bin/happier claude -c' },
+      { pid: 615, ppid: 610, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/monitor.js %6 620' }, // detached monitor — not the session
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%6', pid: 620 }]);
+  });
+  it('does NOT arm a bare node process (dev server / build tool)', () => {
+    const panes = [{ pane: '%7', panePid: 700 }, { pane: '%8', panePid: 800 }];
+    const processes = [
+      { pid: 700, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 710, ppid: 700, stat: 'Sl+', comm: 'node', args: 'node /app/server.js' },
+      { pid: 800, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 810, ppid: 800, stat: 'Sl+', comm: 'node', args: 'node /app/build.js claude-prod' }, // "claude" only in an arg, not the script
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+  it('does not double-arm a plain launcher→claude chain (one monitor, the real claude pid)', () => {
+    const panes = [{ pane: '%8', panePid: 800 }];
+    const processes = [
+      { pid: 800, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 810, ppid: 800, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js' },
+      { pid: 820, ppid: 810, stat: 'Sl+', comm: 'claude', args: 'claude' },  // detected directly by comm
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%8', pid: 820 }]);
+  });
+  it('skips a node-launched claude in print mode (-p)', () => {
+    const panes = [{ pane: '%5', panePid: 500 }];
+    const processes = [
+      { pid: 500, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 510, ppid: 500, stat: 'Rl+', comm: 'node', args: 'node /home/u/.local/bin/claude -p "summarize"' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
 });
