@@ -338,6 +338,25 @@ describe('planReconcile', () => {
     ];
     assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%1', pid: 200 }]);
   });
+  // Fable review F5: a standalone "-p" INSIDE the prompt (after the first positional) must
+  // NOT be read as print mode — the old regex matched it and left the session invisible
+  // (neither armed nor skipped). Only a "-p" flag before the prompt counts.
+  it('arms an interactive claude whose PROMPT contains a standalone -p token', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Sl+', comm: 'claude', args: 'claude explain what the -p flag does' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%1', pid: 200 }]);
+  });
+  it('still treats a leading -p flag (with other flags before it) as print mode', () => {
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 200, ppid: 100, stat: 'Rl+', comm: 'claude', args: 'claude --verbose -p "do a thing"' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
 
   it('resolves a claude nested several levels below the pane shell', () => {
     const panes = [{ pane: '%1', panePid: 100 }];
