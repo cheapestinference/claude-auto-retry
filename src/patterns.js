@@ -65,18 +65,27 @@ const CHROME_LINE = [
                                                      // banner back in. The glyph is the discriminator.
   /^\s*[❯>]\s*$/,                                    // empty input prompt (bare, unboxed)
   /^\s*⏵⏵/,                                          // mode footer ("⏵⏵ auto mode on…", "⏵⏵ accept edits…")
-  /\bauto mode\b/i,                                 // footer mode text / "Allowed by auto mode" notice
+  /Allowed by auto mode/i,                          // "Allowed by auto mode" permission notice (anchored to
+                                                     // the full phrase — bare /auto mode/ matched prose like
+                                                     // "auto mode is enabled in your settings"; the footer
+                                                     // itself is already covered by /^\s*⏵⏵/ above)
   /shift\+tab to (?:cycle|select)/i,                // tab-cycle footer hint (anchored to the phrase)
   /^\s*\?\s+for shortcuts\b/i,                       // "? for shortcuts" footer hint
   /\|\s*v\d+\.\d+\.\d+\b/,                           // footer version segment ("… | v2.1.201"), pipe-anchored
   /^\s+[□◻■◼▢▪◽◾✓✔☐☑]\s+\S/,                          // INDENTED todo/task items (leading ws required — a
                                                      // flush-left "✓ Fixed the bug" summary is content)
-  /^\s*\d+\s+tasks?\b/i,                             // task widget header ("8 tasks (…)")
+  /^\s*\d+\s+tasks?\s+\(/i,                           // task widget header ("8 tasks (…)") — the "(" count is
+                                                     // required so prose ("3 tasks remain in the backlog")
+                                                     // isn't stripped
   /^\s*…\s*\+\d+\b/,                                 // "… +N completed"
-  /new task\?|\/clear to save/i,                     // "new task? /clear to save …k tokens"
+  /\/clear to save/i,                               // "new task? /clear to save …k tokens" — anchored to the
+                                                     // save hint; bare /new task\?/ matched prose questions
+                                                     // ("Should I start the new task?")
   USAGE_CREDITS,                                     // live-limit companion hint (shared w/ the backstop)
   /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
-  /Backgrounded agent|to manage · /i,                // background-agent notices
+  /Backgrounded agent \(|to manage · /i,             // background-agent notice — the "(" (or "to manage ·")
+                                                     // is required so prose ("Backgrounded agent finished
+                                                     // the lint run") isn't stripped
 ];
 // A live working footer ("✻ Cogitating… (esc to interrupt)") matches the spinner glyph
 // pattern above, so it must be excluded explicitly — it is live content, never furniture.
