@@ -359,16 +359,15 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   }
 
   // --- monitoring ---
-  // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale). Gate on
-  // !isWorking: a session actively streaming or awaiting a subagent can't be blocked by a
-  // live limit at the same instant, so a banner visible while it works is stale scrollback —
-  // entering a wait on it just re-detects (and, past the reset, re-cycles every grace window)
-  // without ever legitimately retrying. The waiting-branch already has this `|| isWorking`
-  // guard; mirroring it here also closes the re-detection loop. NOTE: this widens every
-  // WORKING_PATTERN from "skip one injection" to "don't detect while it matches", so those
-  // patterns are all LIVE-ONLY renders by construction (see WORKING_PATTERNS) to bound the
-  // blast radius of any over-match.
-  if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) && !isWorking(stripped)) {
+  // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale). No
+  // !isWorking gate here: it would widen every WORKING_PATTERN from "skip one injection" to
+  // "never detect the limit at all", and those patterns are NOT all live-only — `Retrying
+  // in …`/`attempt N/M` match transcript text (a flaky deploy/test log), so a stuck session
+  // with such a line lingering would never be retried. The waiting branch's `|| isWorking`
+  // guard already stops injection into a working session, which is enough to prevent the
+  // background-agent spam; the cost of dropping the gate is only a cosmetic re-detection
+  // cycle (detect → wait → user-continued) that never actually injects.
+  if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
     return enterUsageWait(state, stripped, config);
   }
 

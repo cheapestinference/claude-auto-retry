@@ -170,18 +170,34 @@ describe('processOneTick', () => {
   });
 
   // --- Background-agent activity: a session awaiting a subagent is progressing; a stale
-  //     banner above it must not drive retries. The monitoring tick doesn't even enter a
-  //     wait (no re-detection cycle), and a waiting tick returns user-continued. ---
-  it('does NOT enter a wait on a stale banner while a background agent runs (monitoring)', async () => {
+  //     banner above it must not drive an INJECTION. The waiting-branch `|| isWorking` gate
+  //     handles that (returns user-continued, sends nothing). ---
+  it('does NOT inject into a session running a background agent (waiting branch gate)', async () => {
     const pane = [
       "You've hit your session limit · resets 3pm (Europe/Zurich)", '',
       '● gsd:gsd-executor(Execute plan 24.1-10)', '',
       '✻ Waiting for 1 background agent to finish', '',
       '───────────────', '❯ ', '───────────────', '  Fable 5 | repo@dev | 5h 9% @20:00 | v2.1.202',
     ].join('\n');
+    const t = mockTmux(pane);
     const s = createMonitorState();
-    assert.equal(await processOneTick(s, mockTmux(pane), '%0', DEFAULT_CONFIG, () => true), 'monitoring');
-    assert.equal(s.status, 'monitoring');
+    s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(t._sent.length, 0);
+  });
+  // --- Regression (Fable review F1): a transcript line matching a working pattern
+  //     (`Retrying in …`/`attempt N/M` in a flaky deploy/test log) must NOT permanently
+  //     suppress detection. The monitoring path has no !isWorking gate, so a genuine live
+  //     limit is still detected even with such prose in the tail. ---
+  it('still detects a live limit when a "Retrying in / attempt" transcript line is in the tail', async () => {
+    const pane = [
+      '  ⎿  deploying… Retrying in 5s (attempt 2/3)...',
+      '  ⎿  deploy failed after 3 attempts',
+      "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+    ].join('\n');
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, mockTmux(pane), '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.status, 'waiting');   // NOT suppressed by the transcript over-match
   });
   // Counter-repro: a genuinely limited, IDLE session whose scrollback contains a finished
   // agent's "Backgrounded agent" transcript line MUST still be retried — the transcript
