@@ -23,6 +23,17 @@ function isPrintMode(args) {
   return args.includes('-p') || args.includes('--print');
 }
 
+// Optional launch wrapper. Set CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER to a prefix command
+// (e.g. "caffeinate -i" on macOS to keep the machine awake, or "nice", "chrt …") and it is
+// prepended to the claude invocation: `<wrapper> <claudeBin> <args…>`. Generic — not tied to
+// any one OS; unset/blank spawns claude directly (unchanged default). (#47)
+export function resolveLaunchCommand(claudeBin, args, env = process.env) {
+  const wrapper = (env.CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER || '').trim();
+  if (!wrapper) return { cmd: claudeBin, cmdArgs: args };
+  const toks = wrapper.split(/\s+/);
+  return { cmd: toks[0], cmdArgs: [...toks.slice(1), claudeBin, ...args] };
+}
+
 function shellEscape(s) {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
@@ -33,7 +44,8 @@ async function launchInteractive(args) {
 
   // CLAUDE_AUTO_RETRY_PANE is inherited by claude's child processes — notably the
   // StopFailure hook, which writes a pane-keyed event marker the monitor consumes.
-  const claude = spawn(claudeBin, args, {
+  const { cmd, cmdArgs } = resolveLaunchCommand(claudeBin, args);
+  const claude = spawn(cmd, cmdArgs, {
     stdio: 'inherit',
     env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1', ...(pane ? { CLAUDE_AUTO_RETRY_PANE: pane } : {}) },
   });
@@ -190,16 +202,20 @@ async function createTmuxSession(args) {
   }
 }
 
-// Main
-const args = process.argv.slice(2);
+// Main — only when executed directly (`node launcher.js …`), never when imported for its
+// exported helpers (e.g. resolveLaunchCommand under test).
+const isDirectRun = process.argv[1]?.endsWith('launcher.js');
+if (isDirectRun) {
+  const args = process.argv.slice(2);
 
-let exitCode;
-if (isPrintMode(args)) {
-  exitCode = await launchPrintMode(args);
-} else if (isInsideTmux()) {
-  exitCode = await launchInteractive(args);
-} else {
-  exitCode = await createTmuxSession(args);
+  let exitCode;
+  if (isPrintMode(args)) {
+    exitCode = await launchPrintMode(args);
+  } else if (isInsideTmux()) {
+    exitCode = await launchInteractive(args);
+  } else {
+    exitCode = await createTmuxSession(args);
+  }
+
+  process.exit(exitCode);
 }
-
-process.exit(exitCode);
