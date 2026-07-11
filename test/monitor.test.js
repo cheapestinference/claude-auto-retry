@@ -185,6 +185,29 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
     assert.equal(t._sent.length, 0);
   });
+
+  // --- Regression (#38): a limit banner pushed far up by a tall chrome block (a big task
+  //     widget + footer, ~90 lines) must still be captured. The detector chrome-strips the
+  //     tail, but only within the CAPTURED buffer — so the capture window has to reach past
+  //     the widget. Uses a capture mock that honours the requested line count, like real
+  //     `tmux capture-pane -S -N` (the shared mockTmux ignores it). ---
+  it('detects a limit banner behind a ~90-line chrome block (capture window)', async () => {
+    const chrome = [
+      ...Array.from({ length: 88 }, (_, i) => `  □ task item ${i}`),
+      '   … +2 completed', '  ? for shortcuts', '  Opus 4.8 | repo@dev | v2.1.201',
+    ];
+    const full = ["You've hit your session limit · resets 4:40pm (UTC)", ...chrome].join('\n');
+    const t = {
+      _sent: [],
+      capturePane: async (_p, n) => full.split('\n').slice(-n).join('\n'), // honours N
+      getPaneCommand: async () => 'node',
+      sendKeys: async (_p, x) => t._sent.push(x),
+      isClaudeForeground: async () => true,
+    };
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+  });
+
   // --- Regression (Fable review F1): a transcript line matching a working pattern
   //     (`Retrying in …`/`attempt N/M` in a flaky deploy/test log) must NOT permanently
   //     suppress detection. The monitoring path has no !isWorking gate, so a genuine live

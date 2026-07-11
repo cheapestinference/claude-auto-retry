@@ -48,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actual poll interval, not a fixed constant).
 
 ### Fixed
+- Rate-limit banner detection now captures a taller pane (120 lines, was 50): a session-limit
+  banner pushed far up by a big task widget + input box + footer (~90 lines seen in the wild)
+  was beyond the capture window entirely and never detected, leaving the session idle past its
+  reset. The chrome-aware tail still strips furniture and a stale banner with real output below
+  it stays out, so the wider capture doesn't add false positives (#38).
 - `reconcile` now also re-arms claude sessions whose process command isn't `claude`
   (Finding 6): a claude CLI run under `node` with its process.title unset (shows comm
   `node`), and a session our own launcher wraps in an agent harness that embeds claude
