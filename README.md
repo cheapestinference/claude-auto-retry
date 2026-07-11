@@ -174,6 +174,20 @@ Optional. Create `~/.claude-auto-retry.json`:
 
 All fields optional. Invalid values fall back to defaults automatically.
 
+### Launch wrapper
+
+Set `CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER` to a prefix command and it's prepended to each
+interactive session — useful for keeping a machine awake while Claude works, or any other
+per-process wrapper:
+
+```sh
+# macOS: don't sleep while a session runs
+export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER="caffeinate -i"
+```
+
+Generic (not macOS-specific — e.g. `nice`, `chrt …` work too). Unset or blank spawns
+`claude` directly, unchanged.
+
 ## Overload backoff
 
 Separate from subscription rate limits, this fork also detects **sustained API

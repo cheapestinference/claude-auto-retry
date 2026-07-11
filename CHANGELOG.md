@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER` env var: a prefix command prepended to each interactive
+  session (e.g. `caffeinate -i` to keep macOS awake while Claude works). Generic and opt-in —
+  unset spawns `claude` directly, unchanged (#47).
 - **Chrome-aware detection.** Limit/overload/menu detectors now skip trailing UI
   furniture (input box, footer, key hints, todo/task widget, status spinner,
   `/usage-credits` hint) before reading the live tail, so a genuine banner behind a tall
