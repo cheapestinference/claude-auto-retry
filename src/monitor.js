@@ -50,6 +50,7 @@ function resetOverload(state) {
   state.overloadWaitUntil = 0;
   state.viaEvent = false;
   state._gaveUp = false;
+  state._eventHandledBanner = null;
 }
 
 function resetSafeguard(state) {
@@ -232,6 +233,10 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       state.overloadAttempts++;          // next failure backs off further
       state.viaEvent = false;
       state.status = 'monitoring';
+      // Remember the banner we just retried via the event path so the always-on scraper
+      // doesn't re-detect this same, uncleared render next tick and open a second backoff.
+      const handled = overloadMatch(stripped, overload.patterns);
+      state._eventHandledBanner = handled ? `${handled.pattern} ${handled.line}` : null;
       await tmuxAdapter.sendKeys(pane, overload.retryMessage);
       return 'overload-retried';
     }
@@ -407,13 +412,19 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // requests"), and the anchored overload patterns can't misfire on a session/usage limit
   // (no "API Error" line). Already isWorking-gated + raw-distance-bounded, so it won't
   // re-fire on a recovered/scrolled overload; and while a backoff is active (status ===
-  // 'overload') the tick returns above before reaching here, so no double-detection.
+  // 'overload') the tick returns above before reaching here.
   if (overload && overload.enabled && !isWorking(stripped)) {
     const match = overloadMatch(stripped, overload.patterns);
     if (match) {
+      // Don't re-fire on the same banner the event path just retried and that hasn't
+      // cleared — that incident is owned by the (edge-triggered) event path until the render
+      // changes or a fresh marker arrives. Otherwise the always-on scraper opens a second
+      // backoff (extra injection + resetOverload defeats the give-up cap).
+      if (state._eventHandledBanner === `${match.pattern} ${match.line}`) return 'monitoring';
       state._overloadMatch = match;  // surfaced in the 'overload-detected' log line
       return enterOverload(state, overload, rand);
     }
+    state._eventHandledBanner = null;  // banner gone → a future match is a fresh incident
   }
 
   // Safeguard/AUP false-positive: enter a bounded, seconds-scale retry loop. Independent

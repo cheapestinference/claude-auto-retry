@@ -57,8 +57,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disabled permanently the first time any `overloaded`/`server_error` event latched, so a
   transient API 429 the event path can't emit (`API Error: Server is temporarily limiting
   requests …`) went undetected and the session sat stuck until resumed by hand. The
-  anchored overload patterns can't misfire on a session/usage limit (no `API Error` line),
-  and an active backoff still returns before the scraper, so there's no double-detection.
+  anchored overload patterns can't misfire on a session/usage limit (no `API Error` line).
+  The scraper also skips the exact banner the event path just retried until it clears or
+  changes, so a render lingering after an edge-triggered retry can't open a second backoff
+  (a double injection that would also reset the give-up budget).
 - Monitor no longer stays parked on a stale wait timer once the session resumes:
   while counting down a usage wait, a pane that has resumed working (e.g. the user
   manually typed `continue` to unstick a wrong/stale wait) now drops back to
