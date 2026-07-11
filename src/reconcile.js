@@ -52,10 +52,11 @@ export const LOCK_FILE = join(homedir(), '.claude-auto-retry', 'reconcile.lock')
 // as "alive" forever, wedging acquireLock at {ok:false} and silently disabling self-heal).
 // Linux: /proc/<pid>/stat field 22 (starttime; the "(comm)" field may contain spaces/parens,
 // so slice past the last ')'). Fallback (macOS/BSD, no /proc): `ps -o lstart=`. null if gone.
-// NOTE: `ps -o lstart=` is locale-dependent (LC_TIME), so on non-Linux a checker running
-// under a different locale than the writer (e.g. cron vs shell) could misjudge a live holder
-// as stale. Linux always takes the /proc path on both sides, and this tool targets
-// Linux/systemd, so it's unaffected in practice.
+// NOTE: `ps -o lstart=` renders a date, and its format is locale-dependent (LC_TIME) —
+// a checker running under a different locale than the writer (the launchd timer runs
+// with a bare C locale, an interactive shell often doesn't) would see a token mismatch
+// on a LIVE holder and wrongly steal its lock. Pinned to LC_ALL=C on both sides so
+// writer and checker always agree. (Linux always takes the /proc path and is unaffected.)
 export async function processStartToken(pid) {
   try {
     const stat = await readFile(`/proc/${pid}/stat`, 'utf-8');
@@ -63,7 +64,8 @@ export async function processStartToken(pid) {
     if (after[19]) return after[19];   // field 22 overall = index 19 after "state"
   } catch { /* not Linux, or process gone */ }
   try {
-    const { stdout } = await execFile('ps', ['-o', 'lstart=', '-p', String(pid)]);
+    const { stdout } = await execFile('ps', ['-o', 'lstart=', '-p', String(pid)],
+      { env: { ...process.env, LC_ALL: 'C' } });
     return stdout.trim() || null;
   } catch { return null; }
 }
@@ -196,6 +198,20 @@ async function readExcludeFile(path = EXCLUDE_FILE) {
 // — install the shell wrapper for those. (Matching bare "node" here would arm a monitor on
 // every unrelated node process, so it is deliberately not attempted.)
 const CLAUDE_COMM = 'claude';
+// ps `comm=` is the bare process name on Linux (procps), but on macOS/BSD it is the
+// executable's full path — TRUNCATED to 16 chars ("/Users/x/.local/bin/claude" prints
+// as "/Users/x/." or similar), so neither an exact nor a basename compare can work
+// there. Fall back to the basename of argv[0] from `args=` (untruncated): for the
+// claude CLI that is ".../bin/claude". A bare `node script.js` session still shows
+// argv[0] basename "node" and stays invisible, same as on Linux (see note above).
+function basename(s) {
+  return s.slice(s.lastIndexOf('/') + 1);
+}
+export function isClaudeProc(p) {
+  if (p.comm === CLAUDE_COMM || basename(p.comm || '') === CLAUDE_COMM) return true;
+  const argv0 = (p.args || '').trim().split(/\s+/)[0] || '';
+  return basename(argv0) === CLAUDE_COMM;
+}
 // Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
 // interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
 // retry text would be injected into that output (Finding 8). Only treat -p/--print as print
@@ -235,8 +251,13 @@ export function parseProcesses(out) {
   }).filter(Boolean);
 }
 
-// pgrep -af output for running monitors → Set of "pane pid" keys already covered, plus
-// the raw records so a caller can report/kill. Line: "<mpid> ... monitor.js <pane> <pid>"
+// Flag that makes pgrep print the full argument list next to each PID — procps (Linux)
+// spells it -a, BSD/macOS spells it -l (where -a instead means "include ancestors" and
+// leaves the output PID-only, which runningFromPgrep rejects as unverifiable coverage).
+export const PGREP_LIST_FLAG = process.platform === 'darwin' ? '-lf' : '-af';
+
+// pgrep full-args output for running monitors → Set of "pane pid" keys already covered,
+// plus the raw records so a caller can report/kill. Line: "<mpid> ... monitor.js <pane> <pid>"
 export function parseRunningMonitors(out) {
   const covered = new Map();  // "pane pid" -> monitorPid
   for (const line of out.split('\n')) {
@@ -261,7 +282,7 @@ export function runningFromPgrep(err, stdout) {
   }
   const covered = parseRunningMonitors(out);
   if (out.trim() && covered.size === 0) {
-    throw new Error('pgrep matched processes but printed no monitor args (needs `pgrep -a`; busybox/macOS print PIDs only). Refusing to reconcile — cannot verify coverage without risking duplicate monitors.');
+    throw new Error('pgrep matched processes but printed no monitor args (needs full-args output: `pgrep -a` on procps, `-l` on BSD/macOS; busybox prints PIDs only). Refusing to reconcile — cannot verify coverage without risking duplicate monitors.');
   }
   return covered;
 }
@@ -297,7 +318,7 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 
   // Every interactive claude (comm === 'claude'), excluding print-mode sessions; map to
   // its pane.
-  const claudes = processes.filter(p => p.comm === CLAUDE_COMM && !(isPrintMode(p.args)));
+  const claudes = processes.filter(p => isClaudeProc(p) && !(isPrintMode(p.args)));
   const byPane = new Map();  // pane -> [claudeProc]
   for (const c of claudes) {
     const pane = paneForPid(c.pid, byPid, panePidToPane);
@@ -340,7 +361,7 @@ async function gather() {
     execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=,args=']),
   ]);
   let pgrepErr = null, monOut = '';
-  try { monOut = (await execFile('pgrep', ['-af', 'node .*src/monitor\\.js'])).stdout; }
+  try { monOut = (await execFile('pgrep', [PGREP_LIST_FLAG, 'node .*src/monitor\\.js'])).stdout; }
   catch (err) { pgrepErr = err; monOut = err.stdout || ''; }
   return {
     panes: parsePanes(panesOut),
@@ -394,7 +415,7 @@ export async function claudePidForPane(pane) {
   const { panes, processes } = await gather();
   const byPid = new Map(processes.map(p => [p.pid, p]));
   const panePidToPane = new Map(panes.map(p => [p.panePid, p.pane]));
-  const here = processes.filter(p => p.comm === CLAUDE_COMM
+  const here = processes.filter(p => isClaudeProc(p)
     && !(isPrintMode(p.args))
     && paneForPid(p.pid, byPid, panePidToPane) === pane);
   if (here.length === 0) return null;

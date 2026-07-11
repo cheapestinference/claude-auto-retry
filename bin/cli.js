@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
-import { reconcile, excludeSelf, parseRunningMonitors } from '../src/reconcile.js';
+import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -266,14 +266,24 @@ async function cmdUninstallHook() {
   } catch { console.log('No settings file to modify.'); }
 }
 
-// --- systemd --user timer (self-healing monitor coverage) ---
+// --- reconcile timer (self-healing monitor coverage) ---
+// Linux: systemd --user service+timer. macOS: a launchd LaunchAgent. Same cadence
+// (run shortly after login, then every 5 min), same reconcile entry point.
 
 const SYSTEMD_DIR = join(SRC_DIR, '..', 'systemd');
 const UNIT_SERVICE = 'claude-auto-retry-reconcile.service';
 const UNIT_TIMER = 'claude-auto-retry-reconcile.timer';
 
+const LAUNCHD_DIR = join(SRC_DIR, '..', 'launchd');
+const LAUNCHD_LABEL = 'com.claude-auto-retry.reconcile';
+const LAUNCHD_PLIST = `${LAUNCHD_LABEL}.plist`;
+
 function userUnitDir() {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user');
+}
+
+function launchAgentsDir() {
+  return join(homedir(), 'Library', 'LaunchAgents');
 }
 
 // Substitute the node/CLI paths into a unit template. The template quotes the placeholders
@@ -282,10 +292,71 @@ export function renderReconcileUnit(template, nodePath, cliPath) {
   return template.replace(/__NODE_PATH__/g, nodePath).replace(/__CLI_PATH__/g, cliPath);
 }
 
+// launchd variant: the placeholders sit inside <string> elements, so the substituted
+// paths must be XML-escaped (an '&' in an nvm dir name would otherwise corrupt the
+// plist; spaces need no quoting — each ProgramArguments <string> is one argv entry).
+function xmlEscape(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+export function renderReconcilePlist(template, nodePath, cliPath) {
+  return template
+    .replace(/__NODE_PATH__/g, xmlEscape(nodePath))
+    .replace(/__CLI_PATH__/g, xmlEscape(cliPath));
+}
+
+// macOS: install the reconcile LaunchAgent into ~/Library/LaunchAgents and load it via
+// launchctl bootstrap into the user's gui domain. RunAtLoad + StartInterval=300 mirror
+// the systemd timer's OnStartupSec/OnUnitActiveSec cadence.
+async function installTimerLaunchd() {
+  const dest = launchAgentsDir();
+  await mkdir(dest, { recursive: true });
+  const nodePath = process.execPath;
+  const cliPath = __filename;
+
+  let template;
+  try {
+    template = await readFile(join(LAUNCHD_DIR, LAUNCHD_PLIST), 'utf-8');
+  } catch (err) {
+    console.error(`Could not read the launchd plist template from ${LAUNCHD_DIR} (${err.code || err.message}).`);
+    console.error('If you installed from npm, upgrade to a version that ships the launchd/ directory,');
+    console.error('or run install-timer from a git checkout of the repo.');
+    process.exit(1);
+  }
+  const plistPath = join(dest, LAUNCHD_PLIST);
+  await writeFile(plistPath, renderReconcilePlist(template, nodePath, cliPath));
+
+  const domain = `gui/${process.getuid()}`;
+  // Reload cleanly if a previous version is already bootstrapped (bootstrap fails on
+  // an already-loaded label; bootout of an absent label fails — both safe to ignore).
+  try { execFileSync('launchctl', ['bootout', `${domain}/${LAUNCHD_LABEL}`], { stdio: 'ignore' }); } catch { /* not loaded */ }
+  try {
+    execFileSync('launchctl', ['bootstrap', domain, plistPath], { stdio: 'inherit' });
+  } catch {
+    console.error(`\nAgent written to ${plistPath} but loading failed. Load manually:`);
+    console.error(`  launchctl bootstrap ${domain} ${plistPath}`);
+    process.exit(1);
+  }
+  console.log(`\nLaunchAgent installed and loaded. Monitor coverage now self-heals every 5 min.`);
+  console.log(`  status:  launchctl print ${domain}/${LAUNCHD_LABEL}`);
+  console.log(`  note: LaunchAgents run only while you are logged in (fine for tmux —`);
+  console.log(`        the tmux server lives in your login session too).`);
+  console.log(`\nNote: the agent pins this Node path (${nodePath}). If you switch Node`);
+  console.log(`versions (nvm), re-run: claude-auto-retry install-timer`);
+}
+
+async function uninstallTimerLaunchd() {
+  const domain = `gui/${process.getuid()}`;
+  try { execFileSync('launchctl', ['bootout', `${domain}/${LAUNCHD_LABEL}`], { stdio: 'ignore' }); } catch { /* not loaded — fine */ }
+  try { await (await import('node:fs/promises')).unlink(join(launchAgentsDir(), LAUNCHD_PLIST)); } catch { /* absent */ }
+  console.log('LaunchAgent removed. (Already-running monitors are unaffected.)');
+}
+
 // Install the reconcile service+timer into the systemd --user unit dir, substituting the
 // node and CLI paths, then enable+start the timer. Makes monitor coverage self-healing:
-// every 5 min a missing monitor is re-armed. Requires systemd --user (Linux).
+// every 5 min a missing monitor is re-armed. systemd --user on Linux; launchd on macOS.
 async function cmdInstallTimer() {
+  if (process.platform === 'darwin') return installTimerLaunchd();
   const dest = userUnitDir();
   await mkdir(dest, { recursive: true });
   const nodePath = process.execPath;
@@ -322,6 +393,7 @@ async function cmdInstallTimer() {
 }
 
 async function cmdUninstallTimer() {
+  if (process.platform === 'darwin') return uninstallTimerLaunchd();
   try {
     execFileSync('systemctl', ['--user', 'disable', '--now', UNIT_TIMER], { stdio: 'inherit' });
   } catch { /* not enabled — fine */ }
@@ -345,7 +417,7 @@ async function cmdExcludeSelf() {
   // Kill any monitor already covering this pane so exclusion takes effect immediately.
   // Reuse parseRunningMonitors (same parser reconcile uses) instead of a bespoke one.
   try {
-    const out = execFileSync('pgrep', ['-af', 'node .*src/monitor\\.js'], { encoding: 'utf-8' });
+    const out = execFileSync('pgrep', [PGREP_LIST_FLAG, 'node .*src/monitor\\.js'], { encoding: 'utf-8' });
     const mpid = parseRunningMonitors(out).get(`${r.pane} ${r.pid}`);
     if (mpid) { try { process.kill(mpid); console.log(`Stopped existing monitor ${mpid}.`); } catch {} }
   } catch { /* no monitor running for this pane — nothing to stop */ }
@@ -419,8 +491,9 @@ switch (command) {
     console.log('                                       (--dry-run to preview). Run after a crash.');
     console.log('  claude-auto-retry exclude-self       Keep THIS session unmonitored (durable,');
     console.log('                                       by claude PID; self-expires on exit)');
-    console.log('  claude-auto-retry install-timer      Install a systemd --user timer that runs');
-    console.log('                                       reconcile every 5 min (self-healing coverage)');
+    console.log('  claude-auto-retry install-timer      Install a timer that runs reconcile every');
+    console.log('                                       5 min (self-healing coverage; systemd --user');
+    console.log('                                       on Linux, launchd LaunchAgent on macOS)');
     console.log('  claude-auto-retry uninstall-timer    Remove the reconcile timer');
     console.log('  claude-auto-retry status             Show monitor status');
     console.log('  claude-auto-retry logs               Tail today\'s log');

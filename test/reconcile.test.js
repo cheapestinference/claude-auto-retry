@@ -207,6 +207,25 @@ describe('planReconcile', () => {
       [{ pane: '%1', pid: 200 }, { pane: '%2', pid: 400 }]);
   });
 
+  it('detects claude from a truncated full-path comm via argv[0] (macOS/BSD ps)', () => {
+    // macOS ps `comm=` prints the executable's full path truncated to 16 chars
+    // ("/Users/u/.local/" — never "claude"), so a comm compare sees zero claudes
+    // there; detection must fall back to the basename of argv[0] in `args=`.
+    const panes = [{ pane: '%1', panePid: 100 }];
+    const processes = [
+      { pid: 100, ppid: 1, stat: 'Ss', comm: '/bin/zsh', args: '-zsh' },
+      { pid: 200, ppid: 100, stat: 'S+', comm: '/Users/u/.local/',
+        args: '/Users/u/.local/bin/claude --dangerously-skip-permissions' },
+      // NOT claude: neither comm nor argv[0] basename is "claude"
+      { pid: 300, ppid: 100, stat: 'S', comm: '/opt/homebrew/bi',
+        args: '/opt/homebrew/bin/node server.js' },
+      { pid: 400, ppid: 100, stat: 'S', comm: '/usr/bin/not-cla',
+        args: '/usr/bin/not-claude' },
+    ];
+    const { arm } = planReconcile({ panes, processes, running: new Map() });
+    assert.deepEqual(arm, [{ pane: '%1', pid: 200 }]);
+  });
+
   it('skips a pane that already has a monitor', () => {
     const { panes, processes } = fixture();
     const running = parseRunningMonitors('9 node src/monitor.js %1 200\n');
