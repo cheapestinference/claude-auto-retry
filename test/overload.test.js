@@ -400,6 +400,28 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     assert.equal(t._sent.length, 0);
   });
 
+  // --- Regression: the always-on scraper must not double-fire on the SAME overload banner
+  //     that the event path just handled. After a viaEvent retry returns to monitoring with
+  //     the banner still on screen (viaEvent is edge-triggered — it does not verify the
+  //     banner cleared), a naive always-on scraper re-detects it and starts a SECOND backoff
+  //     (extra injection + resetOverload defeats the give-up cap). ---
+  it('does not re-fire the scraper on the same banner lingering after a viaEvent retry', async () => {
+    const banner = 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}';
+    const s = createMonitorState();
+    // in a viaEvent backoff whose window just elapsed, the banner still rendered
+    s.status = 'overload'; s.viaEvent = true; s.overloadWaitUntil = Date.now() - 1; s.overloadTotalWaitMs = 30_000;
+    const t1 = mockTmux(banner, 'node', true, null);
+    assert.equal(await processOneTick(s, t1, '%0', cfg(), () => true, NO_JITTER), 'overload-retried'); // send #1
+    assert.equal(s.status, 'monitoring');
+    assert.equal(t1._sent.length, 1);
+    assert.equal(s.overloadAttempts, 1);
+    // next tick: same banner still present, no new marker → scraper must NOT re-detect it
+    const t2 = mockTmux(banner, 'node', true, null);
+    assert.equal(await processOneTick(s, t2, '%0', cfg(), () => true, NO_JITTER), 'monitoring');
+    assert.equal(t2._sent.length, 0);        // no second injection
+    assert.equal(s.overloadAttempts, 1);     // give-up budget not reset
+  });
+
   it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook)', async () => {
     // Regression: settings.json freezes the hook's cli.js path + matcher at install time,
     // so an old hook binary can still write rate_limit markers after an upgrade. The
