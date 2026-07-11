@@ -38,6 +38,18 @@ function shellEscape(s) {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+// After the tmux session's own claude-auto-retry process exits, the pane falls through
+// to a plain shell so the user isn't dropped straight out of tmux. Use the user's actual
+// login shell (env.SHELL) rather than a hardcoded `bash` — tmux's own `default-shell`
+// config is bypassed here because this pane is started with an explicit command, not the
+// session default. (#reported: bash-3.2 stub shown even when SHELL=/bin/zsh)
+export function buildTmuxInnerCmd(launcherPath, args, env = process.env) {
+  const escapedLauncher = shellEscape(launcherPath);
+  const escapedArgs = args.map(a => shellEscape(a)).join(' ');
+  const shell = env.SHELL || 'bash';
+  return `CLAUDE_AUTO_RETRY_ACTIVE=1 node ${escapedLauncher} ${escapedArgs}; exec ${shellEscape(shell)}`;
+}
+
 async function launchInteractive(args) {
   const claudeBin = findClaudeBinary();
   const pane = getCurrentPane();
@@ -145,9 +157,7 @@ async function createTmuxSession(args) {
   const launcherPath = __filename;
 
   // Build the command to run inside tmux
-  const escapedLauncher = shellEscape(launcherPath);
-  const escapedArgs = args.map(a => shellEscape(a)).join(' ');
-  const innerCmd = `CLAUDE_AUTO_RETRY_ACTIVE=1 node ${escapedLauncher} ${escapedArgs}; exec bash`;
+  const innerCmd = buildTmuxInnerCmd(launcherPath, args);
 
   // Build env propagation args
   // tmux -e flag requires tmux >= 3.0; for older versions, prefix env exports in the command
