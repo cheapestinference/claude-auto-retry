@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit } from '../bin/cli.js';
+import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist } from '../bin/cli.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -30,10 +30,38 @@ describe('renderReconcileUnit (Finding 7)', () => {
   });
 });
 
+describe('renderReconcilePlist (macOS launchd)', () => {
+  it('substitutes and XML-escapes the node/CLI paths', () => {
+    const out = renderReconcilePlist(
+      '<string>__NODE_PATH__</string><string>__CLI_PATH__</string>',
+      '/Users/a&b/.nvm/node', '/Users/a<b>/cli.js',
+    );
+    assert.equal(out, '<string>/Users/a&amp;b/.nvm/node</string><string>/Users/a&lt;b&gt;/cli.js</string>');
+    assert.ok(!out.includes('__NODE_PATH__') && !out.includes('__CLI_PATH__'));
+  });
+  it('the shipped plist template has the placeholders and detaches monitors from the job', async () => {
+    const plist = await readFile(join(REPO_ROOT, 'launchd', 'com.claude-auto-retry.reconcile.plist'), 'utf-8');
+    assert.match(plist, /<string>__NODE_PATH__<\/string>\s*<string>__CLI_PATH__<\/string>\s*<string>reconcile<\/string>/);
+    // Same reason the systemd unit needs KillMode=process: without it the short-lived
+    // reconcile job's exit reaps the freshly-armed detached monitors.
+    assert.match(plist, /<key>AbandonProcessGroup<\/key>\s*<true\/>/);
+  });
+  it('the shipped plist sets a PATH that reaches a Homebrew tmux', async () => {
+    // launchd jobs get only the system default PATH; without both Homebrew prefixes
+    // reconcile dies with `spawn tmux ENOENT` on every timer fire.
+    const plist = await readFile(join(REPO_ROOT, 'launchd', 'com.claude-auto-retry.reconcile.plist'), 'utf-8');
+    assert.match(plist, /<key>PATH<\/key>\s*<string>[^<]*\/opt\/homebrew\/bin[^<]*\/usr\/local\/bin[^<]*<\/string>/);
+  });
+});
+
 describe('package.json files whitelist (Finding 1)', () => {
   it('includes systemd/ so install-timer works from an npm install', async () => {
     const pkg = JSON.parse(await readFile(join(REPO_ROOT, 'package.json'), 'utf-8'));
     assert.ok(pkg.files.includes('systemd/'), 'package.json "files" must include "systemd/"');
+  });
+  it('includes launchd/ so install-timer works from an npm install on macOS', async () => {
+    const pkg = JSON.parse(await readFile(join(REPO_ROOT, 'package.json'), 'utf-8'));
+    assert.ok(pkg.files.includes('launchd/'), 'package.json "files" must include "launchd/"');
   });
 });
 

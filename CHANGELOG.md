@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`reconcile` / `install-timer` / `exclude-self`** for self-healing monitor coverage: a
   monitor killed (or a `claude` started outside the wrapper) is re-armed from live tmux +
   process state, on demand or via a `systemd --user` timer (#32).
+- **macOS support for `reconcile` / `install-timer`**: the running-monitor probe now uses
+  `pgrep -lf` on Darwin (BSD pgrep prints full args with `-l`, not procps' `-a`, so
+  reconcile previously always aborted with "cannot verify coverage" on macOS), claude
+  detection falls back to the basename of argv[0] from ps `args=` (macOS `comm=` prints
+  the executable's full path truncated to 16 chars — never "claude" — so the strict
+  compare saw zero claude sessions), and
+  `install-timer` installs a launchd LaunchAgent
+  (`~/Library/LaunchAgents/com.claude-auto-retry.reconcile.plist`, `RunAtLoad` +
+  `StartInterval` 300s, `AbandonProcessGroup` so the freshly-armed detached monitors
+  survive the short-lived job, and an explicit `PATH` covering both Homebrew prefixes —
+  launchd does not inherit the login shell's PATH, so `spawn tmux` would otherwise
+  ENOENT) instead of requiring systemd. The reconcile lock's `ps -o lstart=` start token
+  is now pinned to `LC_ALL=C` so the timer (C locale) and an interactive shell (user
+  locale) always agree on lock-holder identity.
 - Safeguard/AUP false-positive auto-retry: when the model's safeguards flag a
   message ("safeguards flagged this message"), re-send a short retry up to
   `safeguard.maxRetries` times, then give up loudly once. Detection is anchored

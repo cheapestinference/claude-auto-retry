@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- claude-auto-retry: re-arm monitors for all live claude tmux panes (macOS
+     counterpart of the systemd user units; installed by `install-timer`).
+     __NODE_PATH__ and __CLI_PATH__ are substituted (XML-escaped) at install time. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-auto-retry.reconcile</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__NODE_PATH__</string>
+        <string>__CLI_PATH__</string>
+        <string>reconcile</string>
+    </array>
+    <!-- Mirrors KillMode=process in the systemd unit: reconcile spawns DETACHED
+         monitor processes and exits. Without AbandonProcessGroup, launchd reaps
+         everything left in the job's process group when the short-lived job
+         finishes — killing the freshly-armed monitors. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <!-- First run right after load (lets a just-logged-in tmux settle via the
+         reconcile lock), then every 5 min, same cadence as OnUnitActiveSec. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <!-- launchd jobs do NOT inherit the login shell's PATH (they get only the system
+         default /usr/bin:/bin:/usr/sbin:/sbin), so reconcile's `spawn tmux` would fail
+         with ENOENT on any Homebrew-installed tmux. Node itself is invoked by absolute
+         path; this PATH exists for tmux (+ps/pgrep), covering both Homebrew prefixes
+         (ARM /opt/homebrew, Intel /usr/local) ahead of the system dirs. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

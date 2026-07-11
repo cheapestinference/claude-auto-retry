@@ -78,7 +78,7 @@ When you disconnect (SSH drops, close terminal, laptop sleeps), **tmux keeps run
 - **Timezone-aware** — parses reset times with full IANA timezone support (including half-hour offsets)
 - **DST-safe** — iterative offset correction handles daylight saving transitions
 - **Safe send-keys** — verifies Claude is still the foreground process before injecting text
-- **Self-healing coverage** — `reconcile` re-arms monitors for any live `claude` session that lost one; an optional `systemd --user` timer runs it automatically ([details](#keeping-monitors-alive))
+- **Self-healing coverage** — `reconcile` re-arms monitors for any live `claude` session that lost one; an optional timer (`systemd --user` on Linux, launchd on macOS) runs it automatically ([details](#keeping-monitors-alive))
 - **Overload backoff** — detects sustained API overload (`429/500/502/503/504/529`) and retries on a configurable exponential backoff with jitter and a cumulative-wait cap, distinct from the usage-reset path ([details](#overload-backoff))
 - **Safeguard retry** — auto-continues past an AUP-safeguard false-positive (often transient), capped at a few tries so a sticky flag can't loop ([details](#safeguard-retry))
 - **tmux status bar indicator** — see at a glance whether a pane is being monitored, waiting on a reset, backing off from overload, or has given up ([details](#tmux-status-bar-indicator))
@@ -404,7 +404,8 @@ claude-auto-retry uninstall-hook [dir]  # Remove it
 # Monitor coverage (see "Keeping monitors alive")
 claude-auto-retry reconcile        # Re-arm a monitor for every live claude pane not covered
 claude-auto-retry reconcile --dry-run   # Preview without arming
-claude-auto-retry install-timer    # systemd --user timer: run reconcile every 5 min
+claude-auto-retry install-timer    # Run reconcile every 5 min (systemd --user on Linux,
+                                   # launchd LaunchAgent on macOS)
 claude-auto-retry uninstall-timer  # Remove the timer
 claude-auto-retry exclude-self     # Keep THIS session unmonitored (durable, self-expiring)
 ```
@@ -446,10 +447,12 @@ sessions get a monitor. Two commands restore and maintain full coverage:
   mode sessions (`claude -p`) are skipped, and a `claude` that doesn't set its process
   title to `claude` (a bare `node` shebang) isn't detected — use the wrapper for those.
   Run it after a crash, or use `--dry-run` to see what it would do.
-- **`install-timer`** wires `reconcile` to a `systemd --user` timer that runs every 5
-  minutes, so a monitor that dies is re-armed within one interval — coverage self-heals
-  with no manual step. (Enable `loginctl enable-linger $USER` once if you want it to run
-  while logged out.)
+- **`install-timer`** wires `reconcile` to a timer that runs every 5 minutes, so a
+  monitor that dies is re-armed within one interval — coverage self-heals with no manual
+  step. On Linux this is a `systemd --user` timer (enable `loginctl enable-linger $USER`
+  once if you want it to run while logged out); on macOS it is a launchd LaunchAgent in
+  `~/Library/LaunchAgents` (LaunchAgents only run while you are logged in, which is fine —
+  the tmux server it reconciles lives in your login session too).
 
 **Excluding a session.** To keep a specific session *unmonitored* (e.g. one where you're
 pasting rate-limit text and don't want any auto-retry), run `claude-auto-retry
@@ -558,7 +561,8 @@ claude-auto-retry/
 │   ├── reconcile.js        # Re-arm monitors for all live claude panes + exclusion
 │   ├── launcher.js         # Process orchestration + signal forwarding
 │   └── wrapper.sh          # Shell function template
-├── systemd/                # systemd --user units for the reconcile timer
+├── systemd/                # systemd --user units for the reconcile timer (Linux)
+├── launchd/                # LaunchAgent plist for the reconcile timer (macOS)
 ├── test/                   # tests across the src modules
 ├── package.json
 ├── LICENSE
