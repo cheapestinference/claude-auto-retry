@@ -213,12 +213,25 @@ export function isClaudeProc(p) {
   return basename(argv0) === CLAUDE_COMM;
 }
 
-// The executed script of a `node [flags] <script> …` invocation (skip node + its flags).
+// Node flags that take a SEPARATE-token value (`node -r ./pre.js script.js`). Skipping only
+// the flag would mistake its value for the executed script — missing a preload-instrumented
+// claude (`node -r x /path/claude`) and false-matching an unrelated one whose value path
+// ends in "claude" (`node -r /opt/claude server.js`). The `--flag=value` form carries its
+// value in one token, so it isn't listed here.
+const NODE_VALUE_FLAGS = new Set(['-r', '--require', '--import', '--loader', '-e', '--eval']);
+// Index of the executed script in a `node [flags] <script> …` token list (skip node, its
+// flags, and any separate-token flag values).
+function nodeScriptIndex(toks) {
+  let i = 1;                                       // toks[0] = "node"
+  while (i < toks.length && toks[i].startsWith('-')) {
+    i += (NODE_VALUE_FLAGS.has(toks[i]) && !toks[i].includes('=')) ? 2 : 1;
+  }
+  return i;
+}
+// The executed script of a `node [flags] <script> …` invocation.
 function nodeScript(args) {
   const toks = (args || '').trim().split(/\s+/);
-  let i = 1;                                       // toks[0] = "node"
-  while (i < toks.length && toks[i].startsWith('-')) i++;
-  return toks[i] || '';
+  return toks[nodeScriptIndex(toks)] || '';
 }
 const baseName = (p) => p.split('/').pop();
 
@@ -247,9 +260,23 @@ function isMonitorProc(p) {
 function claudeArgs(p) {
   if (p.comm === CLAUDE_COMM) return p.args;
   const toks = (p.args || '').trim().split(/\s+/);
-  let i = 1;
-  while (i < toks.length && toks[i].startsWith('-')) i++;   // past node flags
-  return ['claude', ...toks.slice(i + 1)].join(' ');        // fake command token + real args
+  return ['claude', ...toks.slice(nodeScriptIndex(toks) + 1)].join(' '); // fake cmd token + real args
+}
+// For an agent wrapper that names claude as a subcommand (`node …/happier claude -p`), the
+// claude args begin AFTER the "claude" token — so isPrintMode sees the -p that follows it,
+// which claudeArgs (stopping at the wrapper's first positional) would miss. Empty if no
+// claude token is present (then the caller falls back to claudeArgs / errs toward arming).
+function wrapperClaudeArgs(args) {
+  const toks = (args || '').trim().split(/\s+/);
+  const i = toks.findIndex(t => baseName(t) === CLAUDE_COMM);
+  return i === -1 ? '' : ['claude', ...toks.slice(i + 1)].join(' ');
+}
+// Verify a launcher's child is actually claude before arming it — don't blindly trust the
+// "launcher only ever wraps claude" invariant. It counts as claude if it is claude itself
+// (comm/argv0), the node-launched CLI, or an agent wrapper that names claude as a token.
+function looksLikeClaude(p) {
+  if (isClaudeProc(p) || isNodeClaudeCli(p)) return true;
+  return (p.args || '').trim().split(/\s+/).some(t => baseName(t) === CLAUDE_COMM);
 }
 // Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
 // interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
@@ -368,7 +395,11 @@ export function sessionTargetsByPane(processes, byPid, panePidToPane) {
     const pane = paneForPid(p.pid, byPid, panePidToPane);
     if (!pane || byPane.has(pane)) continue;               // a direct candidate already owns it
     const child = processes.find(c => c.ppid === p.pid && !isMonitorProc(c));
-    if (child && !isPrintMode(claudeArgs(child))) push(pane, child);
+    if (!child || !looksLikeClaude(child)) continue;       // verify claude-shaped, don't just trust
+    // Print mode through the wrapper: check the args after the "claude" subcommand token
+    // (a wrapper positional precedes the -p, which claudeArgs alone would stop short of).
+    if (isPrintMode(wrapperClaudeArgs(child.args) || claudeArgs(child))) continue;
+    push(pane, child);
   }
   return byPane;
 }

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `reconcile` claude detection follow-ups (#49 review): (1) node flags that take a
+  separate-token value (`-r`/`--require`, `--import`, `--loader`, `-e`) are skipped when
+  finding the executed script, so a preload-instrumented `node -r x …/claude` is detected
+  and a `node -r /opt/claude server.js` no longer false-matches; (2) a launcher wrapping a
+  print-mode session (`node …/wrap claude -p`) is skipped — print mode is now read from the
+  args after the `claude` subcommand token, not the wrapper's first positional; (3) a
+  launcher child is verified claude-shaped before arming, instead of trusting that the
+  launcher only ever spawns claude.
+
 ## [0.6.0] - 2026-07-11
 
 ### Added

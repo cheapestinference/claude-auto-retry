@@ -447,4 +447,58 @@ describe('planReconcile', () => {
     ];
     assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
   });
+
+  // --- #49 review follow-up 1: nodeScript must skip a node flag's SEPARATE value, or it
+  //     mistakes the value for the script — missing a preload-instrumented claude and
+  //     false-matching an unrelated node process whose require path ends in "claude". ---
+  it('arms a node-launched claude started with a preload flag (node -r <mod> …/claude)', () => {
+    const panes = [{ pane: '%40', panePid: 4000 }];
+    const processes = [
+      { pid: 4000, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4010, ppid: 4000, stat: 'Sl+', comm: 'node', args: 'node --require /opt/pre.js /home/u/.local/bin/claude --resume' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%40', pid: 4010 }]);
+  });
+  it('does NOT false-match a node process whose --require value path ends in "claude"', () => {
+    const panes = [{ pane: '%41', panePid: 4100 }];
+    const processes = [
+      { pid: 4100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4110, ppid: 4100, stat: 'Sl+', comm: 'node', args: 'node -r /opt/claude /app/server.js' }, // real script is server.js
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+
+  // --- #49 review follow-up 2: a launcher wrapping print mode must be skipped — isPrintMode
+  //     stopped at the wrapper's first positional ("claude") and never saw the -p after it. ---
+  it('does NOT arm a launcher wrapping a print-mode claude (node …/wrap claude -p)', () => {
+    const panes = [{ pane: '%42', panePid: 4200 }];
+    const processes = [
+      { pid: 4200, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4210, ppid: 4200, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js' },
+      { pid: 4220, ppid: 4210, stat: 'Sl+', comm: 'node', args: 'node /home/u/.local/bin/wrap claude -p' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+  it('still arms a launcher wrapping an interactive claude (node …/happier claude -c)', () => {
+    const panes = [{ pane: '%43', panePid: 4300 }];
+    const processes = [
+      { pid: 4300, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4310, ppid: 4300, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js -c' },
+      { pid: 4320, ppid: 4310, stat: 'Sl+', comm: 'node', args: 'node /home/u/.local/bin/happier claude -c' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%43', pid: 4320 }]);
+  });
+
+  // --- #49 review follow-up 3: don't blindly trust "the launcher only spawns claude" —
+  //     verify the child is claude-shaped, so a launcher child that isn't claude (a helper,
+  //     or a mis-detected process) doesn't get a send-keys monitor. ---
+  it('does NOT arm a launcher child that is not claude-shaped', () => {
+    const panes = [{ pane: '%44', panePid: 4400 }];
+    const processes = [
+      { pid: 4400, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4410, ppid: 4400, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js' },
+      { pid: 4420, ppid: 4410, stat: 'Sl+', comm: 'node', args: 'node /app/build.js' }, // not claude
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
 });
