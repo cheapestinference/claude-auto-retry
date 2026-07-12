@@ -33,6 +33,15 @@ export function isRetryableError(errorType) {
   return typeof errorType === 'string' && RETRYABLE.has(errorType.toLowerCase());
 }
 
+// The session/usage-limit class, kept as its own set (not folded into RETRYABLE) so the
+// overload (seconds-scale) and usage-wait (hours-scale) routes stay separate — monitor.js
+// routes this to enterUsageWait, never to the overload backoff.
+const USAGE_LIMIT = new Set(['rate_limit']);
+
+export function isUsageLimitError(errorType) {
+  return typeof errorType === 'string' && USAGE_LIMIT.has(errorType.toLowerCase());
+}
+
 // tmux pane ids look like "%2"; keep the marker filename to a safe charset.
 function fileFor(paneKey, dir) {
   return join(dir, `${sanitizeKey(paneKey)}.json`);
@@ -46,7 +55,12 @@ export async function writeStopFailureEvent(paneKey, payload, dir = EVENTS_DIR) 
   await mkdir(dir, { recursive: true });
   const file = fileFor(paneKey, dir);
   const tmp = `${file}.${process.pid}.tmp`;
-  const body = JSON.stringify({ pane: String(paneKey), error, session_id: payload?.session_id ?? null, ts: Date.now() });
+  const body = JSON.stringify({
+    pane: String(paneKey), error,
+    session_id: payload?.session_id ?? null,
+    cwd: payload?.cwd ?? null,
+    ts: Date.now(),
+  });
   await writeFile(tmp, body);
   await rename(tmp, file);
   return file;

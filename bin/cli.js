@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
+import { writeStopFailureEvent, isRetryableError, isUsageLimitError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
 import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
 
@@ -206,12 +206,12 @@ async function cmdLogs() {
 
 const HOOK_MARKER = '_stopfailure-hook';
 
-function stopFailureHookEntry() {
-  // Matcher filters on the StopFailure error type; only the transient-overload classes.
-  // rate_limit is intentionally omitted — a session/usage limit is an hours-scale wait
-  // owned by the scraper usage path, not a seconds-scale event retry (see src/events.js).
+export function stopFailureHookEntry() {
+  // Matcher filters on the StopFailure error type: the transient-overload classes plus
+  // rate_limit (the session/usage limit — routed by the monitor to the hours-scale
+  // usage-wait, never the overload backoff; see src/events.js and src/monitor.js).
   return {
-    matcher: 'overloaded|server_error',
+    matcher: 'overloaded|server_error|rate_limit',
     hooks: [{ type: 'command', command: `node ${__filename} ${HOOK_MARKER}`, timeout: 5 }],
   };
 }
@@ -220,16 +220,22 @@ function resolveConfigDir(arg) {
   return arg || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
 }
 
+// Error classes this version ever writes a marker for — overload (seconds-scale) and
+// usage-limit (hours-scale). Everything else (auth/billing/invalid/etc.) is never written.
+export function shouldWriteEvent(errorType) {
+  return isRetryableError(errorType) || isUsageLimitError(errorType);
+}
+
 // Invoked BY Claude Code on a turn-ending API error. Reads the hook JSON on stdin and,
-// for a retryable error, writes a pane-keyed marker the monitor consumes. Must never
-// disrupt the session: StopFailure output/exit is ignored, and we swallow all errors.
+// for an error class we act on, writes a pane-keyed marker the monitor consumes. Must
+// never disrupt the session: StopFailure output/exit is ignored, and we swallow all errors.
 async function cmdStopFailureHook() {
   try {
     const chunks = [];
     for await (const c of process.stdin) chunks.push(c);
     const payload = JSON.parse(Buffer.concat(chunks).toString() || '{}');
     const pane = process.env.CLAUDE_AUTO_RETRY_PANE;
-    if (pane && isRetryableError(payload.error)) {
+    if (pane && shouldWriteEvent(payload.error)) {
       await writeStopFailureEvent(pane, payload);
     }
   } catch { /* swallow — never break the host session */ }

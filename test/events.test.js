@@ -4,7 +4,7 @@ import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  isRetryableError, writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
+  isRetryableError, isUsageLimitError, writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
 } from '../src/events.js';
 
 describe('isRetryableError', () => {
@@ -26,6 +26,19 @@ describe('isRetryableError', () => {
   });
 });
 
+describe('isUsageLimitError', () => {
+  it('accepts rate_limit (case-insensitive)', () => {
+    for (const e of ['rate_limit', 'RATE_LIMIT']) {
+      assert.equal(isUsageLimitError(e), true, e);
+    }
+  });
+  it('rejects the overload classes and permanent/unknown classes', () => {
+    for (const e of ['overloaded', 'server_error', 'authentication_failed', '', undefined, null, 42]) {
+      assert.equal(isUsageLimitError(e), false, String(e));
+    }
+  });
+});
+
 describe('StopFailure event markers', () => {
   let dir;
   before(async () => { dir = await mkdtemp(join(tmpdir(), 'car-ev-')); });
@@ -38,6 +51,18 @@ describe('StopFailure event markers', () => {
     assert.equal(ev.pane, '%2');
     assert.equal(ev.session_id, 'abc');
     assert.equal(typeof ev.ts, 'number');
+  });
+
+  it('round-trips the cwd from the hook envelope (needed to resolve the transcript for a rate_limit marker)', async () => {
+    await writeStopFailureEvent('%6', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj' }, dir);
+    const ev = await readStopFailureEvent('%6', 60_000, dir);
+    assert.equal(ev.cwd, '/home/u/proj');
+  });
+
+  it('defaults cwd to null when absent', async () => {
+    await writeStopFailureEvent('%8', { error: 'overloaded' }, dir);
+    const ev = await readStopFailureEvent('%8', 60_000, dir);
+    assert.equal(ev.cwd, null);
   });
 
   it('sanitizes the pane id into the filename', async () => {

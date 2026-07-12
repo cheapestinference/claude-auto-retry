@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist } from '../bin/cli.js';
+import {
+  injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist,
+  stopFailureHookEntry, shouldWriteEvent,
+} from '../bin/cli.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -121,5 +124,26 @@ describe('removeWrapper', () => {
     await removeWrapper(testFile);
     const content = await readFile(testFile, 'utf-8');
     assert.equal(content, 'just normal content\n');
+  });
+});
+
+describe('stopFailureHookEntry', () => {
+  it('matcher includes rate_limit alongside the overload classes', () => {
+    assert.match(stopFailureHookEntry().matcher, /\brate_limit\b/);
+    assert.match(stopFailureHookEntry().matcher, /\boverloaded\b/);
+    assert.match(stopFailureHookEntry().matcher, /\bserver_error\b/);
+  });
+});
+
+describe('shouldWriteEvent', () => {
+  it('accepts the overload classes and rate_limit', () => {
+    for (const e of ['overloaded', 'server_error', 'rate_limit']) {
+      assert.equal(shouldWriteEvent(e), true, e);
+    }
+  });
+  it('rejects permanent/unknown classes', () => {
+    for (const e of ['billing_error', 'invalid_request', '', undefined]) {
+      assert.equal(shouldWriteEvent(e), false, String(e));
+    }
   });
 });

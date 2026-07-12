@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Event-driven usage-limit detection.** A `rate_limit` StopFailure marker is now
+  consumed by the monitor: if the live pane scrape at marker time already caught the
+  banner, nothing changes; otherwise it falls back to the reset-time message in the
+  session's transcript (resolved via the marker's `session_id`/`cwd`) and enters the
+  existing hours-scale usage-wait. Previously `rate_limit` markers were written and
+  immediately discarded, leaving detection entirely dependent on the scraper's tail
+  window — a race that could strand a session with no interactive limit banner for
+  hours (#50).
+
 ## [0.6.0] - 2026-07-11
 
 ### Added

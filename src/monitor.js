@@ -3,8 +3,9 @@ import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
-import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
+import { readStopFailureEvent, clearStopFailureEvent, isRetryableError, isUsageLimitError } from './events.js';
 import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
+import { readLatestUsageLimitLine } from './transcript.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
 const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
@@ -385,6 +386,19 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   if (overload && overload.enabled && tmuxAdapter.readEvent) {
     const ev = await tmuxAdapter.readEvent();
     if (ev) {
+      // rate_limit is the session/usage limit (hours-scale), never the overload backoff
+      // above. The live pane scrape a few lines up already gets first shot at the banner
+      // (it ran on this same capture, "at marker time"); reaching here means it missed —
+      // fall back to the transcript the marker's session_id points at. Best-effort: if
+      // the transcript can't resolve a message either, leave state untouched and let the
+      // scraper keep trying on later ticks (see resolveUsageLimitLine's own guarding).
+      if (isUsageLimitError(ev.error)) {
+        await tmuxAdapter.clearEvent();
+        const line = tmuxAdapter.resolveUsageLimitLine ? await tmuxAdapter.resolveUsageLimitLine(ev) : null;
+        if (line) return enterUsageWait(state, line, config);
+        state._ignoredEventError = ev.error;
+        return 'usage-limit-unresolved';
+      }
       // Consume-side guard: trust no writer. The hook entry in settings.json freezes the
       // cli.js path + matcher at install time, so an OLDER hook binary (whose matcher and
       // RETRYABLE set still include rate_limit) can keep writing markers after an upgrade.
@@ -481,6 +495,9 @@ export async function startMonitor(pane, pid) {
     // so this is a direct read — no session-id resolution needed.
     readEvent: () => readStopFailureEvent(pane, eventMaxAgeMs),
     clearEvent: () => clearStopFailureEvent(pane),
+    // rate_limit marker fallback: resolve the reset-time message from the transcript the
+    // marker's session_id/cwd point at (see src/transcript.js).
+    resolveUsageLimitLine: (ev) => readLatestUsageLimitLine(ev.cwd, ev.session_id),
   };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -528,7 +545,8 @@ export async function startMonitor(pane, pid) {
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
-      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable error="${state._ignoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
+      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable, non-usage-limit error="${state._ignoredEventError}".`);
+      if (result === 'usage-limit-unresolved') await logger.warn('Received a rate_limit StopFailure marker but could not resolve a reset time from the pane or transcript. Leaving it to the scraper.');
       if (result === 'overload-detected') {
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
         const m = state._overloadMatch;
