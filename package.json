@@ -26,6 +26,10 @@
     "type": "git",
     "url": "https://github.com/cheapestinference/claude-auto-retry"
   },
+  "funding": {
+    "type": "ko-fi",
+    "url": "https://ko-fi.com/noxytree"
+  },
   "files": [
     "bin/",
     "src/",

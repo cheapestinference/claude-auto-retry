@@ -9,6 +9,7 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 [![npm version](https://img.shields.io/npm/v/claude-auto-retry.svg)](https://www.npmjs.com/package/claude-auto-retry)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
+[![Support on Ko-fi](https://img.shields.io/badge/Support-Ko--fi-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/noxytree)
 
 ---
 
@@ -639,6 +640,14 @@ A: No. `tmux capture-pane` is extremely lightweight. The monitor uses ~0% CPU at
 
 **Q: Can it accidentally type into the wrong program?**
 A: The monitor verifies the foreground process is `node` or `claude` before sending keys. If you've switched to vim, bash, or anything else, it skips the retry.
+
+## Support the project
+
+If `claude-auto-retry` keeps your unattended runs alive, you can [support maintenance on Ko-fi](https://ko-fi.com/noxytree).
+
+Looking for practical local automation blueprints and tools? Visit the [NoxyTree shop](https://ko-fi.com/noxytree/shop).
+
+Support does not include private or priority troubleshooting. Bug reports stay public so fixes can help everyone.
 
 ## License
 
