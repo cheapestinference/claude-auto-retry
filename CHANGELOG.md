@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Timezone off-by-a-day in reset-time waits.** A reset timezone beyond UTC±12
+  (e.g. `Pacific/Auckland` in summer, UTC+13) — or a host whose offset differs from the
+  banner's by more than 12h — made the wait land on the wrong day (~24h too long:
+  "resets 11:40pm" seen at 10pm waited 25.7h instead of 1.7h). The convergence
+  correction is now anchored to the target date, not a minimum-magnitude ±12h
+  adjustment, and the initial guess parses in host-local time (#60).
+- After the in-tmux session's own process exits, the pane now falls through to the
+  user's login shell (`$SHELL`, bash fallback) instead of a hardcoded `bash` (#54).
 - `reconcile` claude detection follow-ups (#49 review): (1) node flags that take a
   separate-token value (`-r`/`--require`, `--import`, `--loader`, `-e`) are skipped when
   finding the executed script, so a preload-instrumented `node -r x …/claude` is detected

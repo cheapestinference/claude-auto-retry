@@ -80,28 +80,28 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     const mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
     const d = parseInt(parts.find(p => p.type === 'day').value);
 
-    // Construct target date string and parse as UTC as initial guess
+    // Construct target date string and parse in HOST-local time as the initial guess
+    // (a UTC anchor put the guess up to a full offset away; host-local is usually close).
     const targetStr = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
-    const naiveUtc = new Date(targetStr);
+    const guess = new Date(targetStr);
 
-    // Iterative correction: format the guess in the target TZ,
-    // compare with desired h:m, adjust, repeat up to 3 times for DST convergence
-    let candidate = naiveUtc.getTime();
+    // Iterative correction: render the guess in the target TZ and move by the FULL
+    // wall-clock delta — date included — between desired (today@h:m in tz) and rendered.
+    // Anchoring to the date avoids any ±12h minimum-magnitude heuristic, which picked
+    // the wrong day whenever the guess landed >12h away in wall-clock terms (banner tz
+    // beyond UTC±12 like Pacific/Auckland in summer, or a host/banner offset split >12h)
+    // — the off-by-a-day bug. Up to 3 passes for DST convergence.
+    let candidate = guess.getTime();
     for (let i = 0; i < 3; i++) {
-      const check = new Date(candidate);
       const fp = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz, hour: 'numeric', minute: 'numeric', hour12: false,
-      }).formatToParts(check);
-      const ch = parseInt(fp.find(p => p.type === 'hour').value) % 24;
-      const cm = parseInt(fp.find(p => p.type === 'minute').value);
-
-      // Normalize to [-720, +720] minutes so we take the minimum-magnitude
-      // correction. Otherwise, in a UTC+10 tz looking for 23:40, the naive UTC
-      // guess formats as 09:40 next day local, and a raw +14h adjustment lands
-      // on tomorrow's occurrence instead of today's (the off-by-a-day bug).
-      let diffMin = (h - ch) * 60 + (m - cm);
-      diffMin = ((diffMin % 1440) + 1440) % 1440;
-      if (diffMin > 720) diffMin -= 1440;
+        // hourCycle h23 (not hour12:false): ICU's h24 quirk can render midnight as "24:xx"
+        // paired with the previous day's date, which would skew the date-anchored delta.
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).formatToParts(new Date(candidate));
+      const get = t => parseInt(fp.find(p => p.type === t).value);
+      const diffMin = (Date.UTC(y, mo, d, h, m)
+        - Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'))) / 60_000;
       if (diffMin === 0) break;
       candidate += diffMin * 60_000;
     }
