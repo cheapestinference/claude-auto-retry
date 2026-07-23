@@ -82,7 +82,7 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
 
     // Construct target date string and parse as UTC as initial guess
     const targetStr = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
-    const naiveUtc = new Date(targetStr + 'Z');
+    const naiveUtc = new Date(targetStr);
 
     // Iterative correction: format the guess in the target TZ,
     // compare with desired h:m, adjust, repeat up to 3 times for DST convergence
