@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-23
+
 ### Fixed
 - **Quoted banner text in a tool-call render no longer triggers a bogus wait.** A pane
   line like `● Bash(grep "5-hour limit reached - resets 3pm" …)` — or quoted log lines
