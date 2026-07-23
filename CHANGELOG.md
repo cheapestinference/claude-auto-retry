@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Orphaned shell wrapper no longer breaks `claude`.** Removing the package with
+  `npm uninstall -g` (without running `claude-auto-retry uninstall` first) left the
+  rc-file wrapper pointing at a deleted `launcher.js`, so every `claude` invocation
+  died with `MODULE_NOT_FOUND`. The wrapper now falls back to `command claude` when
+  the launcher no longer exists. Existing installs pick this up on the next
+  `claude-auto-retry install` (re-run it once after updating) (#65).
 - **Timezone off-by-a-day in reset-time waits.** A reset timezone beyond UTC±12
   (e.g. `Pacific/Auckland` in summer, UTC+13) — or a host whose offset differs from the
   banner's by more than 12h — made the wait land on the wrong day (~24h too long:

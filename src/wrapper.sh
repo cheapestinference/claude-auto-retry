@@ -5,7 +5,10 @@
 # token '('" when the rc file is sourced.
 unalias claude 2>/dev/null || true
 claude() {
-  if [ "${CLAUDE_AUTO_RETRY_ACTIVE}" = "1" ]; then
+  # Degrade to plain claude if already inside a wrapped session, or if the launcher
+  # is gone (package removed via `npm uninstall -g` without `claude-auto-retry
+  # uninstall` first) — an orphaned wrapper must never break the claude command.
+  if [ "${CLAUDE_AUTO_RETRY_ACTIVE}" = "1" ] || [ ! -e "__LAUNCHER_PATH__" ]; then
     command claude "$@"
     return $?
   fi
