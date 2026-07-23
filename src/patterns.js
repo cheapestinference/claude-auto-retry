@@ -133,13 +133,39 @@ const RESET_PATTERNS = [
 
 const WINDOW = 6;
 
-function hasNearbyMatch(lines, idx, patterns) {
+function hasNearbyMatch(lines, idx, patterns, mask = null) {
   const start = Math.max(0, idx - WINDOW);
   const end = Math.min(lines.length, idx + WINDOW + 1);
   for (let j = start; j < end; j++) {
+    if (mask && mask[j]) continue;
     if (patterns.some(p => p.test(lines[j]))) return true;
   }
   return false;
+}
+
+// --- Tool-call echo (#63) ---
+// Error/limit text inside a tool-call render — a grep argument, a quoted log line in the
+// result block — is text ABOUT an error, never the live state, yet it sits in the most
+// recent content rows where the tail window rightly looks. Mask the `● Name(` header (the
+// glyph alone doesn't discriminate — real API errors render `● API Error: …` too, but
+// never as `Name(…)`) and the `⎿`/`└`/indented children UNDER such a header. Result
+// markers must NOT mask on their own: a live banner interrupting a tool/agent call
+// renders as a `└` child of a NON-`Name(` notice (`● Agent "…" finished` → `└ You've hit
+// your session limit …` — an observed live incident this suite pins). Known limits: a
+// header wrapped (not truncated) across rows leaves its continuation unmasked, and a
+// window starting mid-block leaves leading children unmasked.
+const TOOL_ECHO_HEADER = /^\s*[●⏺∙]\s*\S+\(/;   // "● Bash(grep …", "⏺ Read(file …"
+const TOOL_ECHO_RESULT = /^\s*[⎿└]/;             // "  ⎿  3"
+export function toolEchoMask(lines) {
+  const mask = new Array(lines.length).fill(false);
+  let inBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (TOOL_ECHO_HEADER.test(l)) { inBlock = true; mask[i] = true; continue; }
+    if (inBlock && (TOOL_ECHO_RESULT.test(l) || (/^\s/.test(l) && l.trim() !== ''))) { mask[i] = true; continue; }
+    inBlock = false;
+  }
+  return mask;
 }
 
 // tailLines > 0 restricts detection to the last N lines of the pane. A live usage-limit
@@ -153,6 +179,10 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   const all = stripAnsi(text).split('\n');
   // Chrome-aware window: trailing UI furniture doesn't consume the tail budget.
   const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
+  // Tool-echo mask (#63), TUI only: print mode scans process output where quoted error
+  // shapes ARE the real signal. Masked AFTER windowing — echo lines still consume tail
+  // budget, so the window can't reach past a tall tool render into stale scrollback.
+  const mask = tailLines > 0 ? toolEchoMask(lines) : null;
 
   // Custom patterns test the RAW tail, not the chrome-stripped window (Finding 4). The
   // user owns their own false-positive tradeoff, so a pattern keyed on footer text (a
@@ -175,14 +205,17 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   // the backstop fires on that (up to maxRetries injections + a ~24h wait). (Only when
   // tail-scoped; print mode uses the full scan below.)
   if (tailLines > 0) {
-    const companionIdx = all.findLastIndex((l) => USAGE_CREDITS.test(l));
+    // The companion must not itself be tool echo (a grep for "/usage-credits" quoting
+    // banner text would otherwise satisfy both the companion and the nearby-reset check).
+    const fullMask = toolEchoMask(all);
+    const companionIdx = all.findLastIndex((l, i) => !fullMask[i] && USAGE_CREDITS.test(l));
     // Require a RESET line nearby — NOT just a LIMIT line. A live limit banner always prints
     // its reset time next to the companion; a session merely *explaining* usage limits ("when
     // you hit your usage limit you can run /usage-credits …") has the companion + a loose
     // "usage limit" LIMIT match but no reset time, and would otherwise false-fire a retry.
     if (companionIdx !== -1
         && all.slice(companionIdx + 1).every(isChromeLine)
-        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS)) {
+        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS, fullMask)) {
       return true;
     }
   }
@@ -190,8 +223,9 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   // Find a "limit" line with a "resets" line nearby (works for both
   // single-line messages and multi-line TUI renders)
   for (let i = 0; i < lines.length; i++) {
+    if (mask && mask[i]) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) {
-      if (hasNearbyMatch(lines, i, RESET_PATTERNS)) return true;
+      if (hasNearbyMatch(lines, i, RESET_PATTERNS, mask)) return true;
     }
   }
 
@@ -308,10 +342,14 @@ export function overloadMatch(text, patterns = []) {
   if (!patterns || patterns.length === 0) return null;
   const lines = tail(text);
   if (!lines.join('').trim()) return null;
+  // Tool-echo mask (#63): a quoted "API Error: 529 overloaded" in a Bash() render carries
+  // its own anchor on the same line, so the anchor discipline alone can't reject it.
+  const mask = toolEchoMask(lines);
   const regexes = toRegexes(patterns);
   for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue;
     for (const r of regexes) {
-      if (r.test(lines[i]) && hasNearbyMatch(lines, i, OVERLOAD_ANCHOR)) {
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, OVERLOAD_ANCHOR, mask)) {
         return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
       }
     }
@@ -343,10 +381,14 @@ export function safeguardMatch(text, patterns = []) {
   if (!patterns || patterns.length === 0) return null;
   const lines = tail(text);
   if (!lines.join('').trim()) return null;
+  // Same tool-echo discipline as overloadMatch (#63): a quoted safeguard line in a tool
+  // render can sit next to a quoted API Error anchor.
+  const mask = toolEchoMask(lines);
   const regexes = toRegexes(patterns);
   for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue;
     for (const r of regexes) {
-      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR)) {
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR, mask)) {
         return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
       }
     }
@@ -369,17 +411,22 @@ export function isWorking(text) {
 
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
+  // Tool-echo mask (#63): without it, a quoted "resets 9am" in a fresh grep line below a
+  // real banner would win the bottom-up scan and be parsed instead of the banner.
+  const mask = toolEchoMask(lines);
 
   // Scan from the bottom up — the most recent "resets" line is the one to
   // parse. The Claude TUI never clears earlier rate-limit messages from
   // scrollback, so a forward scan would lock onto a stale line (e.g. an old
   // "resets 11:30am" lingering above a fresh "resets 4:30pm").
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (mask[i]) continue;
     if (RESET_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 
   // Fallback: any "limit" line, also scanned from the bottom.
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (mask[i]) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 

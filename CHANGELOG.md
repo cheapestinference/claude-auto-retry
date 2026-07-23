@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Quoted banner text in a tool-call render no longer triggers a bogus wait.** A pane
+  line like `● Bash(grep "5-hour limit reached - resets 3pm" …)` — or quoted log lines
+  in its result block — matched the limit patterns and parked the monitor for the
+  parsed hours (a real 22.5h incident). Tool-call renders (`● Name(…)` headers and
+  their `⎿`/indented children) are now masked out of the built-in limit, overload, and
+  safeguard matching. TUI path only: print mode still scans quoted/JSON error shapes,
+  a live banner rendered as a `└` child of an agent-finished notice is still detected,
+  and `customPatterns` keep their scan-everything semantics (#63).
 - **Orphaned shell wrapper no longer breaks `claude`.** Removing the package with
   `npm uninstall -g` (without running `claude-auto-retry uninstall` first) left the
   rc-file wrapper pointing at a deleted `launcher.js`, so every `claude` invocation
