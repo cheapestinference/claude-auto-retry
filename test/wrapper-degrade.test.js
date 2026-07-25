@@ -8,6 +8,28 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+let isWSL = false;
+if (process.platform === 'win32') {
+  try {
+    const uname = execFileSync('bash', ['-c', 'uname'], { encoding: 'utf-8' }).trim().toLowerCase();
+    isWSL = uname.includes('linux');
+  } catch {}
+}
+
+function shPath(p) {
+  if (process.platform === 'win32') {
+    const resolved = p.replace(/\\/g, '/');
+    if (isWSL) {
+      const match = resolved.match(/^([a-zA-Z]):(.*)/);
+      if (match) {
+        return `/mnt/${match[1].toLowerCase()}${match[2]}`;
+      }
+    }
+    return resolved;
+  }
+  return p;
+}
+
 // #65: `npm uninstall -g claude-auto-retry` (without `claude-auto-retry uninstall`
 // first) deletes launcher.js but leaves the rc-file wrapper pointing at it — every
 // `claude` invocation then dies with MODULE_NOT_FOUND. The wrapper must degrade to
@@ -16,7 +38,7 @@ describe('wrapper.sh degrades when the launcher no longer exists (#65)', () => {
   let dir, template;
   before(async () => {
     dir = await mkdtemp(join(tmpdir(), 'car-wrap-'));
-    template = await readFile(join(REPO_ROOT, 'src', 'wrapper.sh'), 'utf-8');
+    template = (await readFile(join(REPO_ROOT, 'src', 'wrapper.sh'), 'utf-8')).replace(/\r\n/g, '\n');
     // Stub `claude` binary on PATH so `command claude` is observable.
     await writeFile(join(dir, 'claude'), '#!/bin/sh\necho REAL-CLAUDE "$@"\n');
     await chmod(join(dir, 'claude'), 0o755);
@@ -27,16 +49,16 @@ describe('wrapper.sh degrades when the launcher no longer exists (#65)', () => {
   // claude-auto-retry session, the inherited CLAUDE_AUTO_RETRY_ACTIVE=1 would make
   // the wrapper degrade unconditionally and mask the launcher-exists path.
   function cleanEnv() {
-    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}` };
+    const env = { ...process.env };
     delete env.CLAUDE_AUTO_RETRY_ACTIVE;
     return env;
   }
 
   it('falls back to `command claude` when the launcher path is gone', async () => {
-    const wrapper = template.replace(/__LAUNCHER_PATH__/g, join(dir, 'nonexistent', 'launcher.js'));
+    const wrapper = template.replace(/__LAUNCHER_PATH__/g, shPath(join(dir, 'nonexistent', 'launcher.js')));
     const rc = join(dir, 'rc-gone.sh');
     await writeFile(rc, wrapper);
-    const out = execFileSync('bash', ['-c', `source ${rc}; claude --version`], {
+    const out = execFileSync('bash', ['-c', `chmod +x "${shPath(dir)}/claude" 2>/dev/null || true; PATH="${shPath(dir)}:$PATH"; source ${shPath(rc)}; claude --version`], {
       env: cleanEnv(),
     }).toString();
     assert.match(out, /REAL-CLAUDE --version/);
@@ -45,10 +67,10 @@ describe('wrapper.sh degrades when the launcher no longer exists (#65)', () => {
   it('still routes through the launcher when it exists', async () => {
     const launcher = join(dir, 'launcher.js');
     await writeFile(launcher, 'console.log("VIA-LAUNCHER", process.argv.slice(2).join(" "))');
-    const wrapper = template.replace(/__LAUNCHER_PATH__/g, launcher);
+    const wrapper = template.replace(/__LAUNCHER_PATH__/g, shPath(launcher));
     const rc = join(dir, 'rc-ok.sh');
     await writeFile(rc, wrapper);
-    const out = execFileSync('bash', ['-c', `source ${rc}; claude --resume`], {
+    const out = execFileSync('bash', ['-c', `chmod +x "${shPath(dir)}/claude" 2>/dev/null || true; PATH="${shPath(dir)}:$PATH"; source ${shPath(rc)}; claude --resume`], {
       env: cleanEnv(),
     }).toString();
     assert.match(out, /VIA-LAUNCHER --resume/);

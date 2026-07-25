@@ -49,6 +49,12 @@ describe('reconcile parsing', () => {
     assert.equal(c.size, 2);
   });
   it('empty pgrep output → no covered', () => assert.equal(parseRunningMonitors('').size, 0));
+  it('processStartToken returns a stable non-empty token for the current process', async () => {
+    const t1 = await processStartToken(process.pid);
+    const t2 = await processStartToken(process.pid);
+    assert.ok(t1, 'expected a non-empty start token');
+    assert.equal(t1, t2, 'token must be stable across calls for the same live process');
+  });
 });
 
 // --- Finding 2: the impure gather() used an unconditional catch, so ANY pgrep failure

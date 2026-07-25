@@ -419,7 +419,7 @@ claude-auto-retry uninstall-hook [dir]  # Remove it
 claude-auto-retry reconcile        # Re-arm a monitor for every live claude pane not covered
 claude-auto-retry reconcile --dry-run   # Preview without arming
 claude-auto-retry install-timer    # Run reconcile every 5 min (systemd --user on Linux,
-                                   # launchd LaunchAgent on macOS)
+                                   # launchd LaunchAgent on macOS, Task Scheduler on Windows)
 claude-auto-retry uninstall-timer  # Remove the timer
 claude-auto-retry exclude-self     # Keep THIS session unmonitored (durable, self-expiring)
 ```
@@ -466,7 +466,9 @@ sessions get a monitor. Two commands restore and maintain full coverage:
   step. On Linux this is a `systemd --user` timer (enable `loginctl enable-linger $USER`
   once if you want it to run while logged out); on macOS it is a launchd LaunchAgent in
   `~/Library/LaunchAgents` (LaunchAgents only run while you are logged in, which is fine —
-  the tmux server it reconciles lives in your login session too).
+  the tmux server it reconciles lives in your login session too); on Windows it is a Task
+  Scheduler task that runs shortly after logon and repeats every 5 minutes while you are
+  logged in.
 
 **Excluding a session.** To keep a specific session *unmonitored* (e.g. one where you're
 pasting rate-limit text and don't want any auto-retry), run `claude-auto-retry
@@ -490,6 +492,16 @@ pruned, since staleness can't be detected). Prefer the PID form; you can also ha
 | macOS | `brew` | Fully supported |
 | Arch Linux | `pacman` | Fully supported |
 | Alpine | `apk` | Fully supported |
+| Windows 10/11 | Manual install (Git Bash / MSYS2 / WSL) | Print mode works natively; interactive sessions need tmux |
+
+### Windows notes
+
+- The test suite passes on native Windows 11.
+- `claude -p` / `--print` works without tmux.
+- Interactive sessions require tmux. Install tmux through your POSIX environment (Git Bash, MSYS2, or WSL) and run `claude-auto-retry install` from that shell.
+- `reconcile` uses PowerShell (`Get-CimInstance Win32_Process`) to enumerate processes.
+- `install-timer` uses Windows Task Scheduler. It requires tmux to be available on the
+  task's PATH, so it prepends the detected Git Bash / MSYS2 `usr\bin` directories.
 
 ### Requirements
 
@@ -612,7 +624,7 @@ node --test --watch test/             # Watch mode
 
 - **New rate limit patterns** — If you see a Claude Code rate limit message that isn't detected, open an issue with the exact text.
 - **Fish shell support** — Auto-install for fish shell (currently manual).
-- **Windows support** — WSL works, but native Windows would need a different approach.
+- **Windows shell integration** — Auto-install for PowerShell / cmd profiles (currently use Git Bash / MSYS2 / WSL).
 - **Notification integration** — Desktop/Slack notification when rate limit detected or when Claude resumes.
 
 ## Related Projects

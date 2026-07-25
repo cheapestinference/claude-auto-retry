@@ -8,7 +8,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { writeStopFailureEvent, isRetryableError } from '../src/events.js';
 import { sweepStaleStatus } from '../src/status-file.js';
-import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG } from '../src/reconcile.js';
+import { reconcile, excludeSelf, parseRunningMonitors, PGREP_LIST_FLAG, findRunningMonitors } from '../src/reconcile.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,7 +29,7 @@ export async function injectWrapper(rcFile, launcherPath) {
     // File doesn't exist, create it
   }
 
-  const template = await readFile(WRAPPER_TEMPLATE, 'utf-8');
+  const template = (await readFile(WRAPPER_TEMPLATE, 'utf-8')).replace(/\r\n/g, '\n');
   const wrapper = template.replace(/__LAUNCHER_PATH__/g, launcherPath);
 
   // Remove existing wrapper if present
@@ -278,6 +278,8 @@ const LAUNCHD_DIR = join(SRC_DIR, '..', 'launchd');
 const LAUNCHD_LABEL = 'com.claude-auto-retry.reconcile';
 const LAUNCHD_PLIST = `${LAUNCHD_LABEL}.plist`;
 
+const WIN_TASK_NAME = 'claude-auto-retry-reconcile';
+
 function userUnitDir() {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user');
 }
@@ -303,6 +305,50 @@ export function renderReconcilePlist(template, nodePath, cliPath) {
   return template
     .replace(/__NODE_PATH__/g, xmlEscape(nodePath))
     .replace(/__CLI_PATH__/g, xmlEscape(cliPath));
+}
+
+// --- Windows Task Scheduler timer ---
+// PowerShell cmdlets are used instead of schtasks /XML because the latter requires
+// elevation even for a current-user task on Windows 11 Home. Register-ScheduledTask
+// works without elevation for an interactive-user task.
+
+// Single-quote a PowerShell string; escape embedded single quotes by doubling them.
+function psQuote(s) {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+function findTmuxDir() {
+  try {
+    const out = execFileSync('where', ['tmux'], { encoding: 'utf-8' });
+    const first = out.split(/\r?\n/)[0].trim();
+    if (first) return dirname(first);
+  } catch {}
+  return null;
+}
+
+function buildTmuxPath() {
+  const localAppData = process.env.LOCALAPPDATA || 'C:\\Users\\Default\\AppData\\Local';
+  const dirs = [
+    findTmuxDir(),
+    'C:\\Program Files\\Git\\usr\\bin',
+    'C:\\Program Files (x86)\\Git\\usr\\bin',
+    'C:\\msys64\\usr\\bin',
+    'C:\\msys64\\mingw64\\bin',
+    join(localAppData, 'Microsoft', 'WinGet', 'Packages', 'arndawg.tmux-windows_Microsoft.Winget.Source_8wekyb3d8bbwe'),
+  ].filter(Boolean);
+  return [...new Set(dirs)].join(';');
+}
+
+// Build the PowerShell command that the scheduled task will execute. It is returned as
+// the -EncodedCommand argument (base64-encoded UTF-16 LE) to avoid multiple layers of
+// shell quoting around paths and semicolons.
+export function buildWindowsTaskEncodedCommand(nodePath, cliPath, tmuxPath) {
+  let pathSet = '';
+  if (tmuxPath) {
+    pathSet = `$env:PATH=${psQuote(`${tmuxPath};`)} + $env:PATH; `;
+  }
+  const innerPs = `${pathSet}& ${psQuote(nodePath)} ${psQuote(cliPath)} reconcile`;
+  return `-NoProfile -WindowStyle Hidden -EncodedCommand ${Buffer.from(innerPs, 'utf16le').toString('base64')}`;
 }
 
 // macOS: install the reconcile LaunchAgent into ~/Library/LaunchAgents and load it via
@@ -352,10 +398,53 @@ async function uninstallTimerLaunchd() {
   console.log('LaunchAgent removed. (Already-running monitors are unaffected.)');
 }
 
+// Windows: install a Task Scheduler task that runs reconcile every 5 minutes. The task
+// action goes through PowerShell so we can prepend the Git Bash / MSYS2 directories to
+// PATH; Task Scheduler jobs do not reliably inherit the user's shell PATH.
+async function installTimerWindows() {
+  const nodePath = process.execPath;
+  const cliPath = __filename;
+  const encodedArgs = buildWindowsTaskEncodedCommand(nodePath, cliPath, buildTmuxPath());
+
+  const psScript = `
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '${encodedArgs.replace(/'/g, "''")}';
+$trigger = New-ScheduledTaskTrigger -AtLogon -User $env:USERNAME;
+$trigger.Delay = 'PT2M';
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 9999)).Repetition;
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited;
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew;
+Register-ScheduledTask -TaskName '${WIN_TASK_NAME.replace(/'/g, "''")}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-String;
+Start-ScheduledTask -TaskName '${WIN_TASK_NAME.replace(/'/g, "''")}' | Out-String;
+`.trim();
+
+  try {
+    execFileSync('powershell', ['-NoProfile', '-Command', psScript], { stdio: 'inherit' });
+  } catch {
+    console.error(`\nTask Scheduler task creation failed. You can create it manually with:`);
+    console.error(`  powershell -NoProfile -Command "${psScript.replace(/"/g, '""')}"`);
+    process.exit(1);
+  }
+
+  console.log(`\nTask Scheduler task installed. Monitor coverage now self-heals every 5 min.`);
+  console.log(`  status:  Get-ScheduledTask -TaskName ${WIN_TASK_NAME}`);
+  console.log(`  run now: Start-ScheduledTask -TaskName ${WIN_TASK_NAME}`);
+  console.log(`\nNote: the task pins this Node path (${nodePath}). If you switch Node`);
+  console.log(`versions, re-run: claude-auto-retry install-timer`);
+}
+
+async function uninstallTimerWindows() {
+  const psScript = `Unregister-ScheduledTask -TaskName '${WIN_TASK_NAME.replace(/'/g, "''")}' -Confirm:$false | Out-String;`;
+  try {
+    execFileSync('powershell', ['-NoProfile', '-Command', psScript], { stdio: 'inherit' });
+  } catch { /* not present — fine */ }
+  console.log('Task Scheduler task removed. (Already-running monitors are unaffected.)');
+}
+
 // Install the reconcile service+timer into the systemd --user unit dir, substituting the
 // node and CLI paths, then enable+start the timer. Makes monitor coverage self-healing:
 // every 5 min a missing monitor is re-armed. systemd --user on Linux; launchd on macOS.
 async function cmdInstallTimer() {
+  if (process.platform === 'win32') return installTimerWindows();
   if (process.platform === 'darwin') return installTimerLaunchd();
   const dest = userUnitDir();
   await mkdir(dest, { recursive: true });
@@ -393,6 +482,7 @@ async function cmdInstallTimer() {
 }
 
 async function cmdUninstallTimer() {
+  if (process.platform === 'win32') return uninstallTimerWindows();
   if (process.platform === 'darwin') return uninstallTimerLaunchd();
   try {
     execFileSync('systemctl', ['--user', 'disable', '--now', UNIT_TIMER], { stdio: 'inherit' });
@@ -417,8 +507,8 @@ async function cmdExcludeSelf() {
   // Kill any monitor already covering this pane so exclusion takes effect immediately.
   // Reuse parseRunningMonitors (same parser reconcile uses) instead of a bespoke one.
   try {
-    const out = execFileSync('pgrep', [PGREP_LIST_FLAG, 'node .*src/monitor\\.js'], { encoding: 'utf-8' });
-    const mpid = parseRunningMonitors(out).get(`${r.pane} ${r.pid}`);
+    const monitors = await findRunningMonitors();
+    const mpid = monitors.get(`${r.pane} ${r.pid}`);
     if (mpid) { try { process.kill(mpid); console.log(`Stopped existing monitor ${mpid}.`); } catch {} }
   } catch { /* no monitor running for this pane — nothing to stop */ }
 }
@@ -493,7 +583,8 @@ switch (command) {
     console.log('                                       by claude PID; self-expires on exit)');
     console.log('  claude-auto-retry install-timer      Install a timer that runs reconcile every');
     console.log('                                       5 min (self-healing coverage; systemd --user');
-    console.log('                                       on Linux, launchd LaunchAgent on macOS)');
+    console.log('                                       on Linux, launchd on macOS, Task Scheduler');
+    console.log('                                       on Windows)');
     console.log('  claude-auto-retry uninstall-timer    Remove the reconcile timer');
     console.log('  claude-auto-retry status             Show monitor status');
     console.log('  claude-auto-retry logs               Tail today\'s log');

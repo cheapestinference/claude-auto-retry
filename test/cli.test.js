@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist } from '../bin/cli.js';
+import { injectWrapper, removeWrapper, MARKER_START, MARKER_END, renderReconcileUnit, renderReconcilePlist, buildWindowsTaskEncodedCommand } from '../bin/cli.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -51,6 +51,37 @@ describe('renderReconcilePlist (macOS launchd)', () => {
     // reconcile dies with `spawn tmux ENOENT` on every timer fire.
     const plist = await readFile(join(REPO_ROOT, 'launchd', 'com.claude-auto-retry.reconcile.plist'), 'utf-8');
     assert.match(plist, /<key>PATH<\/key>\s*<string>[^<]*\/opt\/homebrew\/bin[^<]*\/usr\/local\/bin[^<]*<\/string>/);
+  });
+});
+
+function decodeTaskCommand(encoded) {
+  const base64 = encoded.replace(/^.*-EncodedCommand /, '');
+  return Buffer.from(base64, 'base64').toString('utf16le');
+}
+
+describe('buildWindowsTaskEncodedCommand (Windows Task Scheduler)', () => {
+  it('returns -EncodedCommand with the node/cli paths and reconcile', () => {
+    const out = buildWindowsTaskEncodedCommand('C:\\node.exe', 'C:\\cli.js', null);
+    assert.match(out, /^-NoProfile -WindowStyle Hidden -EncodedCommand /);
+    const decoded = decodeTaskCommand(out);
+    assert.ok(decoded.includes("& 'C:\\node.exe' 'C:\\cli.js' reconcile"));
+  });
+  it('prepends the tmux PATH when provided', () => {
+    const out = buildWindowsTaskEncodedCommand('C:\\node.exe', 'C:\\cli.js', 'C:\\Git\\usr\\bin;C:\\msys64\\usr\\bin');
+    const decoded = decodeTaskCommand(out);
+    assert.ok(decoded.includes("$env:PATH='C:\\Git\\usr\\bin;C:\\msys64\\usr\\bin;' + $env:PATH"));
+    assert.ok(decoded.includes("& 'C:\\node.exe' 'C:\\cli.js' reconcile"));
+  });
+  it('doubles apostrophes inside PowerShell string literals', () => {
+    const out = buildWindowsTaskEncodedCommand("C:\\Bob's\\node.exe", 'C:\\cli.js', null);
+    const decoded = decodeTaskCommand(out);
+    assert.ok(decoded.includes("C:\\Bob''s\\node.exe"));
+  });
+  it('keeps ampersands and angle brackets as literal single-quoted PowerShell strings', () => {
+    const out = buildWindowsTaskEncodedCommand('C:\\node&co\\node.exe', 'C:\\user<me>\\cli.js', null);
+    const decoded = decodeTaskCommand(out);
+    assert.ok(decoded.includes("'C:\\node&co\\node.exe'"));
+    assert.ok(decoded.includes("'C:\\user<me>\\cli.js'"));
   });
 });
 

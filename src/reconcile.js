@@ -63,6 +63,18 @@ export async function processStartToken(pid) {
     const after = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
     if (after[19]) return after[19];   // field 22 overall = index 19 after "state"
   } catch { /* not Linux, or process gone */ }
+
+  if (process.platform === 'win32') {
+    // Windows: use PowerShell to get a locale-independent creation timestamp.
+    try {
+      const { stdout } = await execFile('powershell', [
+        '-NoProfile', '-Command',
+        `try { (Get-Process -Id ${Number(pid)}).StartTime.ToString('o') } catch { }`,
+      ]);
+      return stdout.trim() || null;
+    } catch { return null; }
+  }
+
   try {
     const { stdout } = await execFile('ps', ['-o', 'lstart=', '-p', String(pid)],
       { env: { ...process.env, LC_ALL: 'C' } });
@@ -74,13 +86,23 @@ export async function processStartToken(pid) {
 // is "<pid>\t<startToken>". A dead PID → stale. A live PID whose start token no longer
 // matches → the PID was reused → stale. A legacy bare-PID lock (no token) → respect it if
 // the PID is alive (can't disambiguate; don't risk stealing a real holder's lock).
-async function holderIsLive(holderId) {
+//
+// The lock file may change while we are querying the OS for the start token (especially on
+// Windows, where that query can take hundreds of milliseconds). Re-read the file right before
+// comparing; if it changed, treat the holder as live so we never steal from a process that
+// legitimately acquired the lock in the meantime.
+async function holderIsLive(holderId, lockPath) {
   const tab = holderId.indexOf('\t');
   const pid = Number(tab === -1 ? holderId : holderId.slice(0, tab));
   if (!pid || !isProcessAlive(pid)) return false;
   const recordedStart = tab === -1 ? '' : holderId.slice(tab + 1);
   if (!recordedStart) return true;
-  return (await processStartToken(pid)) === recordedStart;
+  const currentStart = await processStartToken(pid);
+  // Re-read to close the race window between reading the holder and querying its token.
+  let currentHolder = holderId;
+  try { currentHolder = (await readFile(lockPath, 'utf-8')).trim(); } catch { /* gone */ }
+  if (currentHolder !== holderId) return true; // changed under us — back off, don't steal
+  return currentStart === recordedStart;
 }
 
 // Only remove the lock if it still holds OUR identity — never cross-delete a lock a
@@ -136,7 +158,7 @@ export async function acquireLock(lockPath = LOCK_FILE) {
     // Exists. Genuine live holder → back off.
     let holderId = '';
     try { holderId = (await readFile(lockPath, 'utf-8')).trim(); } catch { continue; }
-    if (holderId && await holderIsLive(holderId)) return noop;
+    if (holderId && await holderIsLive(holderId, lockPath)) return noop;
 
     // Stale. Take the breaker to serialize removal+recreation.
     if (!(await linkCreate(breakerPath, join(dir, `.brk.${uniq}.${attempt}`), myId))) {
@@ -147,7 +169,7 @@ export async function acquireLock(lockPath = LOCK_FILE) {
       // and letting two runs both break the lock (double-hold).
       let bId = '';
       try { bId = (await readFile(breakerPath, 'utf-8')).trim(); } catch {}
-      if (!bId || !(await holderIsLive(bId))) await releaseLock(breakerPath, bId);
+      if (!bId || !(await holderIsLive(bId, breakerPath))) await releaseLock(breakerPath, bId);
       await sleep(10);
       continue;
     }
@@ -161,7 +183,7 @@ export async function acquireLock(lockPath = LOCK_FILE) {
       // a live one), then remove it and create ours.
       let cur = '';
       try { cur = (await readFile(lockPath, 'utf-8')).trim(); } catch {}
-      if (cur && await holderIsLive(cur)) return noop;      // became live → back off
+      if (cur && await holderIsLive(cur, lockPath)) return noop;      // became live → back off
       await unlink(lockPath).catch(() => {});               // remove the stale lock (sole breaker)
       if (await linkCreate(lockPath, join(dir, `.acqb.${uniq}.${attempt}`), myId)) {
         return { ok: true, release: () => releaseLock(lockPath, myId) };
@@ -207,10 +229,17 @@ const CLAUDE_COMM = 'claude';
 function basename(s) {
   return s.slice(s.lastIndexOf('/') + 1);
 }
+
+// Quote-aware argument splitter to handle spaces inside quoted paths on Windows/Unix
+export function splitArgs(args) {
+  if (!args) return [];
+  return args.match(/("[^"]+"|'[^']+'|[^\s"']+)/g) || [];
+}
+
 export function isClaudeProc(p) {
   if (p.comm === CLAUDE_COMM || basename(p.comm || '') === CLAUDE_COMM) return true;
-  const argv0 = (p.args || '').trim().split(/\s+/)[0] || '';
-  return basename(argv0) === CLAUDE_COMM;
+  const argv0 = splitArgs(p.args)[0] || '';
+  return basename(argv0.replace(/^["']|["']$/g, '')) === CLAUDE_COMM;
 }
 
 // Node flags that take a SEPARATE-token value (`node -r ./pre.js script.js`). Skipping only
@@ -230,8 +259,9 @@ function nodeScriptIndex(toks) {
 }
 // The executed script of a `node [flags] <script> …` invocation.
 function nodeScript(args) {
-  const toks = (args || '').trim().split(/\s+/);
-  return toks[nodeScriptIndex(toks)] || '';
+  const toks = splitArgs(args);
+  const s = toks[nodeScriptIndex(toks)] || '';
+  return s.replace(/^["']|["']$/g, '');
 }
 const baseName = (p) => p.split('/').pop();
 
@@ -259,7 +289,7 @@ function isMonitorProc(p) {
 // the same shape for a node-launched claude as for a bare `claude …`: drop "node <script>".
 function claudeArgs(p) {
   if (p.comm === CLAUDE_COMM) return p.args;
-  const toks = (p.args || '').trim().split(/\s+/);
+  const toks = splitArgs(p.args);
   return ['claude', ...toks.slice(nodeScriptIndex(toks) + 1)].join(' '); // fake cmd token + real args
 }
 // For an agent wrapper that names claude as a subcommand (`node …/happier claude -p`), the
@@ -267,8 +297,8 @@ function claudeArgs(p) {
 // which claudeArgs (stopping at the wrapper's first positional) would miss. Empty if no
 // claude token is present (then the caller falls back to claudeArgs / errs toward arming).
 function wrapperClaudeArgs(args) {
-  const toks = (args || '').trim().split(/\s+/);
-  const i = toks.findIndex(t => baseName(t) === CLAUDE_COMM);
+  const toks = splitArgs(args);
+  const i = toks.findIndex(t => baseName(t.replace(/^["']|["']$/g, '')) === CLAUDE_COMM);
   return i === -1 ? '' : ['claude', ...toks.slice(i + 1)].join(' ');
 }
 // Verify a launcher's child is actually claude before arming it — don't blindly trust the
@@ -276,7 +306,7 @@ function wrapperClaudeArgs(args) {
 // (comm/argv0), the node-launched CLI, or an agent wrapper that names claude as a token.
 function looksLikeClaude(p) {
   if (isClaudeProc(p) || isNodeClaudeCli(p)) return true;
-  return (p.args || '').trim().split(/\s+/).some(t => baseName(t) === CLAUDE_COMM);
+  return splitArgs(p.args).some(t => baseName(t.replace(/^["']|["']$/g, '')) === CLAUDE_COMM);
 }
 // Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
 // interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
@@ -288,9 +318,9 @@ function looksLikeClaude(p) {
 // toward arming a monitor, the safe direction, not toward an invisible session.)
 function isPrintMode(args) {
   if (!args) return false;
-  const toks = args.trim().split(/\s+/);
+  const toks = splitArgs(args);
   for (let i = 1; i < toks.length; i++) {          // skip toks[0] = the command ("claude")
-    const t = toks[i];
+    const t = toks[i].replace(/^["']|["']$/g, '');
     if (t === '-p' || t === '--print' || t.startsWith('--print=')) return true;
     if (!t.startsWith('-')) return false;          // first positional (the prompt) → stop scanning
   }
@@ -353,6 +383,7 @@ export function runningFromPgrep(err, stdout) {
   return covered;
 }
 
+// Walk pid → ppid chain until we hit a process that is a tmux pane_pid; return that pane.
 // Walk pid → ppid chain until we hit a process that is a tmux pane_pid; return that pane.
 function paneForPid(pid, byPid, panePidToPane) {
   let cur = pid, hops = 0;
@@ -452,20 +483,74 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
   return { arm, skipped };
 }
 
+// Windows helpers: native Windows has no ps/pgrep. We use PowerShell's Win32_Process CIM
+// instances, which give us PID, parent PID, and full command line in one call.
+async function windowsProcessList() {
+  const { stdout } = await execFile('powershell', [
+    '-NoProfile', '-Command',
+    'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress',
+  ]);
+  let rows;
+  try { rows = JSON.parse(stdout); } catch { rows = []; }
+  if (!Array.isArray(rows)) rows = [rows];
+  return rows.map((p) => {
+    if (!p || !p.ProcessId) return null;
+    const cmd = p.CommandLine || '';
+    // Derive comm from the executable path (basename), matching Unix ps shape.
+    const exeMatch = cmd.match(/^"?([^"]+\.exe)/i);
+    const firstTok = cmd.split(/\s+/)[0] || '';
+    let comm = exeMatch
+      ? exeMatch[1].split(/[\\/]/).pop()
+      : firstTok.split(/[\\/]/).pop() || '';
+    if (comm.toLowerCase().endsWith('.exe')) {
+      comm = comm.slice(0, -4);
+    }
+    return {
+      pid: Number(p.ProcessId),
+      ppid: Number(p.ParentProcessId),
+      stat: '', // no foreground marker on Windows
+      comm,
+      args: cmd.replace(/^("[^"]+"|\S+)/, comm).trim(), // consistently normalize executable prefix to comm
+    };
+  }).filter(Boolean);
+}
+
+async function windowsRunningMonitors() {
+  const procs = await windowsProcessList();
+  const covered = new Map();
+  for (const p of procs) {
+    const m = (p.args || '').match(/monitor\.js\s+(%\d+)\s+(\d+)\b/);
+    if (m) covered.set(`${m[1]} ${m[2]}`, p.pid);
+  }
+  return covered;
+}
+
+// Platform-aware probe for currently-running monitor processes. Used by reconcile gather()
+// and by exclude-self to stop an existing monitor immediately.
+export async function findRunningMonitors() {
+  if (process.platform === 'win32') return windowsRunningMonitors();
+  let pgrepErr = null, monOut = '';
+  try { monOut = (await execFile('pgrep', [PGREP_LIST_FLAG, 'node .*src/monitor\.js'])).stdout; }
+  catch (err) { pgrepErr = err; monOut = err.stdout || ''; }
+  return runningFromPgrep(pgrepErr, monOut);
+}
+
 // --- Impure runner ---
 
 async function gather() {
-  const [{ stdout: panesOut }, { stdout: psOut }] = await Promise.all([
-    execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid}']),
+  const { stdout: panesOut } = await execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid}']);
+  if (process.platform === 'win32') {
+    const [processes, running] = await Promise.all([windowsProcessList(), findRunningMonitors()]);
+    return { panes: parsePanes(panesOut), processes, running };
+  }
+  const [{ stdout: psOut }, running] = await Promise.all([
     execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=,args=']),
+    findRunningMonitors(),
   ]);
-  let pgrepErr = null, monOut = '';
-  try { monOut = (await execFile('pgrep', [PGREP_LIST_FLAG, 'node .*src/monitor\\.js'])).stdout; }
-  catch (err) { pgrepErr = err; monOut = err.stdout || ''; }
   return {
     panes: parsePanes(panesOut),
     processes: parseProcesses(psOut),
-    running: runningFromPgrep(pgrepErr, monOut),  // throws on unverifiable coverage (Finding 2)
+    running,
   };
 }
 
