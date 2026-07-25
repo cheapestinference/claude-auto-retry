@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLaunchCommand, buildTmuxInnerCmd } from '../src/launcher.js';
+import { resolveLaunchCommand, buildTmuxInnerCmd, buildTmuxSessionEnv } from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
   it('spawns claude directly when no wrapper is set', () => {
@@ -29,6 +29,38 @@ describe('resolveLaunchCommand', () => {
       resolveLaunchCommand('claude', [], { CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER: '  nice   ' }),
       { cmd: 'nice', cmdArgs: ['claude'] },
     );
+  });
+});
+
+describe('buildTmuxSessionEnv', () => {
+  it('keeps only the safe tmux launch env and drops unrelated secrets', () => {
+    const env = {
+      PATH: '/usr/bin',
+      HOME: '/Users/ocean',
+      SHELL: '/bin/zsh',
+      LANG: 'en_US.UTF-8',
+      CLAUDE_CONFIG_DIR: '/tmp/claude',
+      CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER: 'caffeinate -i',
+      ANTHROPIC_API_KEY: 'sk-ant-123',
+      OPENAI_API_KEY: 'sk-openai-456',
+      GITHUB_TOKEN: 'ghp_secret',
+      AWS_SECRET_ACCESS_KEY: 'super-secret',
+    };
+
+    assert.deepEqual(buildTmuxSessionEnv(env), {
+      PATH: '/usr/bin',
+      HOME: '/Users/ocean',
+      SHELL: '/bin/zsh',
+      LANG: 'en_US.UTF-8',
+      CLAUDE_CONFIG_DIR: '/tmp/claude',
+      CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER: 'caffeinate -i',
+      ANTHROPIC_API_KEY: 'sk-ant-123',
+      OPENAI_API_KEY: 'sk-openai-456',
+    });
+  });
+
+  it('omits empty values', () => {
+    assert.deepEqual(buildTmuxSessionEnv({ PATH: '/usr/bin', ANTHROPIC_API_KEY: '' }), { PATH: '/usr/bin' });
   });
 });
 

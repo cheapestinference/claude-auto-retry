@@ -38,6 +38,24 @@ function shellEscape(s) {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+// Only propagate the minimum environment needed for a healthy Claude/tmux launch.
+// This avoids copying every shell secret into a long-lived tmux session while still
+// preserving the auth/config vars the launcher actually depends on.
+export const TMUX_SESSION_ENV_VARS = [
+  'PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG', 'LC_ALL', 'LC_CTYPE',
+  'CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER', 'CLAUDE_CONFIG_DIR',
+  'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
+  'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH',
+];
+
+export function buildTmuxSessionEnv(env = process.env) {
+  const out = {};
+  for (const key of TMUX_SESSION_ENV_VARS) {
+    if (env[key] != null && env[key] !== '') out[key] = env[key];
+  }
+  return out;
+}
+
 // After the tmux session's own claude-auto-retry process exits, the pane falls through
 // to a plain shell so the user isn't dropped straight out of tmux. Use the user's actual
 // login shell (env.SHELL) rather than a hardcoded `bash` — tmux's own `default-shell`
@@ -164,22 +182,17 @@ async function createTmuxSession(args) {
   const tmuxVer = getTmuxVersion();
   let newSessionArgs;
 
+  const sessionEnv = buildTmuxSessionEnv();
   if (tmuxVer >= 3.0) {
     const envArgs = [];
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k.startsWith('TMUX')) continue;
-      if (v == null) continue;
+    for (const [k, v] of Object.entries(sessionEnv)) {
       envArgs.push('-e', `${k}=${v}`);
     }
     newSessionArgs = ['new-session', '-d', '-s', sessionName, ...envArgs, innerCmd];
   } else {
-    // For tmux < 3.0: export critical env vars inline in the command
-    const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
-      'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
-      'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH'];
-    const exports = criticalVars
-      .filter(k => process.env[k])
-      .map(k => `export ${k}=${shellEscape(process.env[k])}`)
+    // For tmux < 3.0: export the same safe env subset inline in the command.
+    const exports = Object.entries(sessionEnv)
+      .map(([k, v]) => `export ${k}=${shellEscape(v)}`)
       .join('; ');
     const fullCmd = exports ? `${exports}; ${innerCmd}` : innerCmd;
     newSessionArgs = ['new-session', '-d', '-s', sessionName, fullCmd];
