@@ -99,6 +99,13 @@ describe('isRateLimited', () => {
   it('still detects "You\'ve hit your 5-hour limit" (no qualifier regression)', () => {
     assert.equal(isRateLimited("You've hit your 5-hour limit · resets 3pm (UTC)"), true);
   });
+  it('detects Kimi billing cycle limit message', () => {
+    const msg = "Please run /login · API Error: 403 You've reached your usage limit for this billing cycle. Your quota will be refreshed in the next cycle. To continue now, purchase extra usage or upgrade your plan: \n  https://www.kimi.com/code/#pricing";
+    assert.equal(isRateLimited(msg), true);
+  });
+  it('detects on-prem budget exceeded message', () => {
+    assert.equal(isRateLimited("API Error: 429 budget exceeded"), true);
+  });
 
   // --- Chrome-aware tail (tailLines > 0): a live banner pushed up by UI furniture is
   //     still found; a stale/quoted banner with real work below it is not. ---

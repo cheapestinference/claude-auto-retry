@@ -82,6 +82,9 @@ export function buildSetWindowOptionArgs(target, option, value) {
 }
 
 export async function isProcessForeground(pid) {
+  // Windows has no direct equivalent of the POSIX foreground-process-group flag. tmux's
+  // pane_current_command is the only reliable signal there; return null so callers fall back.
+  if (process.platform === 'win32') return null;
   try {
     const { stdout } = await execFileAsync('ps', ['-o', 'stat=', '-p', String(pid)]);
     return stdout.trim().includes('+');

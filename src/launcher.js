@@ -12,8 +12,9 @@ const __dirname = dirname(__filename);
 const MONITOR_PATH = join(__dirname, 'monitor.js');
 
 function findClaudeBinary() {
+  const which = process.platform === 'win32' ? 'where' : 'which';
   try {
-    return execFileSync('which', ['claude'], { encoding: 'utf-8' }).trim();
+    return execFileSync(which, ['claude'], { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
   } catch {
     return 'claude';
   }
@@ -56,11 +57,15 @@ async function launchInteractive(args) {
 
   // CLAUDE_AUTO_RETRY_PANE is inherited by claude's child processes — notably the
   // StopFailure hook, which writes a pane-keyed event marker the monitor consumes.
-  const { cmd, cmdArgs } = resolveLaunchCommand(claudeBin, args);
-  const claude = spawn(cmd, cmdArgs, {
+  let { cmd, cmdArgs } = resolveLaunchCommand(claudeBin, args);
+  const spawnOpts = {
     stdio: 'inherit',
     env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1', ...(pane ? { CLAUDE_AUTO_RETRY_PANE: pane } : {}) },
-  });
+  };
+  if (process.platform === 'win32' && (cmd.toLowerCase().endsWith('.cmd') || cmd.toLowerCase().endsWith('.bat'))) {
+    spawnOpts.shell = true;
+  }
+  const claude = spawn(cmd, cmdArgs, spawnOpts);
 
   // Check spawn succeeded before using PID
   if (claude.pid == null) {
@@ -109,10 +114,16 @@ async function launchPrintMode(args) {
     const result = await new Promise((resolve) => {
       const chunks = [];
       const errChunks = [];
-      const claude = spawn(claudeBin, args, {
+      let cmd = claudeBin;
+      let cmdArgs = args;
+      const spawnOpts = {
         stdio: ['inherit', 'pipe', 'pipe'],
         env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
-      });
+      };
+      if (process.platform === 'win32' && (cmd.toLowerCase().endsWith('.cmd') || cmd.toLowerCase().endsWith('.bat'))) {
+        spawnOpts.shell = true;
+      }
+      const claude = spawn(cmd, cmdArgs, spawnOpts);
 
       claude.stdout.on('data', (d) => chunks.push(d));
       claude.stderr.on('data', (d) => errChunks.push(d));

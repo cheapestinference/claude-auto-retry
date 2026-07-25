@@ -123,12 +123,15 @@ const LIMIT_PATTERNS = [
   /out of.*usage/i,                                  // "out of extra usage"
   /rate limit/i,                                     // "rate limit"
   /try again in/i,                                   // "try again in X hours" (implies rate limiting)
+  /budget exceeded/i,                                // "budget exceeded"
 ];
 
 const RESET_PATTERNS = [
   /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/i,   // "resets 3pm" / "resets at 3:00 PM"
   /resets?\s+in[:\s]\s*\d/i,                                   // "resets in: 3 hours"
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
+  /next cycle\b/i,                                             // "refreshed in the next cycle"
+  /budget exceeded/i,                                          // "budget exceeded" (self-pairing for reset time fallback)
 ];
 
 const WINDOW = 6;
