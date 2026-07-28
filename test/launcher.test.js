@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLaunchCommand, buildTmuxInnerCmd } from '../src/launcher.js';
+import { resolveLaunchCommand, buildTmuxInnerCmd, buildTmuxEnvArgs } from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
   it('spawns claude directly when no wrapper is set', () => {
@@ -29,6 +29,37 @@ describe('resolveLaunchCommand', () => {
       resolveLaunchCommand('claude', [], { CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER: '  nice   ' }),
       { cmd: 'nice', cmdArgs: ['claude'] },
     );
+  });
+});
+
+describe('buildTmuxEnvArgs', () => {
+  // #58: Windows (Git Bash / MSYS2) environments carry names tmux -e rejects outright
+  // ("invalid environment variable name"), killing session creation for EVERY variable
+  // after the bad one is reached. Names must match POSIX [A-Za-z_][A-Za-z0-9_]* to pass.
+  it('drops non-POSIX names that tmux -e rejects, keeps the rest (#58)', () => {
+    const args = buildTmuxEnvArgs({
+      'PATH': '/usr/bin',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
+      'CommonProgramFiles(x86)': 'C:\\Common',
+      '=C:': 'C:\\Users\\me',
+      '!ExitCode': '00000000',
+      'ANTHROPIC_API_KEY': 'sk-ant-1',
+    });
+    assert.deepEqual(args, [
+      '-e', 'PATH=/usr/bin',
+      '-e', 'ANTHROPIC_API_KEY=sk-ant-1',
+    ]);
+  });
+
+  it('still skips TMUX* and nullish values', () => {
+    const args = buildTmuxEnvArgs({
+      TMUX: '/tmp/tmux-1000/default,1,0',
+      TMUX_PANE: '%5',
+      HOME: '/home/me',
+      EMPTY_OK: '',
+      GONE: undefined,
+    });
+    assert.deepEqual(args, ['-e', 'HOME=/home/me', '-e', 'EMPTY_OK=']);
   });
 });
 

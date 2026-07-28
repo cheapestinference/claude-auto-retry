@@ -38,6 +38,22 @@ function shellEscape(s) {
   return "'" + s.replace(/'/g, "'\\''") + "'";
 }
 
+// Env forwarded into the tmux session via `new-session -e`. Windows shells (Git Bash /
+// MSYS2 / Cygwin) carry names tmux rejects as "invalid environment variable name" —
+// `ProgramFiles(x86)`, the `=C:` drive pseudo-vars, `!ExitCode` — and one bad name kills
+// session creation entirely (#58). Only POSIX names ([A-Za-z_][A-Za-z0-9_]*) get through;
+// TMUX* stays excluded so the inner session doesn't inherit the outer server's identity.
+export function buildTmuxEnvArgs(env = process.env) {
+  const envArgs = [];
+  for (const [k, v] of Object.entries(env)) {
+    if (k.startsWith('TMUX')) continue;
+    if (v == null) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    envArgs.push('-e', `${k}=${v}`);
+  }
+  return envArgs;
+}
+
 // After the tmux session's own claude-auto-retry process exits, the pane falls through
 // to a plain shell so the user isn't dropped straight out of tmux. Use the user's actual
 // login shell (env.SHELL) rather than a hardcoded `bash` — tmux's own `default-shell`
@@ -165,13 +181,7 @@ async function createTmuxSession(args) {
   let newSessionArgs;
 
   if (tmuxVer >= 3.0) {
-    const envArgs = [];
-    for (const [k, v] of Object.entries(process.env)) {
-      if (k.startsWith('TMUX')) continue;
-      if (v == null) continue;
-      envArgs.push('-e', `${k}=${v}`);
-    }
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, ...envArgs, innerCmd];
+    newSessionArgs = ['new-session', '-d', '-s', sessionName, ...buildTmuxEnvArgs(process.env), innerCmd];
   } else {
     // For tmux < 3.0: export critical env vars inline in the command
     const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',

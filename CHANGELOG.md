@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **tmux session creation no longer fails on Windows (Git Bash / MSYS2) environments.**
+  `tmux new-session -e` rejects non-POSIX variable names that Windows shells always
+  carry (`ProgramFiles(x86)`, `=C:` drive pseudo-vars, `!ExitCode`) with
+  `invalid environment variable name`, which aborted the whole launch. Environment
+  forwarding now filters names to POSIX `[A-Za-z_][A-Za-z0-9_]*`; everything else is
+  passed through unchanged (#58).
+
 ## [0.6.1] - 2026-07-23
 
 ### Fixed
