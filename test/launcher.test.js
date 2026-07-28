@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLaunchCommand, buildTmuxInnerCmd, buildTmuxEnvArgs } from '../src/launcher.js';
+import { resolveLaunchCommand, buildTmuxInnerCmd, buildTmuxEnvArgs, buildNewSessionArgs } from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
   it('spawns claude directly when no wrapper is set', () => {
@@ -60,6 +60,27 @@ describe('buildTmuxEnvArgs', () => {
       GONE: undefined,
     });
     assert.deepEqual(args, ['-e', 'HOME=/home/me', '-e', 'EMPTY_OK=']);
+  });
+});
+
+describe('buildNewSessionArgs', () => {
+  const env = { PATH: '/usr/bin', HOME: '/home/me' };
+
+  // `new-session -e` was added in tmux 3.2 (3.0 only added -e to new-window/split-window).
+  // Ubuntu 20.04 ships 3.0a and Debian 11 ships 3.1c: gating at >= 3.0 made new-session
+  // fail with "unknown option -- e" and the launch died outright on those distros.
+  it('does NOT use -e below tmux 3.2 (3.0/3.1 lack new-session -e)', () => {
+    for (const ver of [3.0, 3.1]) {
+      const args = buildNewSessionArgs(ver, 's1', 'inner', env);
+      assert.ok(!args.includes('-e'), `tmux ${ver} must not get -e`);
+      assert.match(args[args.length - 1], /export PATH='\/usr\/bin'.*; inner$/);
+    }
+  });
+
+  it('uses -e from tmux 3.2 onward', () => {
+    const args = buildNewSessionArgs(3.2, 's1', 'inner', env);
+    assert.deepEqual(args, ['new-session', '-d', '-s', 's1',
+      '-e', 'PATH=/usr/bin', '-e', 'HOME=/home/me', 'inner']);
   });
 });
 

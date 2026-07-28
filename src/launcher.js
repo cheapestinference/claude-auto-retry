@@ -168,32 +168,32 @@ async function launchPrintMode(args) {
   }
 }
 
+// Env propagation into the new session. `new-session -e` exists only from tmux 3.2
+// (3.0 added -e to new-window/split-window, NOT new-session — 3.0a/3.1c reject it with
+// "unknown option" and the whole launch fails; Ubuntu 20.04 ships 3.0a, Debian 11 3.1c).
+// Below 3.2, export critical env vars inline in the command instead.
+export function buildNewSessionArgs(tmuxVer, sessionName, innerCmd, env = process.env) {
+  if (tmuxVer >= 3.2) {
+    return ['new-session', '-d', '-s', sessionName, ...buildTmuxEnvArgs(env), innerCmd];
+  }
+  const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
+    'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
+    'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH'];
+  const exports = criticalVars
+    .filter(k => env[k])
+    .map(k => `export ${k}=${shellEscape(env[k])}`)
+    .join('; ');
+  const fullCmd = exports ? `${exports}; ${innerCmd}` : innerCmd;
+  return ['new-session', '-d', '-s', sessionName, fullCmd];
+}
+
 async function createTmuxSession(args) {
   const sessionName = `claude-retry-${process.pid}-${Date.now()}`;
   const launcherPath = __filename;
 
   // Build the command to run inside tmux
   const innerCmd = buildTmuxInnerCmd(launcherPath, args);
-
-  // Build env propagation args
-  // tmux -e flag requires tmux >= 3.0; for older versions, prefix env exports in the command
-  const tmuxVer = getTmuxVersion();
-  let newSessionArgs;
-
-  if (tmuxVer >= 3.0) {
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, ...buildTmuxEnvArgs(process.env), innerCmd];
-  } else {
-    // For tmux < 3.0: export critical env vars inline in the command
-    const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
-      'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
-      'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH'];
-    const exports = criticalVars
-      .filter(k => process.env[k])
-      .map(k => `export ${k}=${shellEscape(process.env[k])}`)
-      .join('; ');
-    const fullCmd = exports ? `${exports}; ${innerCmd}` : innerCmd;
-    newSessionArgs = ['new-session', '-d', '-s', sessionName, fullCmd];
-  }
+  const newSessionArgs = buildNewSessionArgs(getTmuxVersion(), sessionName, innerCmd);
 
   try {
     execFileSync('tmux', newSessionArgs);
