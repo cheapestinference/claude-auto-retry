@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Adversarial review of this release's own fixes caught and closed seven follow-ups:**
+  the stdin buffer now mirrors claude's 3-second no-data grace instead of hanging on a
+  held-open pipe (`ssh` without `-n`, CI harnesses); DST-transition wall times that
+  don't exist (spring-forward) or repeat (fall-back) resolve deterministically to the
+  late side on every host; the overload recovery reset no longer counts Claude's own
+  in-flight `Retrying in …` render as recovery (escalation and the give-up cap survive
+  sustained outages) and no longer drops the same-banner memo (no scraper re-fire into
+  a recovered session); exported bash functions (`BASH_FUNC_name%%`) are forwarded
+  again, with a strict-POSIX retry if a tmux build rejects them; the tmux < 3.2 inline
+  branch no longer clobbers the pane's TERM; socket paths with consecutive spaces
+  survive `parsePanes` verbatim.
+- **StopFailure markers are socket-keyed** (like status files): with two tmux servers,
+  a marker for one server's `%2` could be consumed by the monitor watching the other
+  server's `%2`. Readers fall back to the legacy filename so an older installed hook's
+  markers aren't dropped mid-upgrade.
 - **`claude` now launches on tmux 3.0–3.1c (Ubuntu 20.04, Debian 11).** `new-session -e`
   only exists from tmux 3.2; gating it at 3.0 made session creation fail outright with
   `unknown option -- e` on those distros. Below 3.2 the critical env vars are exported
