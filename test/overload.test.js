@@ -69,6 +69,17 @@ describe('detectOverload', () => {
     assert.equal(detectOverload('API Error: 529\n{"type":"error","error":{"type":"overloaded_error"}}', PATS), true);
   });
 
+  // --- #63 follow-up: a grep result taller than the tail window pushes the `● Bash(`
+  //     header out of the window; the mask must still recognize the children as echo. ---
+  it('does NOT match quoted 529s in a tool result taller than the tail window (#63)', () => {
+    const pane = [
+      '● Bash(grep "API Error" ~/logs/incidents.log)',
+      ...Array(14).fill('  ⎿  2026-07-18 API Error: 529 overloaded_error retrying upstream'),
+      '', '❯ ',
+    ].join('\n');
+    assert.equal(detectOverload(pane, PATS), false);
+  });
+
   // --- Terminal vs transient: the parens form means Claude is STILL retrying. Acting
   //     on it would interrupt Claude's own backoff. Only the colon form is terminal. ---
   it('does NOT match the transient parens retry form', () => assert.equal(detectOverload('API Error (529 {"type":"error"}) · Retrying in 5s · attempt 3/10', PATS), false));

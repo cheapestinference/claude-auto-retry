@@ -121,6 +121,32 @@ describe('isRateLimited', () => {
       '', '  8 tasks (4 done, 1 in progress, 3 open)', '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g', '❯ '].join('\n');
     assert.equal(isRateLimited(pane, [], 12), true);
   });
+  // --- #63 follow-up: the tool-echo mask must survive a tool RESULT taller than the tail
+  //     window. When the `● Bash(` header falls outside the 12-content-line window, a mask
+  //     computed only on the windowed lines never latches inBlock and the quoted log lines
+  //     go unmasked — reviving the exact #63 false positive one grep-length away. ---
+  const logLine = (t) => `     [2026-07-18 ${t}] Rate limit detected: "5-hour limit reached - resets 3pm (UTC)". Waiting 12600s...`;
+  const tallToolResult = [
+    '● Bash(grep "limit" ~/.claude-auto-retry/logs/2026-07-18.log)',
+    '  ⎿  [2026-07-18 09:58:01] Monitor started for pane %3 (claude PID: 51023)',
+    logLine('10:29:37'), logLine('11:31:12'), logLine('12:33:40'), logLine('13:35:02'),
+    '     [2026-07-18 13:35:02] Sent retry message (attempt 1)',
+    '     [2026-07-18 13:36:20] User already continued. Attempt counter reset.',
+    logLine('14:41:55'), logLine('15:44:10'),
+    '     [2026-07-18 15:44:10] Sent retry message (attempt 1)',
+    logLine('16:29:37'), logLine('16:31:12'),
+    '     [2026-07-18 16:31:12] Max retries (5) reached. Monitor still active...',
+  ];
+  it('does NOT fire on a tool result taller than the tail window (header outside it, #63)', () => {
+    const pane = [...tallToolResult, '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('still detects a LIVE banner rendered below a tall tool result', () => {
+    const pane = [...tallToolResult,
+      "You've hit your session limit · resets 2am (Europe/Zurich)", '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
+
   // Fable review F3: a session EXPLAINING /usage-credits (companion + a loose "usage limit"
   // LIMIT match, but no reset time) must not fire the backstop.
   it('does NOT backstop-fire on a conversation explaining /usage-credits (no reset nearby)', () => {
