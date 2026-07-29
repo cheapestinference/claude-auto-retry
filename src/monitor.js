@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -159,20 +159,24 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   }
 
   if (state.status === 'waiting') {
-    // Keep counting down UNLESS the session has resumed working. A working pane means
+    // Keep counting down UNLESS the session has resumed working. A resumed pane means
     // the user manually continued (often to unstick a wrong/stale wait) — falling through
-    // to the isWorking gate below returns us to monitoring, so a SECOND, genuine limit that
+    // to the gate below returns us to monitoring, so a SECOND, genuine limit that
     // follows is detected instead of being masked until the old timer expires (issue #39).
-    if (Date.now() < state.waitUntil && !isWorking(stripped)) return 'waiting';
+    // resumedAfterLimit, not plain isWorking: `Retrying in …`/`attempt N/M` also match
+    // transcript text (a flaky deploy log ABOVE a live banner), and treating that as
+    // "continued" churned waiting↔user-continued forever without ever sending the retry.
+    // Resumed = working signal rendered BELOW the last banner line.
+    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) return 'waiting';
     if (!isAlive()) return 'exit';
 
     // Stop driving the session if the limit cleared OR Claude has already resumed and
-    // is working again. Without the isWorking gate the usage path re-sends the retry
+    // is working again. Without the resumed gate the usage path re-sends the retry
     // message every poll (up to maxRetries) while the limit banner lingers in the
     // captured scrollback after a successful resume — spamming an actively-working
     // session (and a banner re-printed by another process keeps it "rate-limited" the
-    // whole time). isWorking ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || isWorking(stripped)) {
+    // whole time). Resumed ⇒ the session continued; never inject into it.
+    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       return 'user-continued';
     }

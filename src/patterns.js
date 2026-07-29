@@ -245,6 +245,29 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   return false;
 }
 
+// Has the session RESUMED past its limit banner? Used by the monitor's waiting branch,
+// where plain isWorking() was too loose: `Retrying in …`/`attempt N/M` match transcript
+// text, so a flaky-deploy log line lingering ABOVE a live banner made every expiry tick
+// look like "user continued" — the monitor churned waiting↔user-continued forever and
+// never sent the retry. Ordering is the discriminator: a session that actually resumed
+// renders its new work BELOW the banner; working lines above it are history. When no
+// banner is in the window (scrolled away after a real resume, or entered via custom
+// patterns), fall back to plain isWorking — same behavior as before.
+export function resumedAfterLimit(text, tailLines = 0) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines)
+    : { start: 0, end: all.length };
+  const lines = all.slice(start, end);
+  const mask = toolEchoMask(all).slice(start, end);
+  let lastLimit = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue;
+    if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) lastLimit = i;
+  }
+  if (lastLimit === -1) return isWorking(text);
+  return lines.slice(lastLimit + 1).some(isWorkingLine);
+}
+
 // --- Interactive /rate-limit-options menu ---
 // Newer Claude Code shows a selectable menu when a session/weekly limit is hit:
 //   What do you want to do?
