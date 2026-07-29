@@ -32,6 +32,10 @@ describe('reconcile parsing', () => {
     const p = parsePanes('%1 460807\n%10 1642861\n\n');
     assert.deepEqual(p, [{ pane: '%1', panePid: 460807 }, { pane: '%10', panePid: 1642861 }]);
   });
+  it('parses the socket path third field (spaces preserved) when present', () => {
+    const p = parsePanes('%1 460807 /tmp/tmux-1000/my socket\n');
+    assert.deepEqual(p, [{ pane: '%1', panePid: 460807, socket: '/tmp/tmux-1000/my socket' }]);
+  });
   it('parses ps output with comm and args (args is the trailing field)', () => {
     const p = parseProcesses('1842917 460471 Sl+ claude claude -p "do a thing"\n460471 1 Ss bash -bash\n');
     assert.deepEqual(p[0], { pid: 1842917, ppid: 460471, stat: 'Sl+', comm: 'claude', args: 'claude -p "do a thing"' });

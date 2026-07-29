@@ -30,7 +30,12 @@ export const STATUS_DIR = join(homedir(), '.claude-auto-retry', 'status');
 // can't rely on its own $TMUX (a status-bar `#()` command runs in the tmux *server's*
 // environment, not a client's — see the README PATH caveat), so it instead receives
 // `#{socket_path}` as an explicit argument, which resolves to the same value.
+// CLAUDE_AUTO_RETRY_SOCKET is set by reconcile when it arms a monitor: timer runs have
+// no $TMUX (systemd/launchd jobs run outside any client), and without it every
+// self-healed monitor wrote under 'default' — a key the #{socket_path}-driven reader
+// never looks up, leaving the status segment permanently blank.
 function socketIdFromEnv(env = process.env) {
+  if (env.CLAUDE_AUTO_RETRY_SOCKET) return env.CLAUDE_AUTO_RETRY_SOCKET;
   const tmuxEnv = env.TMUX || '';
   return tmuxEnv.split(',')[0] || 'default';
 }

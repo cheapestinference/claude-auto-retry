@@ -302,8 +302,12 @@ function isPrintMode(args) {
 // tmux: "<pane_id> <pane_pid>" per line → [{ pane, panePid }]
 export function parsePanes(out) {
   return out.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
-    const [pane, panePid] = l.split(/\s+/);
-    return { pane, panePid: Number(panePid) };
+    // Third field (optional): #{socket_path}. It comes LAST because it may contain
+    // spaces; pane id and pid never do.
+    const [pane, panePid, ...rest] = l.split(/\s+/);
+    const p = { pane, panePid: Number(panePid) };
+    if (rest.length) p.socket = rest.join(' ');
+    return p;
   }).filter(p => p.pane && Number.isFinite(p.panePid));
 }
 
@@ -464,7 +468,7 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 
 async function gather() {
   const [{ stdout: panesOut }, { stdout: psOut }] = await Promise.all([
-    execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid}']),
+    execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{socket_path}']),
     execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=,args=']),
   ]);
   let pgrepErr = null, monOut = '';
@@ -477,12 +481,17 @@ async function gather() {
   };
 }
 
-function armMonitor(pane, pid) {
+function armMonitor(pane, pid, socket = null) {
   // spawn (not fork): fork() opens an IPC channel that keeps this CLI's event loop
   // alive even after unref(), so the command would hang. spawn detached + unref lets
   // the monitor outlive us while `reconcile` exits cleanly.
+  // Under the timer there is no $TMUX in our env, so a spawned monitor would write its
+  // status file under the 'default' socket key while the tmux status-bar reader looks
+  // up by #{socket_path} — pass the enumerated server's socket explicitly instead
+  // (status-file.js prefers CLAUDE_AUTO_RETRY_SOCKET over $TMUX).
   const child = spawn(process.execPath, [MONITOR_PATH, pane, String(pid)], {
     detached: true, stdio: 'ignore',
+    env: socket ? { ...process.env, CLAUDE_AUTO_RETRY_SOCKET: socket } : process.env,
   });
   child.unref();
   return child.pid;
@@ -504,8 +513,9 @@ export async function reconcile({ selfPane = process.env.TMUX_PANE || null, dryR
     const plan = planReconcile({ panes, processes, running, selfPane, exclude });
     const armed = [];
     if (!dryRun) {
+      const socket = panes.find(p => p.socket)?.socket || null;
       for (const { pane, pid } of plan.arm) {
-        const monitorPid = armMonitor(pane, pid);
+        const monitorPid = armMonitor(pane, pid, socket);
         armed.push({ pane, pid, monitorPid });
       }
     }
