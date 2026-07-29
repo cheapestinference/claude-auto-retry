@@ -448,6 +448,18 @@ export function isWorking(text) {
   return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES).some(isWorkingLine);
 }
 
+// Claude Code's OWN internal-retry render ("… · Retrying in 5s · attempt 3/10"). It
+// satisfies isWorking (the turn is open and must not be interrupted), but it is the
+// opposite of RECOVERY — the turn is still failing. Consumers inferring "the incident
+// ended well" from a working pane (the event-path overload budget reset) must exclude it,
+// or a sustained outage's in-flight retries zero the backoff budget every cycle and the
+// give-up cap never trips.
+const INTERNAL_RETRY_PATTERNS = [/Retrying in\b/i, /\battempt\s+\d+\/\d+/i];
+export function isInternalRetry(text) {
+  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES)
+    .some((l) => INTERNAL_RETRY_PATTERNS.some((p) => p.test(l)));
+}
+
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
   // Tool-echo mask (#63): without it, a quoted "resets 9am" in a fresh grep line below a

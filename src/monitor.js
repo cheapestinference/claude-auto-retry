@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -393,8 +393,18 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // counters leak across fully-recovered incidents: escalated backoffs for unrelated
   // failures days apart, and eventually every fresh marker consumed as overload-gave-up
   // at the total-wait cap, permanently. Mirrors the scraper path's 'overload-cleared'.
-  if ((state.overloadAttempts > 0 || state.overloadTotalWaitMs > 0) && isWorking(stripped)) {
+  // Two carve-outs (both real regressions caught in review): (1) an in-flight internal
+  // retry ("Retrying in 5s · attempt 3/10") satisfies isWorking but means the turn is
+  // STILL FAILING — resetting on it re-zeroes the budget every cycle of a sustained
+  // outage and the give-up cap never trips; (2) the same-banner memo must survive the
+  // reset — the banner this memo suppresses can still be on screen, and clearing it lets
+  // the scraper re-fire and inject into the recovered session. The memo has its own
+  // lifecycle (cleared below once the banner leaves the tail).
+  if ((state.overloadAttempts > 0 || state.overloadTotalWaitMs > 0)
+      && isWorking(stripped) && !isInternalRetry(stripped)) {
+    const handledBanner = state._eventHandledBanner;
     resetOverload(state);
+    state._eventHandledBanner = handledBanner;
   }
 
   // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
