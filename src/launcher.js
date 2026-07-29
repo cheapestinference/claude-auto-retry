@@ -115,6 +115,28 @@ async function launchInteractive(args) {
   });
 }
 
+// Read stdin to EOF, but resolve with an empty buffer if NO data has arrived within
+// graceMs (claude's own "no stdin data received in 3s, proceeding without it"). Once the
+// first byte arrives the grace no longer applies — a real piped prompt delivers promptly
+// and then EOFs.
+export function readStdinWithGrace(stream, graceMs) {
+  return new Promise((resolve) => {
+    const parts = [];
+    let received = false;
+    const finish = () => { clearTimeout(timer); resolve(Buffer.concat(parts)); };
+    const timer = setTimeout(() => {
+      if (!received) {
+        stream.pause();
+        process.stderr.write('[claude-auto-retry] no stdin data received in 3s, proceeding without it\n');
+        resolve(Buffer.alloc(0));
+      }
+    }, graceMs);
+    stream.on('data', (c) => { received = true; parts.push(c); });
+    stream.on('end', finish);
+    stream.on('error', finish);
+  });
+}
+
 async function launchPrintMode(args) {
   const claudeBin = findClaudeBinary();
   const config = await loadConfig();
@@ -124,11 +146,13 @@ async function launchPrintMode(args) {
   // stdin is inherited — a retry would then run claude with an empty prompt and silently
   // produce a wrong answer. Buffer piped stdin once and re-feed it to every attempt.
   // A TTY stdin stays inherited (nothing to replay; claude reads the terminal directly).
+  // Mirroring claude's own behavior, give up after a short no-data grace instead of
+  // reading to EOF unconditionally: `ssh host claude -p '…'` and CI harnesses hold stdin
+  // open without ever writing, and an unconditional read hangs forever ahead of claude
+  // (which would have proceeded after ITS 3s grace).
   let stdinBuf = null;
   if (!process.stdin.isTTY) {
-    const parts = [];
-    for await (const chunk of process.stdin) parts.push(chunk);
-    stdinBuf = Buffer.concat(parts);
+    stdinBuf = await readStdinWithGrace(process.stdin, 3000);
   }
 
   // eslint-disable-next-line no-constant-condition

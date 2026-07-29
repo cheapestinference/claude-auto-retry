@@ -38,6 +38,26 @@ describe('print-mode retry re-feeds piped stdin', () => {
   });
   after(async () => { await rm(dir, { recursive: true, force: true }); });
 
+  // Buffering stdin must not turn into an unconditional read-to-EOF: `ssh host claude
+  // -p '…'` and CI harnesses hold stdin open without ever writing. The claude CLI itself
+  // proceeds after a 3s no-data grace; the launcher must mirror it, not hang forever
+  // ahead of claude.
+  it('does not hang when stdin is an open pipe that never sends data', async () => {
+    const { spawn } = await import('node:child_process');
+    const env = { ...process.env, HOME: join(dir, 'home'), PATH: `${dir}:${process.env.PATH}` };
+    delete env.CLAUDE_AUTO_RETRY_ACTIVE;
+    await writeFile(join(dir, 'count'), '1');   // stub claude answers normally (run 2 shape)
+    const child = spawn(process.execPath, [join(REPO_ROOT, 'src', 'launcher.js'), '-p', 'go'],
+      { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    // Deliberately never write to child.stdin and never close it.
+    const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+    const timeout = new Promise((resolve) => setTimeout(() => resolve('hung'), 10_000));
+    const result = await Promise.race([exited, timeout]);
+    child.kill('SIGKILL');
+    assert.notEqual(result, 'hung', 'launcher must proceed after the no-stdin grace');
+    assert.equal(result, 0);
+  });
+
   it('the retry attempt receives the original piped prompt', () => {
     const env = { ...process.env, HOME: join(dir, 'home'), PATH: `${dir}:${process.env.PATH}` };
     delete env.CLAUDE_AUTO_RETRY_ACTIVE;   // dev boxes running inside a wrapped session
