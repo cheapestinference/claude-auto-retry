@@ -301,14 +301,16 @@ function isPrintMode(args) {
 
 // tmux: "<pane_id> <pane_pid>" per line → [{ pane, panePid }]
 export function parsePanes(out) {
-  return out.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+  return out.split('\n').filter(l => l.trim()).map(l => {
     // Third field (optional): #{socket_path}. It comes LAST because it may contain
-    // spaces; pane id and pid never do.
-    const [pane, panePid, ...rest] = l.split(/\s+/);
-    const p = { pane, panePid: Number(panePid) };
-    if (rest.length) p.socket = rest.join(' ');
+    // spaces — captured VERBATIM (no re-split/re-join, which collapsed consecutive
+    // spaces and broke the status-key match against the reader's #{socket_path}).
+    const m = l.replace(/\r$/, '').match(/^\s*(\S+)\s+(\S+)(?: (.*))?$/);
+    if (!m) return null;
+    const p = { pane: m[1], panePid: Number(m[2]) };
+    if (m[3] !== undefined) p.socket = m[3];
     return p;
-  }).filter(p => p.pane && Number.isFinite(p.panePid));
+  }).filter(p => p && p.pane && Number.isFinite(p.panePid));
 }
 
 // ps "-eo pid=,ppid=,stat=,comm=,args=" → [{ pid, ppid, stat, comm, args }]. args is the

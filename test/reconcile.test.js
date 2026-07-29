@@ -36,6 +36,12 @@ describe('reconcile parsing', () => {
     const p = parsePanes('%1 460807 /tmp/tmux-1000/my socket\n');
     assert.deepEqual(p, [{ pane: '%1', panePid: 460807, socket: '/tmp/tmux-1000/my socket' }]);
   });
+  it('preserves consecutive spaces in the socket path verbatim', () => {
+    // Collapsing "  " to " " breaks the status key match against #{socket_path} — the
+    // exact blank-segment bug the socket plumbing exists to fix.
+    const p = parsePanes('%0 1103083 /tmp/car bugrev  x/sock\n');
+    assert.deepEqual(p, [{ pane: '%0', panePid: 1103083, socket: '/tmp/car bugrev  x/sock' }]);
+  });
   it('parses ps output with comm and args (args is the trailing field)', () => {
     const p = parseProcesses('1842917 460471 Sl+ claude claude -p "do a thing"\n460471 1 Ss bash -bash\n');
     assert.deepEqual(p[0], { pid: 1842917, ppid: 460471, stat: 'Sl+', comm: 'claude', args: 'claude -p "do a thing"' });
