@@ -39,16 +39,21 @@ function shellEscape(s) {
 }
 
 // Env forwarded into the tmux session via `new-session -e`. Windows shells (Git Bash /
-// MSYS2 / Cygwin) carry names tmux rejects as "invalid environment variable name" —
-// `ProgramFiles(x86)`, the `=C:` drive pseudo-vars, `!ExitCode` — and one bad name kills
-// session creation entirely (#58). Only POSIX names ([A-Za-z_][A-Za-z0-9_]*) get through;
-// TMUX* stays excluded so the inner session doesn't inherit the outer server's identity.
-export function buildTmuxEnvArgs(env = process.env) {
+// MSYS2 / Cygwin) carry names some tmux builds reject as "invalid environment variable
+// name" — `ProgramFiles(x86)`, the `=C:` drive pseudo-vars, `!ExitCode` — and one bad
+// name kills session creation entirely (#58). POSIX names ([A-Za-z_][A-Za-z0-9_]*) get
+// through, plus (by default) bash's exported-function form `BASH_FUNC_name%%` — verified
+// accepted and reconstructed by tmux 3.2/3.4, and load-bearing for HPC Environment
+// Modules users. `strict: true` drops the function form too; it is the launch-failure
+// fallback for tmux builds that reject any exotic name. TMUX* stays excluded so the
+// inner session doesn't inherit the outer server's identity.
+export function buildTmuxEnvArgs(env = process.env, { strict = false } = {}) {
   const envArgs = [];
   for (const [k, v] of Object.entries(env)) {
     if (k.startsWith('TMUX')) continue;
     if (v == null) continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)
+        && (strict || !/^BASH_FUNC_[A-Za-z_][A-Za-z0-9_]*%%$/.test(k))) continue;
     envArgs.push('-e', `${k}=${v}`);
   }
   return envArgs;
@@ -211,11 +216,14 @@ async function launchPrintMode(args) {
 // (3.0 added -e to new-window/split-window, NOT new-session — 3.0a/3.1c reject it with
 // "unknown option" and the whole launch fails; Ubuntu 20.04 ships 3.0a, Debian 11 3.1c).
 // Below 3.2, export critical env vars inline in the command instead.
-export function buildNewSessionArgs(tmuxVer, sessionName, innerCmd, env = process.env) {
+export function buildNewSessionArgs(tmuxVer, sessionName, innerCmd, env = process.env, opts = {}) {
   if (tmuxVer >= 3.2) {
-    return ['new-session', '-d', '-s', sessionName, ...buildTmuxEnvArgs(env), innerCmd];
+    return ['new-session', '-d', '-s', sessionName, ...buildTmuxEnvArgs(env, opts), innerCmd];
   }
-  const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'TERM', 'LANG',
+  // No TERM here: tmux force-sets the pane's TERM from its default-terminal, and
+  // re-exporting the OUTER terminal's TERM inside the pane would run the TUI with a
+  // non-tmux terminfo (the >= 3.2 path correctly lets tmux own TERM).
+  const criticalVars = ['PATH', 'HOME', 'USER', 'SHELL', 'LANG',
     'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'HTTP_PROXY', 'HTTPS_PROXY',
     'NO_PROXY', 'NODE_OPTIONS', 'NVM_DIR', 'NODE_PATH'];
   const exports = criticalVars
@@ -226,16 +234,30 @@ export function buildNewSessionArgs(tmuxVer, sessionName, innerCmd, env = proces
   return ['new-session', '-d', '-s', sessionName, fullCmd];
 }
 
+// The ordered arg-lists to try for session creation: the lenient env filter first, then
+// (only when it actually differs) a strict-POSIX retry — some tmux builds reject names
+// the mainstream ones accept, and a filtered launch beats no launch (#58).
+export function newSessionAttempts(tmuxVer, sessionName, innerCmd, env = process.env) {
+  const lenient = buildNewSessionArgs(tmuxVer, sessionName, innerCmd, env);
+  const strict = buildNewSessionArgs(tmuxVer, sessionName, innerCmd, env, { strict: true });
+  return JSON.stringify(lenient) === JSON.stringify(strict) ? [lenient] : [lenient, strict];
+}
+
 async function createTmuxSession(args) {
   const sessionName = `claude-retry-${process.pid}-${Date.now()}`;
   const launcherPath = __filename;
 
   // Build the command to run inside tmux
   const innerCmd = buildTmuxInnerCmd(launcherPath, args);
-  const newSessionArgs = buildNewSessionArgs(getTmuxVersion(), sessionName, innerCmd);
+  const attempts = newSessionAttempts(getTmuxVersion(), sessionName, innerCmd);
 
   try {
-    execFileSync('tmux', newSessionArgs);
+    // Lenient env filter first; on rejection (a tmux build stricter about -e names than
+    // the mainstream ones), retry with the strict-POSIX form before giving up.
+    for (let i = 0; i < attempts.length; i++) {
+      try { execFileSync('tmux', attempts[i]); break; }
+      catch (err) { if (i === attempts.length - 1) throw err; }
+    }
 
     // Best-effort: enable mouse mode (scroll, copy-mode, pane/window click) and
     // vi-style copy-mode keys on the session's first window. Requires tmux >= 2.1;
