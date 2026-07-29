@@ -419,7 +419,15 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
   // monitor alive, so if we keyed on pid we'd arm a SECOND monitor for the new foreground
   // claude in that pane and both would send keys. One monitor per pane suffices — a
   // monitor whose target pid has exited already shuts itself down (isAlive check).
-  const coveredPanes = new Set([...running.keys()].map(k => k.split(' ')[0]));
+  // But the monitor pgrep is GLOBAL while pane ids are only unique per tmux server: a
+  // monitor watching "%1" of `tmux -L work` must not mask THIS server's "%1" forever.
+  // A running entry only covers the pane if its monitored claude pid actually maps to
+  // that pane in this server's pane tree (a dead pid doesn't either — that monitor is
+  // about to shut itself down, and a fresh claude there deserves coverage now).
+  const coveredPanes = new Set([...running.keys()].map(k => {
+    const [pane, pid] = k.split(' ');
+    return paneForPid(Number(pid), byPid, panePidToPane) === pane ? pane : null;
+  }).filter(Boolean));
 
   // Every interactive claude session, mapped to its pane (comm 'claude', a macOS
   // full-path/argv0 claude, a node-launched claude CLI, or an agent our launcher wraps),

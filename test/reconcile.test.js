@@ -234,6 +234,27 @@ describe('planReconcile', () => {
     assert.equal(skipped.find(s => s.pane === '%1').reason, 'already monitored');
   });
 
+  // --- Pane ids are only unique per tmux SERVER, but the monitor pgrep is global: a
+  //     monitor watching %1 on `tmux -L work` must not mask the default server's %1
+  //     forever. Coverage only counts when the monitored claude PID actually maps to
+  //     that pane on THIS server's pane tree. ---
+  it('a monitor for the same pane id on ANOTHER tmux server does not mask this one', () => {
+    const { panes, processes } = fixture();
+    // Monitor watching "%1" but for pid 7100 — a claude that lives on a different
+    // server (not in this server's process tree at all).
+    const running = parseRunningMonitors('9 node src/monitor.js %1 7100\n');
+    const { arm } = planReconcile({ panes, processes, running });
+    assert.deepEqual(arm.sort((a, b) => a.pane < b.pane ? -1 : 1),
+      [{ pane: '%1', pid: 200 }, { pane: '%2', pid: 400 }]);
+  });
+  it('a monitor whose claude pid maps to the pane on THIS server still covers it', () => {
+    const { panes, processes } = fixture();
+    const running = parseRunningMonitors('9 node src/monitor.js %1 200\n');
+    const { arm, skipped } = planReconcile({ panes, processes, running });
+    assert.deepEqual(arm, [{ pane: '%2', pid: 400 }]);
+    assert.equal(skipped.find(s => s.pane === '%1').reason, 'already monitored');
+  });
+
   it('never arms the self pane', () => {
     const { panes, processes } = fixture();
     const { arm, skipped } = planReconcile({ panes, processes, running: new Map(), selfPane: '%2' });
