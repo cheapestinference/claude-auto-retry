@@ -12,6 +12,11 @@ const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
 // (a conversation about limits) or a banner the session already scrolled past is not the
 // current state and must not drive a retry. Matches the overload path's tail discipline.
 const RATE_LIMIT_TAIL_LINES = 12;
+// A StopFailure marker arriving more than this after our last event-path retry send is a
+// NEW overload incident (the retry turn succeeded in between), not an escalation of the
+// old one. Sized above Claude Code's own internal attempt-N/10 backoff (which can hold a
+// genuinely-failing turn open for several minutes before the hook fires).
+const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
 
 export function createMonitorState() {
   return {
@@ -233,6 +238,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
 
       state.overloadAttempts++;          // next failure backs off further
+      state._lastEventRetryAt = Date.now();   // incident-gap anchor (see the marker consume)
       state.viaEvent = false;
       state.status = 'monitoring';
       // Remember the banner we just retried via the event path so the always-on scraper
@@ -377,6 +383,16 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     return enterUsageWait(state, stripped, config);
   }
 
+  // Recovery closes an event-path overload incident. That path returns to monitoring
+  // right after its send (edge-triggered), so a later working pane with backoff history
+  // still on the state is the only recovery signal it ever gets — without this reset the
+  // counters leak across fully-recovered incidents: escalated backoffs for unrelated
+  // failures days apart, and eventually every fresh marker consumed as overload-gave-up
+  // at the total-wait cap, permanently. Mirrors the scraper path's 'overload-cleared'.
+  if ((state.overloadAttempts > 0 || state.overloadTotalWaitMs > 0) && isWorking(stripped)) {
+    resetOverload(state);
+  }
+
   // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
   // marker for this pane means the turn ended in a retryable API error — no scraping, no
   // ambiguity. It runs first, but does NOT replace the scraper below: the event path only
@@ -397,6 +413,15 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
       await tmuxAdapter.clearEvent();               // consume
       if (isWorking(stripped)) { resetOverload(state); return 'overload-cleared'; } // self-recovered
+      // Incident boundary: a genuinely failing retry turn re-fails within minutes (even
+      // through Claude's internal attempt N/10 backoff), so a marker arriving long after
+      // our last event-path send means that retry SUCCEEDED and this is a new incident —
+      // fresh backoff budget. The working-tick reset above can miss short responses
+      // entirely at a 30s poll; this gap check is the reliable close, and it also
+      // un-wedges a capped (gave-up) state weeks later without ever observing work.
+      if (state._lastEventRetryAt && Date.now() - state._lastEventRetryAt > OVERLOAD_INCIDENT_GAP_MS) {
+        resetOverload(state);
+      }
       const capMs = overload.maxTotalWaitMinutes * 60_000;
       if (state.overloadTotalWaitMs >= capMs) { state._gaveUp = true; return 'overload-gave-up'; }
       const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);

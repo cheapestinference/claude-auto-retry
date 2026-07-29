@@ -344,6 +344,73 @@ describe('processOneTick — overload path', () => {
     assert.equal(s.overloadAttempts, 0);
   });
 
+  // --- Event-path incidents must not leak backoff state across recoveries. The scraper
+  //     path resets on 'overload-cleared'; the event path returns to monitoring right
+  //     after its send, so recovery is only observable there — a working pane with backoff
+  //     history left over means the retry succeeded and the incident is finished. Without
+  //     the reset, days-apart incidents escalate (2nd waits 60s, 5th+ 300s) until the
+  //     total-wait cap consumes every future marker as overload-gave-up, permanently. ---
+  async function eventIncident(s, cfgObj) {
+    const err = mockTmux('● API Error: 529 Overloaded');
+    err._event = { error: 'overloaded' };
+    const first = await processOneTick(s, err, '%0', cfgObj, () => true, NO_JITTER);
+    const wait = s.overloadWaitUntil - Date.now();
+    s.overloadWaitUntil = Date.now() - 1;
+    await processOneTick(s, err, '%0', cfgObj, () => true, NO_JITTER);        // retry send
+    const ok = mockTmux('Refactor done.\n✻ Thinking… (esc to interrupt)');    // recovery
+    await processOneTick(s, ok, '%0', cfgObj, () => true, NO_JITTER);
+    return { first, wait };
+  }
+  it('resets event-path backoff state once Claude recovers (no leak across incidents)', async () => {
+    const s = createMonitorState();
+    const c = cfg();
+    await eventIncident(s, c);
+    assert.equal(s.overloadAttempts, 0, 'attempts must reset after recovery');
+    assert.equal(s.overloadTotalWaitMs, 0, 'total wait must reset after recovery');
+    const second = await eventIncident(s, c);
+    assert.equal(second.first, 'overload-detected');
+    assert.ok(near(second.wait, 30_000), `2nd incident must start at 30s again, got ${Math.round(second.wait / 1000)}s`);
+  });
+  it('a recovered session un-wedges an event-path give-up (fresh markers act again)', async () => {
+    const s = createMonitorState();
+    const c = cfg({ backoffSeconds: [30], maxTotalWaitMinutes: 0.5 });        // cap = 30s
+    const err = mockTmux('● API Error: 529 Overloaded');
+    err._event = { error: 'overloaded' };
+    await processOneTick(s, err, '%0', c, () => true, NO_JITTER);             // +30s = cap
+    s.overloadWaitUntil = Date.now() - 1;
+    await processOneTick(s, err, '%0', c, () => true, NO_JITTER);             // retry send
+    const ok = mockTmux('All good.\n✻ Thinking… (esc to interrupt)');
+    await processOneTick(s, ok, '%0', c, () => true, NO_JITTER);              // recovery
+    const err2 = mockTmux('● API Error: 529 Overloaded');
+    err2._event = { error: 'overloaded' };
+    assert.equal(await processOneTick(s, err2, '%0', c, () => true, NO_JITTER),
+      'overload-detected', 'a fresh incident after recovery must act, not give up');
+  });
+
+  // The working-tick reset above needs luck (a 30s poll can miss a short response
+  // entirely). The marker GAP is the reliable signal: a genuinely failing retry turn
+  // re-fails within minutes, so a fresh marker long after our last event-path send means
+  // that retry succeeded — new incident, fresh budget. Also what un-wedges a capped
+  // state without ever observing a working tick.
+  it('a fresh marker long after the last event retry starts a NEW incident (idle recovery)', async () => {
+    const s = createMonitorState();
+    s.overloadAttempts = 27; s.overloadTotalWaitMs = 130 * 60_000;            // wedged past cap
+    s._lastEventRetryAt = Date.now() - 16 * 60_000;                           // 16 min ago
+    const err = mockTmux('● API Error: 529 Overloaded');
+    err._event = { error: 'overloaded' };
+    assert.equal(await processOneTick(s, err, '%0', cfg(), () => true, NO_JITTER), 'overload-detected');
+    assert.ok(near(s.overloadWaitUntil - Date.now(), 30_000), 'fresh incident starts at 30s');
+  });
+  it('a marker arriving minutes after the last event retry still escalates (same incident)', async () => {
+    const s = createMonitorState();
+    s.overloadAttempts = 1; s.overloadTotalWaitMs = 30_000;
+    s._lastEventRetryAt = Date.now() - 40_000;                                // 40s ago
+    const err = mockTmux('● API Error: 529 Overloaded');
+    err._event = { error: 'overloaded' };
+    assert.equal(await processOneTick(s, err, '%0', cfg(), () => true, NO_JITTER), 'overload-detected');
+    assert.ok(near(s.overloadWaitUntil - Date.now(), 60_000), 'consecutive failure escalates to 60s');
+  });
+
   it('gives up at the maxTotalWait cap', async () => {
     const t = mockTmux('API Error: 529 Overloaded');
     const c = cfg({ backoffSeconds: [30, 60], maxTotalWaitMinutes: 0.75 }); // cap = 45s
