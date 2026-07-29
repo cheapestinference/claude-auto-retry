@@ -120,15 +120,30 @@ async function launchPrintMode(args) {
   const config = await loadConfig();
   let retries = 0;
 
+  // A piped prompt (`cat doc.md | claude -p`) is read to EOF by the FIRST attempt when
+  // stdin is inherited — a retry would then run claude with an empty prompt and silently
+  // produce a wrong answer. Buffer piped stdin once and re-feed it to every attempt.
+  // A TTY stdin stays inherited (nothing to replay; claude reads the terminal directly).
+  let stdinBuf = null;
+  if (!process.stdin.isTTY) {
+    const parts = [];
+    for await (const chunk of process.stdin) parts.push(chunk);
+    stdinBuf = Buffer.concat(parts);
+  }
+
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const result = await new Promise((resolve) => {
       const chunks = [];
       const errChunks = [];
       const claude = spawn(claudeBin, args, {
-        stdio: ['inherit', 'pipe', 'pipe'],
+        stdio: [stdinBuf ? 'pipe' : 'inherit', 'pipe', 'pipe'],
         env: { ...process.env, CLAUDE_AUTO_RETRY_ACTIVE: '1' },
       });
+      if (stdinBuf) {
+        claude.stdin.on('error', () => {});   // EPIPE if claude exits without reading
+        claude.stdin.end(stdinBuf);
+      }
 
       claude.stdout.on('data', (d) => chunks.push(d));
       claude.stderr.on('data', (d) => errChunks.push(d));
