@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-29
+
 ### Fixed
 - **Adversarial review of this release's own fixes caught and closed seven follow-ups:**
   the stdin buffer now mirrors claude's 3-second no-data grace instead of hanging on a
