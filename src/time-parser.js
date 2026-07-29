@@ -98,19 +98,42 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     // the wrong day whenever the guess landed >12h away in wall-clock terms (banner tz
     // beyond UTC±12 like Pacific/Auckland in summer, or a host/banner offset split >12h)
     // — the off-by-a-day bug. Up to 3 passes for DST convergence.
-    let candidate = guess.getTime();
-    for (let i = 0; i < 3; i++) {
-      const fp = new Intl.DateTimeFormat('en-US', {
-        // hourCycle h23 (not hour12:false): ICU's h24 quirk can render midnight as "24:xx"
-        // paired with the previous day's date, which would skew the date-anchored delta.
-        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
-      }).formatToParts(new Date(candidate));
+    // hourCycle h23 (not hour12:false): ICU's h24 quirk can render midnight as "24:xx"
+    // paired with the previous day's date, which would skew the date-anchored delta.
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    // The candidate's wall-clock rendering in tz, as a comparable UTC-ms scalar.
+    const rendered = (ts) => {
+      const fp = fmt.formatToParts(new Date(ts));
       const get = t => parseInt(fp.find(p => p.type === t).value);
-      const diffMin = (Date.UTC(y, mo, d, h, m)
-        - Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'))) / 60_000;
+      return Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'));
+    };
+    const targetWall = Date.UTC(y, mo, d, h, m);
+
+    let candidate = guess.getTime();
+    let prev = candidate;
+    for (let i = 0; i < 3; i++) {
+      const diffMin = (targetWall - rendered(candidate)) / 60_000;
       if (diffMin === 0) break;
+      prev = candidate;
       candidate += diffMin * 60_000;
+    }
+
+    // DST transition-day resolution — deterministic and host-independent (the loop's
+    // outcome otherwise depends on which side the HOST-local initial guess approached
+    // from). Both resolve to the LATE side: waking an hour late is safe, waking early
+    // finds the banner still live and burns maxRetries.
+    if (rendered(candidate) !== targetWall) {
+      // Nonexistent wall time (spring-forward gap): the loop oscillates between the
+      // instants just before and just after the jump — take the later one (the first
+      // real instant at/after the intended time).
+      candidate = Math.max(candidate, prev);
+    } else if (rendered(candidate + 3600_000) === targetWall) {
+      // Repeated wall time (fall-back): converged on the earlier occurrence — move to
+      // the later one.
+      candidate += 3600_000;
     }
 
     return candidate;
