@@ -49,6 +49,39 @@ describe('calculateWaitMs is host-timezone independent (date-anchored correction
     assert.ok(Math.abs(h - 0.52) < 0.02, `got ${h}h`);
   });
 
+  // --- The roll-to-tomorrow must stay DST-safe. A flat +24h of milliseconds lands 1h
+  //     short of tomorrow's wall-clock time across a fall-back transition (the monitor
+  //     wakes with the banner still live, burns maxRetries, gives up before the real
+  //     reset) and 1h long across spring-forward. Tomorrow's occurrence must be computed
+  //     date-anchored, like today's. ---
+  it('fall-back night (US): "resets 3am" seen Sat 23:05 EDT waits to 3am EST, not 2am', () => {
+    // Sat Oct 31 2026 23:05 EDT; reset Sun Nov 1 03:00 EST = 08:00Z → 4h55m + margin
+    const h = waitHoursIn('America/New_York', "You've hit your 5-hour limit · resets 3am", '2026-11-01T03:05:00Z');
+    assert.ok(Math.abs(h - 4.933) < 0.02, `got ${h}h`);
+  });
+
+  it('fall-back night, banner tz on a UTC host', () => {
+    const h = waitHoursIn('UTC', 'resets 3am (America/New_York)', '2026-11-01T03:05:00Z');
+    assert.ok(Math.abs(h - 4.933) < 0.02, `got ${h}h`);
+  });
+
+  it('fall-back night (EU): "resets at 4:00 AM" seen Sat 23:05 CEST waits to 4am CET', () => {
+    // Sat Oct 24 2026 23:05 CEST; reset Sun Oct 25 04:00 CET = 03:00Z → 5h55m + margin
+    const h = waitHoursIn('Europe/Zurich', 'resets at 4:00 AM', '2026-10-24T21:05:00Z');
+    assert.ok(Math.abs(h - 5.933) < 0.02, `got ${h}h`);
+  });
+
+  it('fall-back night, ambiguous bare-hour roll ("resets 3")', () => {
+    const h = waitHoursIn('America/New_York', 'usage limit reached · resets 3', '2026-11-01T03:05:00Z');
+    assert.ok(Math.abs(h - 4.933) < 0.02, `got ${h}h`);
+  });
+
+  it('spring-forward night (US): "resets 3am" seen Sat 23:05 EST waits to 3am EDT, not 4am', () => {
+    // Sat Mar 13 2027 23:05 EST; reset Sun Mar 14 03:00 EDT = 07:00Z → 2h55m + margin
+    const h = waitHoursIn('America/New_York', 'resets 3am', '2027-03-14T04:05:00Z');
+    assert.ok(Math.abs(h - 2.933) < 0.02, `got ${h}h`);
+  });
+
   it('sanity: normal-offset banner unaffected across hosts', () => {
     const berlin = "You've hit your session limit · resets 3:30pm (Europe/Berlin)";
     const now = '2026-07-19T11:33:00Z'; // 13:33 CEST → 1h57m + margin ≈ 1.97h

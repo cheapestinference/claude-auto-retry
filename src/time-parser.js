@@ -42,12 +42,12 @@ export function parseResetTime(text) {
 // parks the session ~24h even though the limit has effectively cleared (observed live:
 // "resets 10am" detected at 10:03 → 86273s wait). rollPastReset retries promptly instead
 // (diff→0, so the wait is just the margin); only a reset MORE than the grace window in the
-// past plausibly means the next occurrence is tomorrow.
+// past plausibly means the next occurrence is tomorrow — and "tomorrow" must be computed
+// date-anchored (getTargetTimestamp with dayOffset 1), NOT as a flat +24h of milliseconds:
+// across a DST fall-back transition tomorrow's wall-clock time is 25h away, so +24h woke
+// the monitor an hour EARLY with the banner still live (burning maxRetries into a limited
+// session, then giving up before the real reset); spring-forward over-waited an hour.
 const RESET_GRACE_MS = 60 * 60 * 1000; // 1 hour
-function rollPastReset(diffMs) {
-  if (diffMs >= 0) return diffMs;
-  return diffMs > -RESET_GRACE_MS ? 0 : diffMs + 86400_000;
-}
 
 export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, now = new Date()) {
   if (!parsed) return (fallbackHours * 3600 + marginSeconds) * 1000;
@@ -67,18 +67,25 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     return (fallbackHours * 3600 + marginSeconds) * 1000;
   }
 
-  // DST-safe approach: binary search for the correct UTC timestamp
-  // that corresponds to the given hour:minute in the target timezone.
-  function getTargetTimestamp(h, m) {
+  // DST-safe approach: binary search for the correct UTC timestamp that corresponds to
+  // the given hour:minute in the target timezone, on today's date there (dayOffset 0) or
+  // a following day (dayOffset 1 = the roll-to-tomorrow path — anchored to the actual
+  // calendar day so a 23h/25h DST day converges to the right instant).
+  function getTargetTimestamp(h, m, dayOffset = 0) {
     // Get today's date in the target timezone
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
       hour12: false,
     }).formatToParts(now);
 
-    const y = parseInt(parts.find(p => p.type === 'year').value);
-    const mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
-    const d = parseInt(parts.find(p => p.type === 'day').value);
+    let y = parseInt(parts.find(p => p.type === 'year').value);
+    let mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
+    let d = parseInt(parts.find(p => p.type === 'day').value);
+    if (dayOffset) {
+      // Normalize month/year rollover through Date.UTC (calendar-day arithmetic only).
+      const norm = new Date(Date.UTC(y, mo, d + dayOffset));
+      y = norm.getUTCFullYear(); mo = norm.getUTCMonth(); d = norm.getUTCDate();
+    }
 
     // Construct target date string and parse in HOST-local time as the initial guess
     // (a UTC anchor put the guess up to a full offset away; host-local is usually close).
@@ -121,16 +128,24 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     else if (d2 > 0) target = d2;
     else {
       // Both interpretations are past. Grace-check the MOST RECENT one (is it just-passed?);
-      // but if we roll to tomorrow, roll to the EARLIEST occurrence (t1 < t2 always, so
-      // Math.min), not the later pm one — otherwise we wait ~12h longer than necessary.
+      // but if we roll to tomorrow, roll to the EARLIEST occurrence, not the later pm one —
+      // otherwise we wait ~12h longer than necessary. Recompute tomorrow's instant
+      // date-anchored (dayOffset 1) rather than adding flat 24h, which is ±1h across DST.
       const recent = Math.max(d1, d2);
-      target = recent > -RESET_GRACE_MS ? 0 : Math.min(d1, d2) + 86400_000;
+      const earlyHour = d1 <= d2 ? parsed.hour : (parsed.hour + 12) % 24;
+      target = recent > -RESET_GRACE_MS ? 0
+        : getTargetTimestamp(earlyHour, parsed.minute, 1) - now.getTime();
     }
 
     return Math.max(0, target) + marginSeconds * 1000;
   }
 
-  const diff = rollPastReset(getTargetTimestamp(parsed.hour, parsed.minute) - now.getTime());
+  // Roll a stale (past-grace) reset to TOMORROW's occurrence, date-anchored (see the
+  // RESET_GRACE_MS comment for both the grace rationale and why not a flat +24h).
+  const today = getTargetTimestamp(parsed.hour, parsed.minute) - now.getTime();
+  const diff = today >= 0 ? today
+    : today > -RESET_GRACE_MS ? 0
+    : getTargetTimestamp(parsed.hour, parsed.minute, 1) - now.getTime();
 
   return diff + marginSeconds * 1000;
 }
