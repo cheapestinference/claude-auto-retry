@@ -158,8 +158,10 @@ function hasNearbyMatch(lines, idx, patterns, mask = null) {
 // your session limit …` — an observed live incident this suite pins). The mask is always
 // computed over the FULL pane and sliced to the detection window afterwards: a window that
 // starts mid-block (tool result taller than the tail) must still know its leading lines
-// are children of a header above the window. Known limit: a header wrapped (not
-// truncated) across rows leaves its continuation unmasked.
+// are children of a header above the window. Known limits: a header wrapped (not
+// truncated) across rows leaves its continuation unmasked, and "full pane" means the
+// captured pane — a result block taller than the monitor's ~120-line capture leaves its
+// header outside the capture entirely, and the leading children are unmasked again.
 const TOOL_ECHO_HEADER = /^\s*[●⏺∙]\s*\S+\(/;   // "● Bash(grep …", "⏺ Read(file …"
 const TOOL_ECHO_RESULT = /^\s*[⎿└]/;             // "  ⎿  3"
 export function toolEchoMask(lines) {
