@@ -78,14 +78,53 @@ async function checkForeground(tmuxAdapter, pane, config) {
   return { ok: false, fg, isShell };
 }
 
-function enterUsageWait(state, stripped, config) {
+// Reset text on screen → the absolute instant to wake up at. One source of truth for the
+// three callers that need it: first detection, the /rate-limit-options menu path, and the
+// mid-wait correction below. `parsed` is surfaced so callers can tell a real reset time
+// from the fallbackWaitHours default that calculateWaitMs returns for an unreadable screen.
+function usageWaitUntil(stripped, config) {
   const message = findRateLimitMessage(stripped, config.customPatterns);
-  state.lastRateLimitMessage = message;
   const parsed = message ? parseResetTime(message) : null;
-  state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  const until = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  return { message, parsed, until };
+}
+
+function enterUsageWait(state, stripped, config) {
+  const { message, until } = usageWaitUntil(stripped, config);
+  state.lastRateLimitMessage = message;
+  state.waitUntil = until;
   state.status = 'waiting';
   state._gaveUp = false;
   return 'waiting';
+}
+
+// Re-derive the wake-up from the LIVE banner while already waiting, and pull it earlier
+// when the standing wait is too long.
+//
+// A wait computed from a screen that carried no parseable reset time lands on the
+// fallbackWaitHours default — potentially hours past the real reset. The
+// /rate-limit-options menu is the common source: it renders the options but not always the
+// reset line, while the banner Claude Code prints right after confirming DOES carry the
+// time. The waiting branch returned early on every tick and never looked at the pane again,
+// so that banner was ignored for the entire fallback (observed live: "resets 6:20pm"
+// detected via the menu at 17:26, monitor parked until 22:27 with attempts:0 while the
+// banner sat on screen the whole time — ~4h of a reset session doing nothing).
+//
+// Two bounds, both load-bearing:
+//   - SHORTEN ONLY. An unreadable screen re-derives the same multi-hour fallback, and a
+//     banner drifting through the tail must never be able to postpone the retry.
+//   - Only before the first send of this episode (attempts === 0). After a send, waitUntil
+//     is the 30s cooldown — and after max-retries it is the long give-up backoff. Both are
+//     deliberately unrelated to the reset time, and re-deriving against an already-passed
+//     reset collapses them to the margin, burning every attempt in a few ticks.
+function correctUsageWait(state, stripped, config) {
+  if (state.attempts > 0) return false;
+  if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) return false;
+  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  if (!parsed || until >= state.waitUntil) return false;
+  state.waitUntil = until;
+  state.lastRateLimitMessage = message;
+  return true;
 }
 
 function enterOverload(state, overload, rand) {
@@ -147,13 +186,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       await new Promise(r => setTimeout(r, 80));
     }
     await tmuxAdapter.sendKey(pane, 'Enter');
-    // Parse the reset time straight from the menu text, so the wait does not depend
-    // on the limit banner still being visible afterward.
-    const message = findRateLimitMessage(stripped, config.customPatterns);
-    state.lastRateLimitMessage = message;
-    const parsed = message ? parseResetTime(message) : null;
-    state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
-    state.status = 'waiting';
+    // Parse the reset time straight from the menu text, so the wait does not depend on the
+    // limit banner still being visible afterward. The menu does not always RENDER a reset
+    // line, though — that lands on the fallbackWaitHours default, which correctUsageWait
+    // then pulls back in once Claude Code prints the real banner post-confirm.
+    enterUsageWait(state, stripped, config);
     state._menuCooldownUntil = Date.now() + cooldown;
     return 'menu-confirmed';
   }
@@ -167,7 +204,12 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // transcript text (a flaky deploy log ABOVE a live banner), and treating that as
     // "continued" churned waiting↔user-continued forever without ever sending the retry.
     // Resumed = working signal rendered BELOW the last banner line.
-    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) return 'waiting';
+    // Before honouring the countdown, re-read the banner: the standing wait may have been
+    // derived from a screen that never showed the reset time (see correctUsageWait).
+    const corrected = correctUsageWait(state, stripped, config);
+    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+      return corrected ? 'wait-corrected' : 'waiting';
+    }
     if (!isAlive()) return 'exit';
 
     // Stop driving the session if the limit cleared OR Claude has already resumed and
@@ -560,6 +602,11 @@ export async function startMonitor(pane, pid) {
       if (result === 'menu-confirmed') {
         const secs = Math.round((state.waitUntil - Date.now()) / 1000);
         await logger.info(`Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
+        state.lastRateLimitMessage = null;
+      }
+      if (result === 'wait-corrected') {
+        const secs = Math.round((state.waitUntil - Date.now()) / 1000);
+        await logger.info(`Reset time re-read from the live banner: "${state.lastRateLimitMessage}". Wait shortened to ${secs}s.`);
         state.lastRateLimitMessage = null;
       }
       if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');

@@ -118,6 +118,76 @@ describe('processOneTick', () => {
     assert.ok(s.waitUntil > Date.now());
   });
 
+  // --- Regression (#71): a wait computed from a screen with no parseable reset time
+  //     (the /rate-limit-options menu) lands on the fallbackWaitHours default and used to
+  //     stand forever, because the waiting branch returned early and never looked at the
+  //     pane again. Observed live: reset 6:20pm, monitor parked until 10:27pm with
+  //     attempts:0 while the banner carrying the real time sat on screen the whole time. ---
+  const FALLBACK_MS = (DEFAULT_CONFIG.fallbackWaitHours * 3600 + DEFAULT_CONFIG.marginSeconds) * 1000;
+  // A limit banner whose reset time is `msFromNow` away on the HOST clock (no timezone
+  // parenthetical, so parseResetTime defaults to the host zone the same way a real
+  // banner in the local zone does).
+  function bannerAt(msFromNow) {
+    const d = new Date(Date.now() + msFromNow);
+    const h = d.getHours(), m = d.getMinutes();
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `You've hit your session limit · resets ${h12}:${String(m).padStart(2, '0')}${h >= 12 ? 'pm' : 'am'}`;
+  }
+
+  it('shortens a fallback wait once the banner with the real reset time is on screen', async () => {
+    // The live incident: menu path committed the 5h fallback, real reset was ~30min ago.
+    const t = mockTmux(bannerAt(-30 * 60_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
+    assert.equal(t._sent.length, 0);            // corrects the clock, does not send yet
+    // Reset already passed (inside the grace window) → wait collapses to just the margin.
+    assert.ok(s.waitUntil <= Date.now() + (DEFAULT_CONFIG.marginSeconds + 5) * 1000,
+      `expected a margin-sized wait, got ${Math.round((s.waitUntil - Date.now()) / 1000)}s`);
+  });
+
+  it('shortens to a still-future reset without sending', async () => {
+    const t = mockTmux(bannerAt(2 * 3600_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
+    assert.equal(t._sent.length, 0);
+    const secs = (s.waitUntil - Date.now()) / 1000;
+    assert.ok(secs > 3600 && secs < 3 * 3600, `expected ~2h, got ${Math.round(secs)}s`);
+  });
+
+  it('never LENGTHENS the wait from the banner', async () => {
+    // A banner reading later than the current wait (or drifting stale scrollback) must not
+    // push the wake-up out — that would postpone the retry indefinitely.
+    const t = mockTmux(bannerAt(2 * 3600_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + 30 * 60_000;
+    const before = s.waitUntil;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.waitUntil, before);
+  });
+
+  it('does not correct once a retry has been sent (cooldown owns the pacing)', async () => {
+    // After a send, waitUntil is the 30s cooldown; re-deriving it from a banner that is
+    // already past would collapse it to ~0 and burn every attempt in a few ticks.
+    const t = mockTmux(bannerAt(-30 * 60_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.attempts = 1; s.waitUntil = Date.now() + FALLBACK_MS;
+    const before = s.waitUntil;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.waitUntil, before);
+    assert.equal(t._sent.length, 0);
+  });
+
+  it('sends immediately when the corrected wait has already elapsed', async () => {
+    const cfg = { ...DEFAULT_CONFIG, marginSeconds: 0 };
+    const t = mockTmux(bannerAt(-30 * 60_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS;
+    assert.equal(await processOneTick(s, t, '%0', cfg, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+  });
+
   // --- Regression: do not spam an already-resumed session. The usage path used to
   //     re-send every poll (up to maxRetries) while the limit banner lingered in
   //     scrollback after a successful resume — observed live as 5 injections into a
