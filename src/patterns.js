@@ -103,10 +103,14 @@ const isChromeLine = (l) => !isWorkingLine(l) && CHROME_LINE.some((r) => r.test(
 // chrome-stripping would otherwise expose it — bounding content-distance for the overload
 // path (Finding 6), where a terminal error sits just above the input box and anything
 // reachable only past a tall widget is stale scrollback, not a live error.
-function contentTail(lines, n, maxRaw = Infinity) {
+function contentTailRange(lines, n, maxRaw = Infinity) {
   let end = lines.length;
   while (end > 0 && isChromeLine(lines[end - 1])) end--;
   const start = Math.max(0, end - n, lines.length - maxRaw);
+  return { start, end };
+}
+function contentTail(lines, n, maxRaw = Infinity) {
+  const { start, end } = contentTailRange(lines, n, maxRaw);
   return lines.slice(start, end);
 }
 
@@ -133,13 +137,43 @@ const RESET_PATTERNS = [
 
 const WINDOW = 6;
 
-function hasNearbyMatch(lines, idx, patterns) {
+function hasNearbyMatch(lines, idx, patterns, mask = null) {
   const start = Math.max(0, idx - WINDOW);
   const end = Math.min(lines.length, idx + WINDOW + 1);
   for (let j = start; j < end; j++) {
+    if (mask && mask[j]) continue;
     if (patterns.some(p => p.test(lines[j]))) return true;
   }
   return false;
+}
+
+// --- Tool-call echo (#63) ---
+// Error/limit text inside a tool-call render — a grep argument, a quoted log line in the
+// result block — is text ABOUT an error, never the live state, yet it sits in the most
+// recent content rows where the tail window rightly looks. Mask the `● Name(` header (the
+// glyph alone doesn't discriminate — real API errors render `● API Error: …` too, but
+// never as `Name(…)`) and the `⎿`/`└`/indented children UNDER such a header. Result
+// markers must NOT mask on their own: a live banner interrupting a tool/agent call
+// renders as a `└` child of a NON-`Name(` notice (`● Agent "…" finished` → `└ You've hit
+// your session limit …` — an observed live incident this suite pins). The mask is always
+// computed over the FULL pane and sliced to the detection window afterwards: a window that
+// starts mid-block (tool result taller than the tail) must still know its leading lines
+// are children of a header above the window. Known limits: a header wrapped (not
+// truncated) across rows leaves its continuation unmasked, and "full pane" means the
+// captured pane — a result block taller than the monitor's ~120-line capture leaves its
+// header outside the capture entirely, and the leading children are unmasked again.
+const TOOL_ECHO_HEADER = /^\s*[●⏺∙]\s*\S+\(/;   // "● Bash(grep …", "⏺ Read(file …"
+const TOOL_ECHO_RESULT = /^\s*[⎿└]/;             // "  ⎿  3"
+export function toolEchoMask(lines) {
+  const mask = new Array(lines.length).fill(false);
+  let inBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (TOOL_ECHO_HEADER.test(l)) { inBlock = true; mask[i] = true; continue; }
+    if (inBlock && (TOOL_ECHO_RESULT.test(l) || (/^\s/.test(l) && l.trim() !== ''))) { mask[i] = true; continue; }
+    inBlock = false;
+  }
+  return mask;
 }
 
 // tailLines > 0 restricts detection to the last N lines of the pane. A live usage-limit
@@ -152,7 +186,18 @@ function hasNearbyMatch(lines, idx, patterns) {
 export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   const all = stripAnsi(text).split('\n');
   // Chrome-aware window: trailing UI furniture doesn't consume the tail budget.
-  const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
+  // Tool-echo mask (#63), TUI only: print mode scans process output where quoted error
+  // shapes ARE the real signal. The window is applied first (echo lines still consume
+  // tail budget, so the window can't reach past a tall tool render into stale
+  // scrollback), but the mask itself is computed over the FULL pane and sliced — a
+  // result block taller than the window would otherwise hide its own `● Name(` header
+  // above the window and leave the quoted children unmasked.
+  let lines = all, mask = null;
+  if (tailLines > 0) {
+    const { start, end } = contentTailRange(all, tailLines);
+    lines = all.slice(start, end);
+    mask = toolEchoMask(all).slice(start, end);
+  }
 
   // Custom patterns test the RAW tail, not the chrome-stripped window (Finding 4). The
   // user owns their own false-positive tradeoff, so a pattern keyed on footer text (a
@@ -175,14 +220,17 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   // the backstop fires on that (up to maxRetries injections + a ~24h wait). (Only when
   // tail-scoped; print mode uses the full scan below.)
   if (tailLines > 0) {
-    const companionIdx = all.findLastIndex((l) => USAGE_CREDITS.test(l));
+    // The companion must not itself be tool echo (a grep for "/usage-credits" quoting
+    // banner text would otherwise satisfy both the companion and the nearby-reset check).
+    const fullMask = toolEchoMask(all);
+    const companionIdx = all.findLastIndex((l, i) => !fullMask[i] && USAGE_CREDITS.test(l));
     // Require a RESET line nearby — NOT just a LIMIT line. A live limit banner always prints
     // its reset time next to the companion; a session merely *explaining* usage limits ("when
     // you hit your usage limit you can run /usage-credits …") has the companion + a loose
     // "usage limit" LIMIT match but no reset time, and would otherwise false-fire a retry.
     if (companionIdx !== -1
         && all.slice(companionIdx + 1).every(isChromeLine)
-        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS)) {
+        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS, fullMask)) {
       return true;
     }
   }
@@ -190,12 +238,36 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   // Find a "limit" line with a "resets" line nearby (works for both
   // single-line messages and multi-line TUI renders)
   for (let i = 0; i < lines.length; i++) {
+    if (mask && mask[i]) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) {
-      if (hasNearbyMatch(lines, i, RESET_PATTERNS)) return true;
+      if (hasNearbyMatch(lines, i, RESET_PATTERNS, mask)) return true;
     }
   }
 
   return false;
+}
+
+// Has the session RESUMED past its limit banner? Used by the monitor's waiting branch,
+// where plain isWorking() was too loose: `Retrying in …`/`attempt N/M` match transcript
+// text, so a flaky-deploy log line lingering ABOVE a live banner made every expiry tick
+// look like "user continued" — the monitor churned waiting↔user-continued forever and
+// never sent the retry. Ordering is the discriminator: a session that actually resumed
+// renders its new work BELOW the banner; working lines above it are history. When no
+// banner is in the window (scrolled away after a real resume, or entered via custom
+// patterns), fall back to plain isWorking — same behavior as before.
+export function resumedAfterLimit(text, tailLines = 0) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines)
+    : { start: 0, end: all.length };
+  const lines = all.slice(start, end);
+  const mask = toolEchoMask(all).slice(start, end);
+  let lastLimit = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue;
+    if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) lastLimit = i;
+  }
+  if (lastLimit === -1) return isWorking(text);
+  return lines.slice(lastLimit + 1).some(isWorkingLine);
 }
 
 // --- Interactive /rate-limit-options menu ---
@@ -276,8 +348,13 @@ const OVERLOAD_MAX_RAW_LINES = 20;
 // Chrome-aware tail for the overload detectors: a terminal error can be pushed up by the
 // same widgets that pushed the limit banner, so strip trailing chrome first — but bound
 // the reach so a widget-buried stale error stays out.
+// Windowed lines PLUS their tool-echo mask (#63). The mask is computed on the full pane
+// and sliced to the window, so a result block taller than the window keeps its children
+// masked even when the `● Name(` header sits above the window.
 function tail(text) {
-  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES, OVERLOAD_MAX_RAW_LINES);
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = contentTailRange(all, OVERLOAD_TAIL_LINES, OVERLOAD_MAX_RAW_LINES);
+  return { lines: all.slice(start, end), mask: toolEchoMask(all).slice(start, end) };
 }
 
 // Compile a config pattern (string → case-insensitive RegExp) once per call. Invalid
@@ -306,12 +383,15 @@ const OVERLOAD_ANCHOR = [/\bAPI Error\b/i];
 // logged no reason at all).
 export function overloadMatch(text, patterns = []) {
   if (!patterns || patterns.length === 0) return null;
-  const lines = tail(text);
+  // Tool-echo mask (#63): a quoted "API Error: 529 overloaded" in a Bash() render carries
+  // its own anchor on the same line, so the anchor discipline alone can't reject it.
+  const { lines, mask } = tail(text);
   if (!lines.join('').trim()) return null;
   const regexes = toRegexes(patterns);
   for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue;
     for (const r of regexes) {
-      if (r.test(lines[i]) && hasNearbyMatch(lines, i, OVERLOAD_ANCHOR)) {
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, OVERLOAD_ANCHOR, mask)) {
         return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
       }
     }
@@ -341,12 +421,15 @@ const SAFEGUARD_ANCHOR = [/\bAPI Error\b/i];
 
 export function safeguardMatch(text, patterns = []) {
   if (!patterns || patterns.length === 0) return null;
-  const lines = tail(text);
+  // Same tool-echo discipline as overloadMatch (#63): a quoted safeguard line in a tool
+  // render can sit next to a quoted API Error anchor.
+  const { lines, mask } = tail(text);
   if (!lines.join('').trim()) return null;
   const regexes = toRegexes(patterns);
   for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue;
     for (const r of regexes) {
-      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR)) {
+      if (r.test(lines[i]) && hasNearbyMatch(lines, i, SAFEGUARD_ANCHOR, mask)) {
         return { pattern: r.source, line: lines[i].trim().slice(0, 200) };
       }
     }
@@ -367,19 +450,36 @@ export function isWorking(text) {
   return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES).some(isWorkingLine);
 }
 
+// Claude Code's OWN internal-retry render ("… · Retrying in 5s · attempt 3/10"). It
+// satisfies isWorking (the turn is open and must not be interrupted), but it is the
+// opposite of RECOVERY — the turn is still failing. Consumers inferring "the incident
+// ended well" from a working pane (the event-path overload budget reset) must exclude it,
+// or a sustained outage's in-flight retries zero the backoff budget every cycle and the
+// give-up cap never trips.
+const INTERNAL_RETRY_PATTERNS = [/Retrying in\b/i, /\battempt\s+\d+\/\d+/i];
+export function isInternalRetry(text) {
+  return contentTail(stripAnsi(text).split('\n'), OVERLOAD_TAIL_LINES)
+    .some((l) => INTERNAL_RETRY_PATTERNS.some((p) => p.test(l)));
+}
+
 export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
+  // Tool-echo mask (#63): without it, a quoted "resets 9am" in a fresh grep line below a
+  // real banner would win the bottom-up scan and be parsed instead of the banner.
+  const mask = toolEchoMask(lines);
 
   // Scan from the bottom up — the most recent "resets" line is the one to
   // parse. The Claude TUI never clears earlier rate-limit messages from
   // scrollback, so a forward scan would lock onto a stale line (e.g. an old
   // "resets 11:30am" lingering above a fresh "resets 4:30pm").
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (mask[i]) continue;
     if (RESET_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 
   // Fallback: any "limit" line, also scanned from the bottom.
   for (let i = lines.length - 1; i >= 0; i--) {
+    if (mask[i]) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 

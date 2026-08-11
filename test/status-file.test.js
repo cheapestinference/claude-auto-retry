@@ -37,6 +37,21 @@ describe('per-pane status file', () => {
     assert.ok(files.includes('default__7.json'), files.join(','));
   });
 
+  // Reconcile/timer-armed monitors have no $TMUX (the systemd/launchd job runs outside
+  // any client), so they wrote under the 'default' key while the status-bar reader looks
+  // up by #{socket_path} — permanently blank segment for every self-healed monitor.
+  // Reconcile now passes the enumerated server's socket via CLAUDE_AUTO_RETRY_SOCKET.
+  it('prefers CLAUDE_AUTO_RETRY_SOCKET over $TMUX for the socket key', async () => {
+    process.env.CLAUDE_AUTO_RETRY_SOCKET = '/tmp/tmux-1000/default';
+    try {
+      await writeStatus('%7', { status: 'monitoring' }, dir);
+      const files = await readdir(dir);
+      assert.ok(files.includes('_tmp_tmux-1000_default__7.json'), files.join(','));
+    } finally {
+      delete process.env.CLAUDE_AUTO_RETRY_SOCKET;
+    }
+  });
+
   it('returns null for an absent pane', async () => {
     assert.equal(await readStatus('%99', dir), null);
   });

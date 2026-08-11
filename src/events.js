@@ -13,7 +13,7 @@
 import { mkdir, writeFile, readFile, unlink, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { sanitizeKey } from './pane-key.js';
+import { sanitizeKey, socketIdFromEnv } from './pane-key.js';
 
 export const EVENTS_DIR = join(homedir(), '.claude-auto-retry', 'events');
 
@@ -43,7 +43,18 @@ export function isUsageLimitError(errorType) {
 }
 
 // tmux pane ids look like "%2"; keep the marker filename to a safe charset.
+// tmux pane ids look like "%2"; keep the marker filename to a safe charset. Prefixed by
+// the server's socket key (like status files): pane ids are only unique per tmux server,
+// so a bare-pane filename let `tmux -L work`'s %2 marker be consumed by the monitor
+// watching the default server's %2 — the wrong session got retried and the owner missed
+// its event. Both sides can key this: the hook inherits $TMUX from inside the pane, the
+// monitor has $TMUX (wrapper-armed) or CLAUDE_AUTO_RETRY_SOCKET (reconcile-armed).
 function fileFor(paneKey, dir) {
+  return join(dir, `${sanitizeKey(socketIdFromEnv())}_${sanitizeKey(paneKey)}.json`);
+}
+// Pre-socket-key filename: markers written by an older installed hook. Readers fall back
+// to it so an upgrade doesn't silently drop events mid-flight.
+function legacyFileFor(paneKey, dir) {
   return join(dir, `${sanitizeKey(paneKey)}.json`);
 }
 
@@ -69,13 +80,17 @@ export async function writeStopFailureEvent(paneKey, payload, dir = EVENTS_DIR) 
 // Daemon side: return a fresh marker for the pane, or null (absent / unparseable / stale).
 export async function readStopFailureEvent(paneKey, maxAgeMs, dir = EVENTS_DIR) {
   if (!paneKey) return null;
-  try {
-    const ev = JSON.parse(await readFile(fileFor(paneKey, dir), 'utf-8'));
-    if (typeof ev.ts !== 'number' || Date.now() - ev.ts > maxAgeMs) return null;
-    return ev;
-  } catch { return null; }
+  for (const file of [fileFor(paneKey, dir), legacyFileFor(paneKey, dir)]) {
+    try {
+      const ev = JSON.parse(await readFile(file, 'utf-8'));
+      if (typeof ev.ts !== 'number' || Date.now() - ev.ts > maxAgeMs) continue;
+      return ev;
+    } catch { /* absent / unparseable — try the next form */ }
+  }
+  return null;
 }
 
 export async function clearStopFailureEvent(paneKey, dir = EVENTS_DIR) {
   try { await unlink(fileFor(paneKey, dir)); } catch { /* already gone */ }
+  try { await unlink(legacyFileFor(paneKey, dir)); } catch { /* already gone */ }
 }

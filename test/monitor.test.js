@@ -222,6 +222,42 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, mockTmux(pane), '%0', DEFAULT_CONFIG, () => true), 'waiting');
     assert.equal(s.status, 'waiting');   // NOT suppressed by the transcript over-match
   });
+  // --- F1 follow-up: detection surviving the transcript over-match is not enough — the
+  //     WAITING branch's isWorking gate flipped the same pane to 'user-continued' at every
+  //     expiry tick, churning waiting↔user-continued forever with zero sends. "Resumed"
+  //     must mean working signal BELOW the last banner line; work above it is history. ---
+  const F1_PANE = [
+    '  ⎿  deploying… Retrying in 5s (attempt 2/3)...',
+    '  ⎿  deploy failed after 3 attempts',
+    "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+  ].join('\n');
+  it('F1 pane at wait expiry: the stale transcript must not suppress the retry send', async () => {
+    const t = mockTmux(F1_PANE);
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+  });
+  it('F1 pane mid-wait keeps counting down (not flipped to user-continued)', async () => {
+    const t = mockTmux(F1_PANE);
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + 60_000;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(t._sent.length, 0);
+  });
+  it('LIVE work below the banner still reads as user-continued (no injection)', async () => {
+    const pane = [
+      "You've hit your session limit · resets 3pm (UTC)",
+      '● Continuing with the refactor…',
+      '✻ Thinking… (esc to interrupt)',
+    ].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(t._sent.length, 0);
+  });
+
   // Counter-repro: a genuinely limited, IDLE session whose scrollback contains a finished
   // agent's "Backgrounded agent" transcript line MUST still be retried — the transcript
   // notice is not working state.

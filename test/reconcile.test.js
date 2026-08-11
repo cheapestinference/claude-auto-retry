@@ -32,6 +32,16 @@ describe('reconcile parsing', () => {
     const p = parsePanes('%1 460807\n%10 1642861\n\n');
     assert.deepEqual(p, [{ pane: '%1', panePid: 460807 }, { pane: '%10', panePid: 1642861 }]);
   });
+  it('parses the socket path third field (spaces preserved) when present', () => {
+    const p = parsePanes('%1 460807 /tmp/tmux-1000/my socket\n');
+    assert.deepEqual(p, [{ pane: '%1', panePid: 460807, socket: '/tmp/tmux-1000/my socket' }]);
+  });
+  it('preserves consecutive spaces in the socket path verbatim', () => {
+    // Collapsing "  " to " " breaks the status key match against #{socket_path} — the
+    // exact blank-segment bug the socket plumbing exists to fix.
+    const p = parsePanes('%0 1103083 /tmp/car bugrev  x/sock\n');
+    assert.deepEqual(p, [{ pane: '%0', panePid: 1103083, socket: '/tmp/car bugrev  x/sock' }]);
+  });
   it('parses ps output with comm and args (args is the trailing field)', () => {
     const p = parseProcesses('1842917 460471 Sl+ claude claude -p "do a thing"\n460471 1 Ss bash -bash\n');
     assert.deepEqual(p[0], { pid: 1842917, ppid: 460471, stat: 'Sl+', comm: 'claude', args: 'claude -p "do a thing"' });
@@ -227,6 +237,27 @@ describe('planReconcile', () => {
   });
 
   it('skips a pane that already has a monitor', () => {
+    const { panes, processes } = fixture();
+    const running = parseRunningMonitors('9 node src/monitor.js %1 200\n');
+    const { arm, skipped } = planReconcile({ panes, processes, running });
+    assert.deepEqual(arm, [{ pane: '%2', pid: 400 }]);
+    assert.equal(skipped.find(s => s.pane === '%1').reason, 'already monitored');
+  });
+
+  // --- Pane ids are only unique per tmux SERVER, but the monitor pgrep is global: a
+  //     monitor watching %1 on `tmux -L work` must not mask the default server's %1
+  //     forever. Coverage only counts when the monitored claude PID actually maps to
+  //     that pane on THIS server's pane tree. ---
+  it('a monitor for the same pane id on ANOTHER tmux server does not mask this one', () => {
+    const { panes, processes } = fixture();
+    // Monitor watching "%1" but for pid 7100 — a claude that lives on a different
+    // server (not in this server's process tree at all).
+    const running = parseRunningMonitors('9 node src/monitor.js %1 7100\n');
+    const { arm } = planReconcile({ panes, processes, running });
+    assert.deepEqual(arm.sort((a, b) => a.pane < b.pane ? -1 : 1),
+      [{ pane: '%1', pid: 200 }, { pane: '%2', pid: 400 }]);
+  });
+  it('a monitor whose claude pid maps to the pane on THIS server still covers it', () => {
     const { panes, processes } = fixture();
     const running = parseRunningMonitors('9 node src/monitor.js %1 200\n');
     const { arm, skipped } = planReconcile({ panes, processes, running });
@@ -444,6 +475,60 @@ describe('planReconcile', () => {
     const processes = [
       { pid: 500, ppid: 1, stat: 'Ss', comm: 'bash' },
       { pid: 510, ppid: 500, stat: 'Rl+', comm: 'node', args: 'node /home/u/.local/bin/claude -p "summarize"' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+
+  // --- #49 review follow-up 1: nodeScript must skip a node flag's SEPARATE value, or it
+  //     mistakes the value for the script — missing a preload-instrumented claude and
+  //     false-matching an unrelated node process whose require path ends in "claude". ---
+  it('arms a node-launched claude started with a preload flag (node -r <mod> …/claude)', () => {
+    const panes = [{ pane: '%40', panePid: 4000 }];
+    const processes = [
+      { pid: 4000, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4010, ppid: 4000, stat: 'Sl+', comm: 'node', args: 'node --require /opt/pre.js /home/u/.local/bin/claude --resume' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%40', pid: 4010 }]);
+  });
+  it('does NOT false-match a node process whose --require value path ends in "claude"', () => {
+    const panes = [{ pane: '%41', panePid: 4100 }];
+    const processes = [
+      { pid: 4100, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4110, ppid: 4100, stat: 'Sl+', comm: 'node', args: 'node -r /opt/claude /app/server.js' }, // real script is server.js
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+
+  // --- #49 review follow-up 2: a launcher wrapping print mode must be skipped — isPrintMode
+  //     stopped at the wrapper's first positional ("claude") and never saw the -p after it. ---
+  it('does NOT arm a launcher wrapping a print-mode claude (node …/wrap claude -p)', () => {
+    const panes = [{ pane: '%42', panePid: 4200 }];
+    const processes = [
+      { pid: 4200, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4210, ppid: 4200, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js' },
+      { pid: 4220, ppid: 4210, stat: 'Sl+', comm: 'node', args: 'node /home/u/.local/bin/wrap claude -p' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
+  });
+  it('still arms a launcher wrapping an interactive claude (node …/happier claude -c)', () => {
+    const panes = [{ pane: '%43', panePid: 4300 }];
+    const processes = [
+      { pid: 4300, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4310, ppid: 4300, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js -c' },
+      { pid: 4320, ppid: 4310, stat: 'Sl+', comm: 'node', args: 'node /home/u/.local/bin/happier claude -c' },
+    ];
+    assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, [{ pane: '%43', pid: 4320 }]);
+  });
+
+  // --- #49 review follow-up 3: don't blindly trust "the launcher only spawns claude" —
+  //     verify the child is claude-shaped, so a launcher child that isn't claude (a helper,
+  //     or a mis-detected process) doesn't get a send-keys monitor. ---
+  it('does NOT arm a launcher child that is not claude-shaped', () => {
+    const panes = [{ pane: '%44', panePid: 4400 }];
+    const processes = [
+      { pid: 4400, ppid: 1, stat: 'Ss', comm: 'bash' },
+      { pid: 4410, ppid: 4400, stat: 'Sl', comm: 'node', args: 'node /opt/car/src/launcher.js' },
+      { pid: 4420, ppid: 4410, stat: 'Sl+', comm: 'node', args: 'node /app/build.js' }, // not claude
     ];
     assert.deepEqual(planReconcile({ panes, processes, running: new Map() }).arm, []);
   });

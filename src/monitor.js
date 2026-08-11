@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -13,6 +13,11 @@ const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
 // (a conversation about limits) or a banner the session already scrolled past is not the
 // current state and must not drive a retry. Matches the overload path's tail discipline.
 const RATE_LIMIT_TAIL_LINES = 12;
+// A StopFailure marker arriving more than this after our last event-path retry send is a
+// NEW overload incident (the retry turn succeeded in between), not an escalation of the
+// old one. Sized above Claude Code's own internal attempt-N/10 backoff (which can hold a
+// genuinely-failing turn open for several minutes before the hook fires).
+const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
 
 export function createMonitorState() {
   return {
@@ -155,20 +160,24 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   }
 
   if (state.status === 'waiting') {
-    // Keep counting down UNLESS the session has resumed working. A working pane means
+    // Keep counting down UNLESS the session has resumed working. A resumed pane means
     // the user manually continued (often to unstick a wrong/stale wait) — falling through
-    // to the isWorking gate below returns us to monitoring, so a SECOND, genuine limit that
+    // to the gate below returns us to monitoring, so a SECOND, genuine limit that
     // follows is detected instead of being masked until the old timer expires (issue #39).
-    if (Date.now() < state.waitUntil && !isWorking(stripped)) return 'waiting';
+    // resumedAfterLimit, not plain isWorking: `Retrying in …`/`attempt N/M` also match
+    // transcript text (a flaky deploy log ABOVE a live banner), and treating that as
+    // "continued" churned waiting↔user-continued forever without ever sending the retry.
+    // Resumed = working signal rendered BELOW the last banner line.
+    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) return 'waiting';
     if (!isAlive()) return 'exit';
 
     // Stop driving the session if the limit cleared OR Claude has already resumed and
-    // is working again. Without the isWorking gate the usage path re-sends the retry
+    // is working again. Without the resumed gate the usage path re-sends the retry
     // message every poll (up to maxRetries) while the limit banner lingers in the
     // captured scrollback after a successful resume — spamming an actively-working
     // session (and a banner re-printed by another process keeps it "rate-limited" the
-    // whole time). isWorking ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || isWorking(stripped)) {
+    // whole time). Resumed ⇒ the session continued; never inject into it.
+    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       return 'user-continued';
     }
@@ -234,6 +243,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
 
       state.overloadAttempts++;          // next failure backs off further
+      state._lastEventRetryAt = Date.now();   // incident-gap anchor (see the marker consume)
       state.viaEvent = false;
       state.status = 'monitoring';
       // Remember the banner we just retried via the event path so the always-on scraper
@@ -378,6 +388,26 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     return enterUsageWait(state, stripped, config);
   }
 
+  // Recovery closes an event-path overload incident. That path returns to monitoring
+  // right after its send (edge-triggered), so a later working pane with backoff history
+  // still on the state is the only recovery signal it ever gets — without this reset the
+  // counters leak across fully-recovered incidents: escalated backoffs for unrelated
+  // failures days apart, and eventually every fresh marker consumed as overload-gave-up
+  // at the total-wait cap, permanently. Mirrors the scraper path's 'overload-cleared'.
+  // Two carve-outs (both real regressions caught in review): (1) an in-flight internal
+  // retry ("Retrying in 5s · attempt 3/10") satisfies isWorking but means the turn is
+  // STILL FAILING — resetting on it re-zeroes the budget every cycle of a sustained
+  // outage and the give-up cap never trips; (2) the same-banner memo must survive the
+  // reset — the banner this memo suppresses can still be on screen, and clearing it lets
+  // the scraper re-fire and inject into the recovered session. The memo has its own
+  // lifecycle (cleared below once the banner leaves the tail).
+  if ((state.overloadAttempts > 0 || state.overloadTotalWaitMs > 0)
+      && isWorking(stripped) && !isInternalRetry(stripped)) {
+    const handledBanner = state._eventHandledBanner;
+    resetOverload(state);
+    state._eventHandledBanner = handledBanner;
+  }
+
   // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
   // marker for this pane means the turn ended in a retryable API error — no scraping, no
   // ambiguity. It runs first, but does NOT replace the scraper below: the event path only
@@ -411,6 +441,15 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
       await tmuxAdapter.clearEvent();               // consume
       if (isWorking(stripped)) { resetOverload(state); return 'overload-cleared'; } // self-recovered
+      // Incident boundary: a genuinely failing retry turn re-fails within minutes (even
+      // through Claude's internal attempt N/10 backoff), so a marker arriving long after
+      // our last event-path send means that retry SUCCEEDED and this is a new incident —
+      // fresh backoff budget. The working-tick reset above can miss short responses
+      // entirely at a 30s poll; this gap check is the reliable close, and it also
+      // un-wedges a capped (gave-up) state weeks later without ever observing work.
+      if (state._lastEventRetryAt && Date.now() - state._lastEventRetryAt > OVERLOAD_INCIDENT_GAP_MS) {
+        resetOverload(state);
+      }
       const capMs = overload.maxTotalWaitMinutes * 60_000;
       if (state.overloadTotalWaitMs >= capMs) { state._gaveUp = true; return 'overload-gave-up'; }
       const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
