@@ -283,6 +283,32 @@ export function buildNewSessionArgs(sessionName, innerCmd) {
   return ['new-session', '-d', '-s', sessionName, innerCmd];
 }
 
+// Session reaping (#69) means the tmux server now exits when the last claude session
+// ends (exit-empty defaults on). A `new-session` landing while that server is tearing
+// down — socket still on disk, server draining its event loop — connects, sees EOF
+// mid-handshake, and fails with "server exited unexpectedly" ("lost server" is the
+// same condition surfaced later). Both are momentary: the next attempt finds the
+// socket gone/stale and cold-starts a fresh server. Anything else (duplicate session,
+// ENOENT, bad option) is a real failure and must not be retried.
+export function isTransientTmuxServerError(err) {
+  const text = [err?.message, err?.stderr].filter(Boolean).map(String).join('\n');
+  return /server exited unexpectedly|lost server/.test(text);
+}
+
+export async function retryTransientServerError(fn, {
+  attempts = 3,
+  delayMs = 250,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  for (let i = 1; ; i++) {
+    try { return fn(); }
+    catch (err) {
+      if (i >= attempts || !isTransientTmuxServerError(err)) throw err;
+      await sleep(delayMs);
+    }
+  }
+}
+
 async function createTmuxSession(args) {
   const sessionName = `claude-retry-${process.pid}-${Date.now()}`;
   const launcherPath = __filename;
@@ -295,7 +321,11 @@ async function createTmuxSession(args) {
   const innerCmd = buildTmuxInnerCmd(launcherPath, args, process.env, envFile);
 
   try {
-    execFileSync('tmux', buildNewSessionArgs(sessionName, innerCmd));
+    // stderr: 'pipe' (not the default parent mirror) so a retried transient attempt
+    // doesn't print "server exited unexpectedly" on a launch that then succeeds; on
+    // real failure Node folds the captured stderr into err.message, printed below.
+    await retryTransientServerError(() =>
+      execFileSync('tmux', buildNewSessionArgs(sessionName, innerCmd), { stdio: ['pipe', 'pipe', 'pipe'] }));
 
     // Best-effort: enable mouse mode (scroll, copy-mode, pane/window click) and
     // vi-style copy-mode keys on the session's first window. Requires tmux >= 2.1;

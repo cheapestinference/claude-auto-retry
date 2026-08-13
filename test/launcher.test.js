@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import {
   resolveLaunchCommand, buildTmuxInnerCmd, buildNewSessionArgs,
   writeEnvSnapshot, applyEnvSnapshot, consumeEnvSnapshot, sweepStaleEnvSnapshots,
-  chooseLaunchMode,
+  chooseLaunchMode, isTransientTmuxServerError, retryTransientServerError,
 } from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
@@ -132,6 +132,79 @@ describe('buildNewSessionArgs (#68)', () => {
     assert.deepEqual(args, ['new-session', '-d', '-s', 's1', 'inner']);
     assert.ok(!args.includes('-e'));
     assert.ok(!args.some(a => a.includes('export ')));
+  });
+});
+
+// --- Dead-server race on session creation (#69 follow-up) ---
+// Session reaping means the tmux server now EXITS when the last claude session ends
+// (exit-empty is on by default). A `new-session` that lands while the server is tearing
+// down — socket still on disk, server draining — connects, sees EOF mid-handshake, and
+// fails with "server exited unexpectedly". Empirically reproduced on tmux 3.4 (~3/40
+// timed attempts); a short-delay retry always recovered because the second client finds
+// the socket gone (or stale) and cold-starts its own server. Unreachable before reaping:
+// the server never exited, so the window never existed.
+describe('new-session dead-server retry (#69 follow-up)', () => {
+  it('classifies mid-shutdown server errors as transient, from message or stderr', () => {
+    assert.ok(isTransientTmuxServerError(new Error('Command failed: tmux\nserver exited unexpectedly')));
+    const withStderr = new Error('Command failed: tmux new-session ...');
+    withStderr.stderr = Buffer.from('server exited unexpectedly\n');
+    assert.ok(isTransientTmuxServerError(withStderr));
+    const lost = new Error('x'); lost.stderr = Buffer.from('lost server\n');
+    assert.ok(isTransientTmuxServerError(lost));
+  });
+
+  it('does not classify real launch failures as transient', () => {
+    assert.ok(!isTransientTmuxServerError(new Error('duplicate session: s1')));
+    const err = new Error('Command failed: tmux');
+    err.stderr = Buffer.from('unknown option -- e\n');
+    assert.ok(!isTransientTmuxServerError(err));
+    assert.ok(!isTransientTmuxServerError(new Error('spawn tmux ENOENT')));
+  });
+
+  it('retries a transient failure after a delay and returns the eventual result', async () => {
+    const delays = [];
+    let calls = 0;
+    const result = await retryTransientServerError(() => {
+      calls++;
+      if (calls === 1) {
+        const err = new Error('Command failed: tmux');
+        err.stderr = Buffer.from('server exited unexpectedly\n');
+        throw err;
+      }
+      return 'created';
+    }, { sleep: async (ms) => delays.push(ms) });
+    assert.equal(result, 'created');
+    assert.equal(calls, 2);
+    assert.deepEqual(delays, [250]);
+  });
+
+  it('rethrows a non-transient failure immediately without sleeping', async () => {
+    const delays = [];
+    let calls = 0;
+    await assert.rejects(
+      retryTransientServerError(() => { calls++; throw new Error('duplicate session: s1'); },
+        { sleep: async (ms) => delays.push(ms) }),
+      /duplicate session/,
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(delays, []);
+  });
+
+  it('gives up after the attempt budget and rethrows the transient error', async () => {
+    const delays = [];
+    let calls = 0;
+    await assert.rejects(
+      retryTransientServerError(() => {
+        calls++;
+        // Shape of a real execFileSync failure: stderr folded into message AND on .stderr
+        const err = new Error('Command failed: tmux\nserver exited unexpectedly\n');
+        err.stderr = Buffer.from('server exited unexpectedly\n');
+        throw err;
+      }, { attempts: 3, sleep: async (ms) => delays.push(ms) }),
+      /server exited unexpectedly/,
+    );
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [250, 250]);
   });
 });
 

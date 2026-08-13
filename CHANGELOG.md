@@ -39,6 +39,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   relying on `node` being resolvable through a possibly-stale tmux server `PATH`.
 
 ### Fixed
+- **Launch no longer fails with `server exited unexpectedly` when it races a
+  dying tmux server (#69 follow-up).** Session reaping means the tmux server now
+  exits once the last claude session ends (`exit-empty` defaults on) — and a
+  `new-session` landing in the teardown window (socket still on disk, server
+  draining) connects, sees EOF mid-handshake, and aborted the whole launch. This
+  window could not exist before reaping, because the server never exited.
+  Session creation now retries up to twice (250 ms apart) when the failure is
+  `server exited unexpectedly` / `lost server`; the next attempt finds the
+  socket gone or stale and cold-starts a fresh server. Real failures (duplicate
+  session, tmux missing, bad option) still fail immediately. Reproduced and
+  verified against real tmux 3.4: 23 forced race hits, 23 recovered, 0 residual
+  failures across 250 timed attempts.
+
+### Fixed
 - **A usage-meter statusline no longer hijacks the reset-time parse (#61).** ccusage-style
   statuslines render a permanent countdown row at the very bottom of the pane
   ("current ●●●●●●●●●● 100%  ⟳ resets in 1 hr 47 min"). That row matches the reset
