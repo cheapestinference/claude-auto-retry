@@ -70,6 +70,20 @@ export function writeEnvSnapshot(env = process.env, dir = ENV_SNAPSHOT_DIR) {
   return path;
 }
 
+// A failed snapshot write (unwritable / read-only / over-quota $HOME — NFS-mounted HPC
+// homes especially) must not kill the launch, but it must not degrade SILENTLY either:
+// on a pre-existing tmux server the pane then runs with the server's stale startup env,
+// and a rotated API key or fresh proxy var quietly never reaches claude (PR #72 review).
+export function writeEnvSnapshotSafe(env = process.env, dir = ENV_SNAPSHOT_DIR,
+  warn = (msg) => process.stderr.write(msg)) {
+  try { return writeEnvSnapshot(env, dir); }
+  catch (err) {
+    warn(`[claude-auto-retry] Warning: could not write env snapshot (${err.message}); `
+      + 'the pane will run with the tmux server\'s environment, which may be stale or incomplete.\n');
+    return null;
+  }
+}
+
 export function applyEnvSnapshot(target, snap) {
   for (const [k, v] of Object.entries(snap)) {
     if (k.startsWith('TMUX')) continue;              // pane identity belongs to the inner session
@@ -314,9 +328,7 @@ async function createTmuxSession(args) {
   const launcherPath = __filename;
 
   sweepStaleEnvSnapshots();
-  let envFile = null;
-  try { envFile = writeEnvSnapshot(process.env); }
-  catch { /* unwritable HOME → degrade: pane runs with the server env */ }
+  const envFile = writeEnvSnapshotSafe(process.env);
 
   const innerCmd = buildTmuxInnerCmd(launcherPath, args, process.env, envFile);
 

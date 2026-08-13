@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   resolveLaunchCommand, buildTmuxInnerCmd, buildNewSessionArgs,
-  writeEnvSnapshot, applyEnvSnapshot, consumeEnvSnapshot, sweepStaleEnvSnapshots,
+  writeEnvSnapshot, writeEnvSnapshotSafe, applyEnvSnapshot, consumeEnvSnapshot, sweepStaleEnvSnapshots,
   chooseLaunchMode, isTransientTmuxServerError, retryTransientServerError,
 } from '../src/launcher.js';
 
@@ -71,6 +71,28 @@ describe('env snapshot file (#68)', () => {
     assert.equal(snap['ProgramFiles(x86)'], 'C:\\Program Files (x86)');
     assert.ok(!('TMUX' in snap) && !('TMUX_PANE' in snap), 'TMUX* must not cross into the pane');
     assert.ok(!('GONE' in snap));
+  });
+
+  // PR #72 review finding: a failed snapshot write degraded SILENTLY — on a pre-existing
+  // tmux server the pane then runs with the server's stale startup env (rotated API key,
+  // fresh proxy var quietly never reach claude) and nothing points at the cause. The
+  // degrade is right; the silence is not.
+  it('writeEnvSnapshotSafe warns on an unwritable dir and returns null', () => {
+    const blocked = join(scratch(), 'blocked');
+    writeFileSync(blocked, 'a file, not a dir');
+    const warnings = [];
+    const path = writeEnvSnapshotSafe({ A: '1' }, join(blocked, 'sub'), (m) => warnings.push(m));
+    assert.equal(path, null);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /could not write env snapshot/);
+    assert.match(warnings[0], /stale/);
+  });
+
+  it('writeEnvSnapshotSafe returns the path and stays quiet on success', () => {
+    const warnings = [];
+    const path = writeEnvSnapshotSafe({ A: '1' }, scratch(), (m) => warnings.push(m));
+    assert.ok(existsSync(path));
+    assert.deepEqual(warnings, []);
   });
 
   it('applyEnvSnapshot overwrites stale pane values but never TMUX* or the pointer var', () => {

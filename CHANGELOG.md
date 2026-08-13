@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A failed env-snapshot write now warns instead of degrading silently** (PR #72
+  review follow-up). If `~/.claude-auto-retry/tmp` is unwritable (read-only or
+  over-quota `$HOME` — NFS-mounted HPC homes especially), the launch still proceeds,
+  but the pane runs with the tmux **server's** startup environment: on a pre-existing
+  server that can be days stale, so a rotated `ANTHROPIC_API_KEY` or fresh proxy var
+  quietly never reached `claude` with zero diagnostic. The degrade stays; the silence
+  goes — a stderr warning now names the cause.
+
 ## [0.7.0] - 2026-08-13
 
 ### Security
