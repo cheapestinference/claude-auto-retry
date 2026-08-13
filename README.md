@@ -10,6 +10,8 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
+> **📢 Status (Aug 2026):** The Claude **Desktop app** now does this natively — an *"☑ Auto-continue when limits reset"* checkbox ([confirmed in the wild](https://github.com/anthropics/claude-code/issues/35744#issuecomment-5278232593)). The **CLI still doesn't have it** — that's the gap this tool covers today. Track [anthropics/claude-code#35744](https://github.com/anthropics/claude-code/issues/35744) for the native CLI version; until it lands, `npm i -g claude-auto-retry` is the way.
+
 ---
 
 > 💡 **Why wait out the limit at all?** This tool auto-resumes Claude Code the moment you're rate-limited — but if you run overnight jobs or always-on agents, there's a way to stop hitting the wall in the first place. **[See how it's done →](https://cheapestinference.com/blog/claude-code-usage-limit-auto-retry/)**
