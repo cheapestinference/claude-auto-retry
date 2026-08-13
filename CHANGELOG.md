@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Secrets no longer ride any tmux argv (#68).** The environment used to cross into the
+  auto-created session as `new-session -e KEY=VALUE` pairs (and, below tmux 3.2, as
+  inline `export`s in the pane command) — and when that invocation is the one that
+  starts the tmux server, the server keeps the whole argv in `/proc/<pid>/cmdline`,
+  world-readable, for its entire multi-day lifetime. API keys, tokens and connection
+  strings were retrievable with a plain `ps`. The environment now crosses via a `0600`
+  JSON snapshot in a `0700` dir (`~/.claude-auto-retry/tmp/`); only the file *path*
+  appears on the command line, and the inner launcher loads it into `process.env` and
+  unlinks it (with a 24h sweep for launches that died before consuming). Loading in
+  Node rather than `source` round-trips names a POSIX shell can't — `BASH_FUNC_name%%`
+  exported functions, Windows `ProgramFiles(x86)` — which also retires the entire
+  "tmux rejects this env name" launch-failure class (#58) and the lenient/strict retry
+  machinery with it. Environment fidelity is *higher* than before: names the argv
+  filter had to drop now cross intact.
+
+### Changed
+- **Clean exits reap their tmux session (#69).** The pane tail was an unconditional
+  `; exec $SHELL`, so no session was ever destroyed — a clean `/exit` left an idle
+  login shell pinning the session and its whole process tree forever (measured by the
+  reporter: 66 sessions holding 16.4 GB after 3 days). The shell fallback is now
+  reserved for **non-zero** launcher exits, where the crash scrollback is genuinely
+  useful; on a clean exit the pane command ends and tmux reaps the session itself.
+  `CLAUDE_AUTO_RETRY_KEEP_SHELL=1` restores the old behavior.
+- **`CLAUDE_AUTO_RETRY_NO_TMUX=1`** skips tmux session creation entirely, for users
+  already inside a non-tmux multiplexer (Zellij, screen) who don't want a nested
+  session per launch (#69). Explicit opt-out — the nested session is what the monitor
+  drives, so this disables auto-retry for the run, and that trade belongs to the user.
+- The pane command now invokes the launching Node binary by absolute path instead of
+  relying on `node` being resolvable through a possibly-stale tmux server `PATH`.
+
+### Fixed
+- **Launch no longer fails with `server exited unexpectedly` when it races a
+  dying tmux server (#69 follow-up).** Session reaping means the tmux server now
+  exits once the last claude session ends (`exit-empty` defaults on) — and a
+  `new-session` landing in the teardown window (socket still on disk, server
+  draining) connects, sees EOF mid-handshake, and aborted the whole launch. This
+  window could not exist before reaping, because the server never exited.
+  Session creation now retries up to twice (250 ms apart) when the failure is
+  `server exited unexpectedly` / `lost server`; the next attempt finds the
+  socket gone or stale and cold-starts a fresh server. Real failures (duplicate
+  session, tmux missing, bad option) still fail immediately. Reproduced and
+  verified against real tmux 3.4: 23 forced race hits, 23 recovered, 0 residual
+  failures across 250 timed attempts.
+
 ### Fixed
 - **A usage-meter statusline no longer hijacks the reset-time parse (#61).** ccusage-style
   statuslines render a permanent countdown row at the very bottom of the pane
