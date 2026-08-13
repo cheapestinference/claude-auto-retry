@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A fallback wait is now corrected once the real reset time appears on screen.** The
+  `/rate-limit-options` menu does not always render a reset line, so confirming "Stop and
+  wait" could commit the `fallbackWaitHours` default (5h) — and the waiting branch returned
+  early on every tick and never looked at the pane again, so the banner Claude Code prints
+  immediately after confirming, which *does* carry the time, was ignored for the whole
+  fallback. Observed live: a session whose limit reset at 18:20 sat parked until 22:27 with
+  `attempts: 0`, ~4 idle hours, while the banner naming 18:20 was on screen the entire time.
+  A wait derived from an unreadable screen is now latched as a fallback and re-derived from
+  the live banner each tick until a real reset time is found; waits that already came from a
+  real reset time are never re-parsed. Confirming the menu starts a fresh retry episode, so
+  the correction still applies when the menu re-renders after a retry has been sent.
+
 ## [0.7.0] - 2026-08-13
 
 ### Security

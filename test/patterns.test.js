@@ -320,6 +320,28 @@ describe('stripAnsi (private-mode sequences)', () => {
 });
 
 describe('findRateLimitMessage', () => {
+  // tailLines bounds the scan to the same chrome-aware window isRateLimited reads, so a
+  // caller that gates on liveness can't then parse a line the gate never saw. The monitor
+  // re-derives the wait during a fallback, where an unbounded scan could reach a stale
+  // banner high in scrollback and (shorten-only) let the earliest stale time win.
+  it('bounds the scan to the content tail when tailLines is set', () => {
+    const text = ["You've hit your limit · resets 3pm (UTC)",
+      ...Array(14).fill('ordinary content line')].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), null);        // banner sits above the window
+    assert.ok(findRateLimitMessage(text, []).includes('3pm'));     // unbounded still reaches it
+  });
+  it('still finds a banner inside the tail window', () => {
+    const text = ['ordinary content line',
+      "You've hit your limit · resets 3pm (UTC)"].join('\n');
+    assert.ok(findRateLimitMessage(text, [], 12).includes('3pm'));
+  });
+  it('tail window skips trailing chrome rather than spending budget on it', () => {
+    // The banner is 13 raw lines up but only 1 line of real content up — the chrome-aware
+    // window must still reach it, exactly as isRateLimited does.
+    const text = ["You've hit your limit · resets 3pm (UTC)",
+      ...Array(12).fill('  ◻ a task widget row'), '❯ '].join('\n');
+    assert.ok(findRateLimitMessage(text, [], 12).includes('3pm'));
+  });
   it('returns the matching line from multiline input', () => {
     const text = 'Some output\n5-hour limit reached - resets 3pm (Europe/Dublin)\nMore output';
     assert.equal(findRateLimitMessage(text), '5-hour limit reached - resets 3pm (Europe/Dublin)');
