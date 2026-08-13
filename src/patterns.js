@@ -88,6 +88,18 @@ const CHROME_LINE = [
                                                      // ("Should I start the new task?")
   USAGE_CREDITS,                                     // live-limit companion hint (shared w/ the backstop)
   /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
+  // Usage-meter statusline rows (#61, ccusage-style). The "⟳ resets in 1 hr 47 min"
+  // countdown matches RESET_PATTERNS and renders permanently at the very bottom, BELOW
+  // any live banner — so it must be furniture: it both hijacked findRateLimitMessage's
+  // bottom-up scan (an unparseable "1 hr 47 min" → 5h fallback instead of the banner's
+  // real time) and handed a free "resets" anchor to any limit-shaped prose near the
+  // bottom. Anchored to the meter shapes: the countdown glyph, a dotted gauge with a
+  // percentage, and the cost/duration row.
+  /[⟳↻⌛⏳🕐-🕧]\s*resets/iu,                          // meter reset countdown — glyph varies by
+                                                     // statusline layout/version ("⟳ resets in
+                                                     // 1 hr 47 min", "⌛ Resets at 15:00")
+  /[●○◐◓◑◒]{5,}\s*(?:ctx:)?\d+%/,                     // dotted usage gauge ("current ●●●●●●●●●● 100%")
+  /^\s*\$[\d.,]+\s+⏱/,                               // cost row ("$230.61 ⏱ 59h14m │ diff:+63 -16")
   /Backgrounded agent \(|to manage · /i,             // background-agent notice — the "(" (or "to manage ·")
                                                      // is required so prose ("Backgrounded agent finished
                                                      // the lint run") isn't stripped
@@ -466,20 +478,24 @@ export function findRateLimitMessage(text, customPatterns = []) {
   const lines = stripAnsi(text).split('\n');
   // Tool-echo mask (#63): without it, a quoted "resets 9am" in a fresh grep line below a
   // real banner would win the bottom-up scan and be parsed instead of the banner.
+  // Chrome is skipped for the same reason (#61): a usage-meter statusline row
+  // ("⟳ resets in 1 hr 47 min") always renders below the banner, so it won the scan —
+  // and parseResetTime can't read it, turning a known reset time into the 5h fallback.
   const mask = toolEchoMask(lines);
+  const skip = (i) => mask[i] || isChromeLine(lines[i]);
 
   // Scan from the bottom up — the most recent "resets" line is the one to
   // parse. The Claude TUI never clears earlier rate-limit messages from
   // scrollback, so a forward scan would lock onto a stale line (e.g. an old
   // "resets 11:30am" lingering above a fresh "resets 4:30pm").
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (mask[i]) continue;
+    if (skip(i)) continue;
     if (RESET_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 
   // Fallback: any "limit" line, also scanned from the bottom.
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (mask[i]) continue;
+    if (skip(i)) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
   }
 

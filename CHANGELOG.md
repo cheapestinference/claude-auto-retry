@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A usage-meter statusline no longer hijacks the reset-time parse (#61).** ccusage-style
+  statuslines render a permanent countdown row at the very bottom of the pane
+  ("current ●●●●●●●●●● 100%  ⟳ resets in 1 hr 47 min"). That row matches the reset
+  patterns and sits below any live banner, so the bottom-up scan in
+  `findRateLimitMessage` returned it instead of the banner — and its wording isn't
+  parseable, so a banner with a perfectly good "resets 6:20am (Europe/Brussels)" fell
+  back to the 5-hour default wait. Meter rows (countdown glyph variants, dotted gauges
+  with a percentage, the cost row) are now classified as chrome, and
+  `findRateLimitMessage` skips chrome the same way the detectors already do. This also
+  removes a standing false-positive anchor: the meter's "resets" line no longer
+  validates limit-shaped prose near the bottom of the pane.
+
 ## [0.6.2] - 2026-07-29
 
 ### Fixed
