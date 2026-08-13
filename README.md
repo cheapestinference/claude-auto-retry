@@ -188,6 +188,29 @@ export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER="caffeinate -i"
 Generic (not macOS-specific — e.g. `nice`, `chrt …` work too). Unset or blank spawns
 `claude` directly, unchanged.
 
+### Session lifetime
+
+When `claude` exits **cleanly** inside the auto-created tmux session, the session now
+ends with it — tmux reaps it, nothing lingers. When the launcher exits **non-zero**
+(a crash), the pane falls through to your login shell so the scrollback survives for
+inspection. Two opt-outs:
+
+```sh
+# Always keep a shell in the pane after claude exits (the pre-0.7 behavior)
+export CLAUDE_AUTO_RETRY_KEEP_SHELL=1
+
+# Never create a tmux session (e.g. you're inside Zellij/screen and don't want nesting).
+# Note: the monitor needs a tmux pane to watch, so this disables auto-retry for the run.
+export CLAUDE_AUTO_RETRY_NO_TMUX=1
+```
+
+### Environment forwarding
+
+Your full shell environment reaches `claude` inside the tmux session via a `0600`
+snapshot file under `~/.claude-auto-retry/tmp/` that only the launcher reads (and
+deletes immediately). Nothing about your environment — names or values — ever appears
+on a `tmux` command line, so secrets can't surface in `/proc/<pid>/cmdline`.
+
 ## Overload backoff
 
 Separate from subscription rate limits, this fork also detects **sustained API

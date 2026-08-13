@@ -1,6 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLaunchCommand, buildTmuxInnerCmd, buildTmuxEnvArgs, buildNewSessionArgs, newSessionAttempts } from '../src/launcher.js';
+import { mkdtempSync, writeFileSync, readFileSync, statSync, existsSync, readdirSync, utimesSync, chmodSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import {
+  resolveLaunchCommand, buildTmuxInnerCmd, buildNewSessionArgs,
+  writeEnvSnapshot, applyEnvSnapshot, consumeEnvSnapshot, sweepStaleEnvSnapshots,
+  chooseLaunchMode,
+} from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
   it('spawns claude directly when no wrapper is set', () => {
@@ -32,109 +40,175 @@ describe('resolveLaunchCommand', () => {
   });
 });
 
-describe('buildTmuxEnvArgs', () => {
-  // #58: Windows (Git Bash / MSYS2) environments carry names tmux -e rejects outright
-  // ("invalid environment variable name"), killing session creation for EVERY variable
-  // after the bad one is reached. Names must match POSIX [A-Za-z_][A-Za-z0-9_]* to pass.
-  it('drops non-POSIX names that tmux -e rejects, keeps the rest (#58)', () => {
-    const args = buildTmuxEnvArgs({
-      'PATH': '/usr/bin',
-      'ProgramFiles(x86)': 'C:\\Program Files (x86)',
-      'CommonProgramFiles(x86)': 'C:\\Common',
-      '=C:': 'C:\\Users\\me',
-      '!ExitCode': '00000000',
-      'ANTHROPIC_API_KEY': 'sk-ant-1',
-    });
-    assert.deepEqual(args, [
-      '-e', 'PATH=/usr/bin',
-      '-e', 'ANTHROPIC_API_KEY=sk-ant-1',
-    ]);
-  });
+// --- Env snapshot file (#68) ---
+// Secrets must never ride the tmux argv: `new-session -e KEY=VALUE` pairs land in the
+// tmux SERVER's /proc/<pid>/cmdline (world-readable, 0444) for the server's whole
+// lifetime whenever that invocation is the one that starts the server — and the < 3.2
+// inline-export branch had the same exposure. The environment now crosses into the pane
+// via a 0600 JSON snapshot file whose PATH is the only thing on the argv; the inner
+// launcher loads it into process.env (Node round-trips names a POSIX `source` can't,
+// e.g. BASH_FUNC_name%%) and unlinks it.
+describe('env snapshot file (#68)', () => {
+  const scratch = () => mkdtempSync(join(tmpdir(), 'car-env-'));
 
-  // Exported bash functions (BASH_FUNC_name%%) are non-POSIX names that tmux 3.2/3.4
-  // demonstrably ACCEPT and reconstruct inside the pane — HPC Environment Modules users
-  // rely on them. The default (lenient) filter keeps them; the strict form (used as a
-  // launch-failure fallback for tmux builds that reject exotic names, #58) drops them.
-  it('keeps exported bash functions by default, drops them in strict mode', () => {
-    const env = { PATH: '/usr/bin', 'BASH_FUNC_module%%': '() { eval $LMOD; }' };
-    assert.deepEqual(buildTmuxEnvArgs(env), [
-      '-e', 'PATH=/usr/bin',
-      '-e', 'BASH_FUNC_module%%=() { eval $LMOD; }',
-    ]);
-    assert.deepEqual(buildTmuxEnvArgs(env, { strict: true }), ['-e', 'PATH=/usr/bin']);
-  });
-
-  it('still skips TMUX* and nullish values', () => {
-    const args = buildTmuxEnvArgs({
+  it('writes a 0600 file in a 0700 dir and round-trips the env minus TMUX*', () => {
+    const dir = join(scratch(), 'sub');   // exercise dir creation
+    const env = {
+      PATH: '/usr/bin',
+      ANTHROPIC_API_KEY: 'sk-ant-1',
+      'BASH_FUNC_module%%': '() { eval $LMOD; }',
+      'ProgramFiles(x86)': 'C:\\Program Files (x86)',   // no argv → no need to drop it
       TMUX: '/tmp/tmux-1000/default,1,0',
       TMUX_PANE: '%5',
-      HOME: '/home/me',
-      EMPTY_OK: '',
       GONE: undefined,
+    };
+    const path = writeEnvSnapshot(env, dir);
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    const snap = JSON.parse(readFileSync(path, 'utf-8'));
+    assert.equal(snap.ANTHROPIC_API_KEY, 'sk-ant-1');
+    assert.equal(snap['BASH_FUNC_module%%'], '() { eval $LMOD; }');
+    assert.equal(snap['ProgramFiles(x86)'], 'C:\\Program Files (x86)');
+    assert.ok(!('TMUX' in snap) && !('TMUX_PANE' in snap), 'TMUX* must not cross into the pane');
+    assert.ok(!('GONE' in snap));
+  });
+
+  it('applyEnvSnapshot overwrites stale pane values but never TMUX* or the pointer var', () => {
+    const target = { PATH: '/stale/path', TMUX_PANE: '%7', CLAUDE_AUTO_RETRY_ENV_FILE: '/x' };
+    applyEnvSnapshot(target, {
+      PATH: '/usr/bin', NEW_VAR: '1',
+      TMUX_PANE: '%5', TMUX: 'evil', CLAUDE_AUTO_RETRY_ENV_FILE: '/evil',
     });
-    assert.deepEqual(args, ['-e', 'HOME=/home/me', '-e', 'EMPTY_OK=']);
+    assert.equal(target.PATH, '/usr/bin');
+    assert.equal(target.NEW_VAR, '1');
+    assert.equal(target.TMUX_PANE, '%7', 'the pane identity belongs to the inner session');
+    assert.ok(!('TMUX' in target));
+    assert.equal(target.CLAUDE_AUTO_RETRY_ENV_FILE, '/x');
+  });
+
+  it('consumeEnvSnapshot applies, unlinks, and clears the pointer', () => {
+    const dir = scratch();
+    const path = writeEnvSnapshot({ SECRET: 's3cr3t' }, dir);
+    const env = { CLAUDE_AUTO_RETRY_ENV_FILE: path, TMUX_PANE: '%2' };
+    assert.equal(consumeEnvSnapshot(env), true);
+    assert.equal(env.SECRET, 's3cr3t');
+    assert.ok(!('CLAUDE_AUTO_RETRY_ENV_FILE' in env));
+    assert.ok(!existsSync(path), 'snapshot must be unlinked after consumption');
+  });
+
+  it('consumeEnvSnapshot degrades on a missing or corrupt file (still clears pointer/unlinks)', () => {
+    const env = { CLAUDE_AUTO_RETRY_ENV_FILE: '/nonexistent/env.json' };
+    assert.equal(consumeEnvSnapshot(env), false);
+    assert.ok(!('CLAUDE_AUTO_RETRY_ENV_FILE' in env));
+
+    const dir = scratch();
+    const bad = join(dir, 'env-bad.json');
+    writeFileSync(bad, 'not json', { mode: 0o600 });
+    const env2 = { CLAUDE_AUTO_RETRY_ENV_FILE: bad };
+    assert.equal(consumeEnvSnapshot(env2), false);
+    assert.ok(!existsSync(bad), 'even a corrupt snapshot must not linger on disk');
+    assert.equal(consumeEnvSnapshot({}), false, 'no pointer → no-op');
+  });
+
+  it('sweepStaleEnvSnapshots removes old env-*.json, keeps fresh ones and other files', () => {
+    const dir = scratch();
+    const stale = writeEnvSnapshot({ A: '1' }, dir);
+    const fresh = writeEnvSnapshot({ B: '2' }, dir);
+    const other = join(dir, 'not-a-snapshot.txt');
+    writeFileSync(other, 'x');
+    const old = (Date.now() - 25 * 3600_000) / 1000;
+    utimesSync(stale, old, old);
+    utimesSync(other, old, old);
+    sweepStaleEnvSnapshots(dir, 24 * 3600_000);
+    assert.ok(!existsSync(stale), 'stale snapshot must be swept');
+    assert.ok(existsSync(fresh), 'fresh snapshot must survive');
+    assert.ok(existsSync(other), 'non-snapshot files are not ours to delete');
   });
 });
 
-describe('buildNewSessionArgs', () => {
-  const env = { PATH: '/usr/bin', HOME: '/home/me' };
-
-  // `new-session -e` was added in tmux 3.2 (3.0 only added -e to new-window/split-window).
-  // Ubuntu 20.04 ships 3.0a and Debian 11 ships 3.1c: gating at >= 3.0 made new-session
-  // fail with "unknown option -- e" and the launch died outright on those distros.
-  it('does NOT use -e below tmux 3.2 (3.0/3.1 lack new-session -e)', () => {
-    for (const ver of [3.0, 3.1]) {
-      const args = buildNewSessionArgs(ver, 's1', 'inner', env);
-      assert.ok(!args.includes('-e'), `tmux ${ver} must not get -e`);
-      assert.match(args[args.length - 1], /export PATH='\/usr\/bin'.*; inner$/);
-    }
-  });
-
-  it('uses -e from tmux 3.2 onward', () => {
-    const args = buildNewSessionArgs(3.2, 's1', 'inner', env);
-    assert.deepEqual(args, ['new-session', '-d', '-s', 's1',
-      '-e', 'PATH=/usr/bin', '-e', 'HOME=/home/me', 'inner']);
-  });
-
-  // tmux force-sets the pane's TERM from default-terminal; re-exporting the OUTER
-  // terminal's TERM inside the pane (inline branch) defeats that and runs the TUI with
-  // a non-tmux terminfo. The >=3.2 path already (correctly) lets tmux own TERM.
-  it('the inline-export branch does not clobber the pane TERM', () => {
-    const args = buildNewSessionArgs(3.1, 's1', 'inner', { PATH: '/usr/bin', TERM: 'xterm-256color' });
-    assert.ok(!args[args.length - 1].includes('export TERM='), args[args.length - 1]);
-  });
-});
-
-describe('newSessionAttempts', () => {
-  it('adds a strict-filter fallback attempt only when the lenient env differs', () => {
-    const envWithFn = { PATH: '/usr/bin', 'BASH_FUNC_module%%': '() { :; }' };
-    const attempts = newSessionAttempts(3.2, 's1', 'inner', envWithFn);
-    assert.equal(attempts.length, 2);
-    assert.ok(attempts[0].includes('BASH_FUNC_module%%=() { :; }'));
-    assert.ok(!attempts[1].some(a => a.startsWith('BASH_FUNC_')));
-    // No exotic names → both filters agree → a single attempt.
-    assert.equal(newSessionAttempts(3.2, 's1', 'inner', { PATH: '/usr/bin' }).length, 1);
-    // Inline-export branch (< 3.2) never has a second form.
-    assert.equal(newSessionAttempts(3.1, 's1', 'inner', envWithFn).length, 1);
+describe('buildNewSessionArgs (#68)', () => {
+  it('never puts env names or values on the argv, on any tmux version', () => {
+    const args = buildNewSessionArgs('s1', 'inner');
+    assert.deepEqual(args, ['new-session', '-d', '-s', 's1', 'inner']);
+    assert.ok(!args.includes('-e'));
+    assert.ok(!args.some(a => a.includes('export ')));
   });
 });
 
 describe('buildTmuxInnerCmd', () => {
-  it('execs the user\'s $SHELL after the launcher exits, not a hardcoded bash', () => {
-    const cmd = buildTmuxInnerCmd('/path/launcher.js', [], { SHELL: '/bin/zsh' });
-    assert.match(cmd, /exec '\/bin\/zsh'$/);
+  it('carries only the snapshot PATH on the command line, plus node via execPath', () => {
+    const cmd = buildTmuxInnerCmd('/path/launcher.js', ['--resume'],
+      { SHELL: '/bin/zsh', ANTHROPIC_API_KEY: 'sk-ant-1' }, '/run/user/1000/env-1.json');
+    assert.ok(cmd.includes("CLAUDE_AUTO_RETRY_ENV_FILE='/run/user/1000/env-1.json'"));
+    assert.ok(!cmd.includes('sk-ant-1'), 'no env VALUES on the argv');
+    assert.ok(cmd.includes(`'${process.execPath}'`),
+      'bare `node` resolves against a possibly-stale server PATH; use the launching node');
+    assert.ok(cmd.includes("'/path/launcher.js' '--resume'"));
+  });
+
+  it('omits the pointer when no snapshot could be written', () => {
+    const cmd = buildTmuxInnerCmd('/path/launcher.js', [], { SHELL: '/bin/zsh' }, null);
+    assert.ok(!cmd.includes('CLAUDE_AUTO_RETRY_ENV_FILE'));
+  });
+
+  // --- Session reap (#69) ---
+  // `; exec $SHELL` unconditionally kept every pane alive forever: nothing in the package
+  // ever calls kill-session, so a clean /exit left an idle login shell pinning the session
+  // (and its whole Claude/MCP process tree) until reboot — measured at 66 sessions/16.4 GB
+  // in 3 days. The tail is now conditional: keep the shell only when the launcher exited
+  // non-zero (crash — scrollback genuinely helps), otherwise let the pane command end so
+  // tmux reaps the session itself. CLAUDE_AUTO_RETRY_KEEP_SHELL=1 restores the old tail.
+  function runInnerTail(exitCode, env) {
+    const dir = mkdtempSync(join(tmpdir(), 'car-tail-'));
+    const stubLauncher = join(dir, 'launcher.js');
+    writeFileSync(stubLauncher, `process.exit(${exitCode});`);
+    const marker = join(dir, 'shell-ran');
+    const stubShell = join(dir, 'shell.sh');
+    writeFileSync(stubShell, `#!/bin/sh\ntouch '${marker}'\n`);
+    chmodSync(stubShell, 0o755);
+    const cmd = buildTmuxInnerCmd(stubLauncher, [], { ...env, SHELL: stubShell }, null);
+    let rc = 0;
+    try { execFileSync('/bin/sh', ['-c', cmd], { stdio: 'ignore' }); }
+    catch (e) { rc = e.status ?? 1; }
+    const shellRan = existsSync(marker);
+    rmSync(dir, { recursive: true, force: true });
+    return { rc, shellRan };
+  }
+
+  it('clean launcher exit ends the pane command (session reaped), preserving exit 0', () => {
+    const { rc, shellRan } = runInnerTail(0, {});
+    assert.equal(shellRan, false, 'no fallback shell after a clean exit');
+    assert.equal(rc, 0);
+  });
+
+  it('crashed launcher (non-zero) still falls through to the user shell', () => {
+    const { shellRan } = runInnerTail(3, {});
+    assert.equal(shellRan, true, 'crash must keep the pane for its scrollback');
+  });
+
+  it('CLAUDE_AUTO_RETRY_KEEP_SHELL=1 restores the always-keep-shell tail', () => {
+    const { shellRan } = runInnerTail(0, { CLAUDE_AUTO_RETRY_KEEP_SHELL: '1' });
+    assert.equal(shellRan, true);
   });
 
   it('falls back to bash when $SHELL is unset', () => {
     const cmd = buildTmuxInnerCmd('/path/launcher.js', [], {});
-    assert.match(cmd, /exec 'bash'$/);
+    assert.ok(cmd.includes("exec 'bash'"), cmd);
   });
+});
 
-  it('still runs the launcher with escaped path and args before the exec', () => {
-    const cmd = buildTmuxInnerCmd('/path/launcher.js', ['--resume'], { SHELL: '/bin/zsh' });
-    assert.equal(
-      cmd,
-      "CLAUDE_AUTO_RETRY_ACTIVE=1 node '/path/launcher.js' '--resume'; exec '/bin/zsh'",
-    );
+describe('chooseLaunchMode (#69 escape hatch)', () => {
+  it('print mode wins regardless of environment', () => {
+    assert.equal(chooseLaunchMode(['-p', 'hi'], { TMUX: 'x' }), 'print');
+    assert.equal(chooseLaunchMode(['--print'], {}), 'print');
+  });
+  it('inside tmux runs interactive (monitored) mode', () => {
+    assert.equal(chooseLaunchMode([], { TMUX: '/tmp/tmux-1000/default,1,0' }), 'interactive');
+  });
+  it('outside tmux creates a session by default', () => {
+    assert.equal(chooseLaunchMode([], {}), 'tmux-session');
+  });
+  it('CLAUDE_AUTO_RETRY_NO_TMUX=1 skips session creation (Zellij/screen users opting out)', () => {
+    assert.equal(chooseLaunchMode([], { CLAUDE_AUTO_RETRY_NO_TMUX: '1' }), 'interactive');
   });
 });
