@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-13
+
 ### Security
 - **Secrets no longer ride any tmux argv (#68).** The environment used to cross into the
   auto-created session as `new-session -e KEY=VALUE` pairs (and, below tmux 3.2, as
@@ -51,8 +53,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session, tmux missing, bad option) still fail immediately. Reproduced and
   verified against real tmux 3.4: 23 forced race hits, 23 recovered, 0 residual
   failures across 250 timed attempts.
-
-### Fixed
 - **A usage-meter statusline no longer hijacks the reset-time parse (#61).** ccusage-style
   statuslines render a permanent countdown row at the very bottom of the pane
   ("current ●●●●●●●●●● 100%  ⟳ resets in 1 hr 47 min"). That row matches the reset
