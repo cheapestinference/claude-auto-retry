@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMonitorState, processOneTick } from '../src/monitor.js';
 import { DEFAULT_CONFIG } from '../src/config.js';
+import { calculateWaitMs } from '../src/time-parser.js';
 
 function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = true) {
   const t = {
@@ -118,38 +119,118 @@ describe('processOneTick', () => {
     assert.ok(s.waitUntil > Date.now());
   });
 
-  // --- Regression (#71): a wait computed from a screen with no parseable reset time
-  //     (the /rate-limit-options menu) lands on the fallbackWaitHours default and used to
-  //     stand forever, because the waiting branch returned early and never looked at the
-  //     pane again. Observed live: reset 6:20pm, monitor parked until 10:27pm with
-  //     attempts:0 while the banner carrying the real time sat on screen the whole time. ---
-  const FALLBACK_MS = (DEFAULT_CONFIG.fallbackWaitHours * 3600 + DEFAULT_CONFIG.marginSeconds) * 1000;
-  // A limit banner whose reset time is `msFromNow` away on the HOST clock (no timezone
-  // parenthetical, so parseResetTime defaults to the host zone the same way a real
-  // banner in the local zone does).
-  function bannerAt(msFromNow) {
-    const d = new Date(Date.now() + msFromNow);
-    const h = d.getHours(), m = d.getMinutes();
-    const h12 = h % 12 === 0 ? 12 : h % 12;
-    return `You've hit your session limit · resets ${h12}:${String(m).padStart(2, '0')}${h >= 12 ? 'pm' : 'am'}`;
-  }
+  // --- Regression (#71): a wait computed from a screen with no parseable reset time (the
+  //     /rate-limit-options menu) lands on the fallbackWaitHours default and used to stand
+  //     for its full duration, because the waiting branch returned early and never looked
+  //     at the pane again. See the CHANGELOG entry for the observed incident. ---
 
-  it('shortens a fallback wait once the banner with the real reset time is on screen', async () => {
-    // The live incident: menu path committed the 5h fallback, real reset was ~30min ago.
+  // Deterministic clock. Banners are rendered in the fixed-offset zone where the current
+  // instant reads as ~midday and carry that zone explicitly, so a relative offset can never
+  // cross a date boundary (a host at 00:15 rendered YESTERDAY's "11:45pm", which parses
+  // ~23.5h into the future and made these tests red for that half-hour) and no DST
+  // transition can move the answer. Etc/GMT zones have no DST; note the POSIX sign
+  // inversion — Etc/GMT+6 is UTC-6.
+  function middayZone(now = new Date()) {
+    const shift = 12 - now.getUTCHours();       // hours to add to UTC to land near 12:00
+    if (shift === 0) return 'UTC';
+    return shift > 0 ? `Etc/GMT-${shift}` : `Etc/GMT+${-shift}`;
+  }
+  function bannerAt(msFromNow, zone = middayZone()) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(Date.now() + msFromNow));
+    const h = Number(parts.find(p => p.type === 'hour').value);
+    const m = parts.find(p => p.type === 'minute').value;
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `You've hit your session limit · resets ${h12}:${m}${h >= 12 ? 'pm' : 'am'} (${zone})`;
+  }
+  // The real fallback, from the real code path — not a hand-copy of the formula.
+  const FALLBACK_MS = calculateWaitMs(null, DEFAULT_CONFIG.marginSeconds, DEFAULT_CONFIG.fallbackWaitHours);
+  const MENU_NO_RESET = [
+    'What do you want to do?',
+    '❯ 1. Upgrade your plan',
+    '  2. Stop and wait for limit to reset',
+    'Enter to confirm · Esc to cancel',
+  ].join('\n');
+  const marginish = () => Date.now() + (DEFAULT_CONFIG.marginSeconds + 5) * 1000;
+
+  it('menu with no reset line commits the fallback and latches it as correctable', async () => {
+    const t = mockTmux(MENU_NO_RESET);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    assert.equal(s._waitIsFallback, true);
+    assert.ok(Math.abs((s.waitUntil - Date.now()) - FALLBACK_MS) < 5000,
+      `expected the fallback, got ${Math.round((s.waitUntil - Date.now()) / 1000)}s`);
+  });
+
+  it('shortens the menu fallback once the post-confirm banner appears', async () => {
+    const t = mockTmux(MENU_NO_RESET);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    // Claude Code prints the banner carrying the real time; reset was ~30 min ago.
+    t.capturePane = async () => bannerAt(-30 * 60_000);
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
+    assert.equal(t._sent.length, 0);              // corrects the clock, does not send yet
+    assert.ok(s.waitUntil <= marginish(),
+      `expected a margin-sized wait, got ${Math.round((s.waitUntil - Date.now()) / 1000)}s`);
+    assert.equal(s._waitIsFallback, false);       // no longer a fallback → no re-parsing
+  });
+
+  it('corrects the menu fallback even after a retry has already been sent', async () => {
+    // The menu re-rendering means the session hit the limit again: a fresh episode. Keying
+    // the correction on the raw attempt counter blocked exactly this flow, so the
+    // post-confirm banner one minute away was ignored for the whole 5h fallback.
+    const t = mockTmux(MENU_NO_RESET);
+    const s = createMonitorState();
+    s.status = 'waiting'; s.attempts = 1; s.waitUntil = Date.now() - 1000;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    assert.equal(s.attempts, 0);                  // fresh episode
+    assert.equal(s._gaveUp, false);
+    t.capturePane = async () => bannerAt(-30 * 60_000);
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
+    assert.ok(s.waitUntil <= marginish());
+  });
+
+  it('a maxed-out episode still gives up rather than looping on the same banner', async () => {
     const t = mockTmux(bannerAt(-30 * 60_000));
     const s = createMonitorState();
-    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS;
-    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
-    assert.equal(t._sent.length, 0);            // corrects the clock, does not send yet
-    // Reset already passed (inside the grace window) → wait collapses to just the margin.
-    assert.ok(s.waitUntil <= Date.now() + (DEFAULT_CONFIG.marginSeconds + 5) * 1000,
-      `expected a margin-sized wait, got ${Math.round((s.waitUntil - Date.now()) / 1000)}s`);
+    s.status = 'waiting'; s.attempts = DEFAULT_CONFIG.maxRetries; s.waitUntil = Date.now() - 1;
+    s._waitIsFallback = true;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'max-retries');
+    assert.equal(t._sent.length, 0);
+    assert.equal(s._gaveUp, true);
+    // The give-up backoff is not reset-derived; the correction must not shorten it.
+    const hold = s.waitUntil;
+    assert.equal(s._waitIsFallback, false);
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.waitUntil, hold);
+  });
+
+  it('never re-parses a wait that came from a real reset time', async () => {
+    // Regression for the window/latch pair: reset-shaped prose ("try again in 2 minutes")
+    // drifting into the pane during a correctly-derived multi-hour wait must not collapse
+    // it — the monitor would wake into the still-live limit and burn its retries early.
+    const t = mockTmux(bannerAt(5 * 3600_000));
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s._waitIsFallback, false);
+    const derived = s.waitUntil;
+    assert.ok((derived - Date.now()) / 1000 > 4 * 3600,
+      `expected ~5h, got ${Math.round((derived - Date.now()) / 1000)}s`);
+    t.capturePane = async () => [
+      bannerAt(5 * 3600_000),
+      '',
+      '⏺ The API said to try again in 2 minutes before the limit window rolls',
+    ].join('\n');
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.waitUntil, derived);           // untouched
+    assert.equal(t._sent.length, 0);
   });
 
   it('shortens to a still-future reset without sending', async () => {
     const t = mockTmux(bannerAt(2 * 3600_000));
     const s = createMonitorState();
-    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS;
+    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS; s._waitIsFallback = true;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
     assert.equal(t._sent.length, 0);
     const secs = (s.waitUntil - Date.now()) / 1000;
@@ -157,35 +238,48 @@ describe('processOneTick', () => {
   });
 
   it('never LENGTHENS the wait from the banner', async () => {
-    // A banner reading later than the current wait (or drifting stale scrollback) must not
-    // push the wake-up out — that would postpone the retry indefinitely.
     const t = mockTmux(bannerAt(2 * 3600_000));
     const s = createMonitorState();
-    s.status = 'waiting'; s.waitUntil = Date.now() + 30 * 60_000;
+    s.status = 'waiting'; s.waitUntil = Date.now() + 30 * 60_000; s._waitIsFallback = true;
     const before = s.waitUntil;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
     assert.equal(s.waitUntil, before);
   });
 
-  it('does not correct once a retry has been sent (cooldown owns the pacing)', async () => {
-    // After a send, waitUntil is the 30s cooldown; re-deriving it from a banner that is
-    // already past would collapse it to ~0 and burn every attempt in a few ticks.
+  it('does not correct the post-send cooldown', async () => {
+    // After a send, waitUntil is the 30s cooldown; re-deriving it from an already-passed
+    // reset would collapse it to the margin and burn every attempt in a few ticks.
     const t = mockTmux(bannerAt(-30 * 60_000));
     const s = createMonitorState();
-    s.status = 'waiting'; s.attempts = 1; s.waitUntil = Date.now() + FALLBACK_MS;
-    const before = s.waitUntil;
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1; s._waitIsFallback = true;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(s.attempts, 1);
+    assert.equal(s._waitIsFallback, false);
+    const cooldown = s.waitUntil;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
-    assert.equal(s.waitUntil, before);
-    assert.equal(t._sent.length, 0);
+    assert.equal(s.waitUntil, cooldown);
+    assert.equal(t._sent.length, 1);
   });
 
   it('sends immediately when the corrected wait has already elapsed', async () => {
     const cfg = { ...DEFAULT_CONFIG, marginSeconds: 0 };
     const t = mockTmux(bannerAt(-30 * 60_000));
     const s = createMonitorState();
-    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS;
+    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS; s._waitIsFallback = true;
     assert.equal(await processOneTick(s, t, '%0', cfg, () => true), 'retried');
     assert.equal(t._sent.length, 1);
+  });
+
+  it('a corrected wait that falls through does not log as a fresh detection', async () => {
+    // correctUsageWait used to stash the banner on state regardless of which branch won;
+    // a tick that fell through to 'retried' left it there for the next 'waiting' tick to
+    // report as a brand-new rate limit. Set-with-clear is the invariant.
+    const cfg = { ...DEFAULT_CONFIG, marginSeconds: 0 };
+    const t = mockTmux(bannerAt(-30 * 60_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + FALLBACK_MS; s._waitIsFallback = true;
+    assert.equal(await processOneTick(s, t, '%0', cfg, () => true), 'retried');
+    assert.equal(s.lastRateLimitMessage, null);
   });
 
   // --- Regression: do not spam an already-resumed session. The usage path used to

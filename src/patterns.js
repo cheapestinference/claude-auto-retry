@@ -474,15 +474,30 @@ export function isInternalRetry(text) {
     .some((l) => INTERNAL_RETRY_PATTERNS.some((p) => p.test(l)));
 }
 
-export function findRateLimitMessage(text, customPatterns = []) {
-  const lines = stripAnsi(text).split('\n');
+// tailLines > 0 bounds the scan to the same chrome-aware window isRateLimited uses. The
+// unbounded scan reaches the FULL capture, so any non-chrome, non-echo line anywhere in
+// ~120 lines that merely *looks* like a reset ("…try again in 2 minutes…" in model prose,
+// user-typed text, a wrapped tool result past the mask's continuation gap) wins the
+// bottom-up scan over the real banner. That was survivable while this ran once at
+// detection; the monitor now re-derives during the wait, where shorten-only means the
+// earliest bogus time wins and a *correct* multi-hour wait can collapse to minutes — the
+// monitor then wakes into the still-live limit and burns its retries before the real
+// reset. Callers that gate on isRateLimited must pass the same window it read. 0 keeps the
+// full scan for print mode, where the input is process output rather than a scrolling TUI.
+export function findRateLimitMessage(text, customPatterns = [], tailLines = 0) {
+  const all = stripAnsi(text).split('\n');
   // Tool-echo mask (#63): without it, a quoted "resets 9am" in a fresh grep line below a
   // real banner would win the bottom-up scan and be parsed instead of the banner.
   // Chrome is skipped for the same reason (#61): a usage-meter statusline row
   // ("⟳ resets in 1 hr 47 min") always renders below the banner, so it won the scan —
   // and parseResetTime can't read it, turning a known reset time into the 5h fallback.
-  const mask = toolEchoMask(lines);
-  const skip = (i) => mask[i] || isChromeLine(lines[i]);
+  // The mask is computed over the FULL pane and sliced, so a block whose `● Name(` header
+  // sits above the window keeps its children masked (same discipline as isRateLimited).
+  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines)
+    : { start: 0, end: all.length };
+  const lines = all.slice(start, end);
+  const fullMask = toolEchoMask(all).slice(start, end);
+  const skip = (i) => fullMask[i] || isChromeLine(lines[i]);
 
   // Scan from the bottom up — the most recent "resets" line is the one to
   // parse. The Claude TUI never clears earlier rate-limit messages from
