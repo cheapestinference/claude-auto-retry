@@ -153,6 +153,26 @@ const RESET_PATTERNS = [
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
 ];
 
+// --- Render shapes vs prose (#73) ---
+// A pane line may MENTION a limit or a reset time without BEING one. `/try again in/i` is
+// plain English, so "The API said to try again in 2 minutes before the window rolls" — or
+// the user's own "it told me to try again in 2 minutes, is that right?" — is reset-shaped,
+// and renders BELOW the banner it discusses, where a bottom-up scan finds it first.
+//
+// The discriminator is position within the line, not vocabulary: Claude Code RENDERS these
+// as the leading content of a line (behind at most the ⎿/└/⚠/· echo glyphs it prefixes
+// banners with), while prose carries the same words mid-sentence. This is the discipline
+// SPEND_LIMIT already uses for #71, generalised to the two halves of a banner.
+//
+// Deliberately NOT anchored to the message-bullet glyphs (⏺/●) or the prompt glyph (❯):
+// those introduce model output and user input respectively — exactly the lines #73 is
+// about — whereas a banner render uses the echo glyphs or no prefix at all.
+const RENDER_GLYPHS = '(?:[⎿└⚠·•]\\s*)*';
+const LINE_LEADS_WITH_LIMIT = new RegExp(
+  `^\\s*${RENDER_GLYPHS}(?:(?:you'?ve\\s+)?(?:hit|exceeded|reached)\\s+(?:your|the)\\s|\\d+-hour limit|(?:usage|rate)\\s+limit\\b)`, 'i');
+const LINE_LEADS_WITH_RESET = new RegExp(
+  `^\\s*${RENDER_GLYPHS}(?:please\\s+)?(?:resets?\\b|try again in\\b)`, 'i');
+
 // The spend-limit banner (#71) is the one render allowed to skip the reset-time anchor:
 // "You've hit your org's monthly spend limit · run /usage-credits …" carries NO reset,
 // yet both reporters confirmed the underlying 5h block resets and waiting works. With no
@@ -518,17 +538,39 @@ export function findRateLimitMessage(text, customPatterns = [], tailLines = 0) {
   const lines = all.slice(start, end);
   const fullMask = toolEchoMask(all).slice(start, end);
   const skip = (i) => fullMask[i] || isChromeLine(lines[i]);
+  const isReset = (i) => RESET_PATTERNS.some(p => p.test(lines[i]));
+  // A line PRESENTS a reset time (rather than mentioning one) when the reset clause leads
+  // it, or when the line leads with the limit itself — the one-line banner form,
+  // "You've hit your session limit · resets 5:20pm".
+  const presentsReset = (i) => isReset(i)
+    && (LINE_LEADS_WITH_RESET.test(lines[i]) || LINE_LEADS_WITH_LIMIT.test(lines[i]));
 
-  // Scan from the bottom up — the most recent "resets" line is the one to
-  // parse. The Claude TUI never clears earlier rate-limit messages from
-  // scrollback, so a forward scan would lock onto a stale line (e.g. an old
-  // "resets 11:30am" lingering above a fresh "resets 4:30pm").
+  // Scan from the bottom up — the most recent line is the live one. The Claude TUI never
+  // clears earlier rate-limit messages from scrollback, so a forward scan would lock onto
+  // a stale line (an old "resets 11:30am" lingering above a fresh "resets 4:30pm").
+  //
+  // Freshness stays the outer rule; what #73 changes is which lines are eligible. Prose
+  // ABOUT a limit is skipped over, so it can no longer outrank the banner above it — but
+  // eligibility is decided per line, never by looking at a neighbour. An earlier fix
+  // attempt qualified a candidate by searching for a limit line nearby, which inverted
+  // freshness (every reset it could return lay at or above the candidate), let prose that
+  // merely contained "usage limit" act as the qualifier, and chained two WINDOWs into a
+  // 12-line reach. Per-line eligibility has none of those failure modes.
   for (let i = lines.length - 1; i >= 0; i--) {
     if (skip(i)) continue;
-    if (RESET_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();
+    if (presentsReset(i)) return lines[i].trim();
   }
 
-  // Fallback: any "limit" line, also scanned from the bottom.
+  // Nothing on screen presents a reset time. Everything below is the pre-#73 behavior
+  // unchanged, so a render this file does not recognise degrades to exactly what it
+  // returned before rather than to null.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (skip(i)) continue;
+    if (isReset(i)) return lines[i].trim();
+  }
+
+  // Fallback: any "limit" line, also scanned from the bottom. Renders carrying no reset at
+  // all land here — the spend-limit banner (#71).
   for (let i = lines.length - 1; i >= 0; i--) {
     if (skip(i)) continue;
     if (LIMIT_PATTERNS.some(p => p.test(lines[i]))) return lines[i].trim();

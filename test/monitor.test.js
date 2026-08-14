@@ -206,6 +206,25 @@ describe('processOneTick', () => {
     assert.equal(s.waitUntil, hold);
   });
 
+  // --- #73 at the level the bug actually hurt: the wait itself. Reset-shaped prose below
+  //     a live banner used to win the parse, committing ~3min instead of ~5h — the monitor
+  //     then woke into the still-live limit and burned maxRetries before the real reset. ---
+  for (const [label, prose] of [
+    ['model prose', '⏺ The API said to try again in 2 minutes before the limit window rolls'],
+    ['user-typed text', '❯ it told me to try again in 2 minutes, is that right?'],
+  ]) {
+    it(`derives the wait from the banner, not ${label} below it (#73)`, async () => {
+      const t = mockTmux([bannerAt(5 * 3600_000), '', prose].join('\n'));
+      const s = createMonitorState();
+      assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+      const secs = (s.waitUntil - Date.now()) / 1000;
+      assert.ok(secs > 4 * 3600, `expected ~5h from the banner, got ${Math.round(secs)}s`);
+      // Parsed from a real reset time, so #70's latch correctly marks it non-correctable.
+      assert.equal(s._waitIsFallback, false);
+      assert.equal(t._sent.length, 0);
+    });
+  }
+
   it('never re-parses a wait that came from a real reset time', async () => {
     // Regression for the window/latch pair: reset-shaped prose ("try again in 2 minutes")
     // drifting into the pane during a correctly-derived multi-hour wait must not collapse

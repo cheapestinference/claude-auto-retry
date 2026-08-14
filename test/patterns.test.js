@@ -320,6 +320,107 @@ describe('stripAnsi (private-mode sequences)', () => {
 });
 
 describe('findRateLimitMessage', () => {
+  // --- #73: a line may MENTION a limit or reset time without BEING one. `try again in …`
+  //     is plain English, so model output or a user's own message — which renders BELOW the
+  //     banner it discusses — stole the bottom-up scan and turned a 5h wait into ~3min.
+  //     Eligibility is now per-line: the clause must LEAD the line, or the line must lead
+  //     with the limit itself. Freshness (bottom-up) is unchanged. ---
+  const PROSE  = '⏺ The API said to try again in 2 minutes before the limit window rolls';
+  const TYPED  = '❯ it told me to try again in 2 minutes, is that right?';
+  const BANNER = "You've hit your session limit · resets 5:20pm (Europe/London)";
+
+  it('prefers the one-line banner over model prose below it (#73)', () => {
+    assert.equal(findRateLimitMessage([BANNER, '', PROSE].join('\n'), [], 12), BANNER);
+  });
+  it('prefers the one-line banner over user-typed text below it (#73)', () => {
+    assert.equal(findRateLimitMessage([BANNER, '', TYPED].join('\n'), [], 12), BANNER);
+  });
+  it('prefers the banner over SEVERAL reset-shaped prose lines below it (#73)', () => {
+    // The realistic shape of the report: the model says it, then the user asks about it.
+    // With one prose line any "is a limit nearby" rule looks like it works; with two, a
+    // rule that lets prose qualify itself is exposed.
+    assert.equal(findRateLimitMessage([BANNER, '', PROSE, TYPED].join('\n'), [], 12), BANNER);
+  });
+  it('prose carrying BOTH a limit phrase and a retry hint cannot outrank the banner', () => {
+    // Self-vouching: this line satisfies the limit and reset vocabularies at once, so any
+    // rule keyed on vocabulary rather than position accepts it.
+    const selfVouching = "⏺ You've hit your usage limit, so try again in 2 minutes.";
+    assert.equal(findRateLimitMessage([BANNER, '', selfVouching].join('\n'), [], 12), BANNER);
+  });
+  it('prefers the multi-line render over prose below it (#73)', () => {
+    const text = ["⚠ You've hit your limit", '· resets 3pm (UTC)', PROSE].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), '· resets 3pm (UTC)');
+  });
+  it('still resolves the multi-line render with nothing below it', () => {
+    const text = ["⚠ You've hit your limit", '· resets 3pm (UTC)'].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), '· resets 3pm (UTC)');
+  });
+  it('still returns standalone terse API wording with no banner in sight', () => {
+    assert.equal(findRateLimitMessage('Please try again in 5 hours', [], 12), 'Please try again in 5 hours');
+  });
+  it('a terse line below a stale banner still wins — freshness is not inverted', () => {
+    // The fix must not reach backwards. "Please try again in 15 minutes" leads its line, so
+    // it is eligible and, being lower, it is the live one.
+    const text = ["You've hit your limit · resets 11:30am (UTC)", 'output',
+      'Please try again in 15 minutes'].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), 'Please try again in 15 minutes');
+  });
+  it('still returns reset-shaped prose when nothing else presents a reset', () => {
+    // Degrade to the historical behavior rather than to null.
+    assert.equal(findRateLimitMessage(PROSE, [], 12), PROSE);
+  });
+
+  // Freshness, pinned THROUGH the new eligibility pass (prose below, so the pass is what
+  // resolves each of these rather than the old bottom-up scan).
+  it('a stale banner loses to a fresher banner below it, prose notwithstanding', () => {
+    const text = ["You've hit your limit · resets 11:30am (UTC)",
+      "You've hit your limit · resets 4:30pm (UTC)", PROSE].join('\n');
+    assert.ok(findRateLimitMessage(text, [], 12).includes('4:30pm'));
+  });
+  it('a stale one-line banner loses to a fresher multi-line render, prose notwithstanding', () => {
+    const text = ["You've hit your limit · resets 11:30am (UTC)",
+      "⚠ You've hit your limit", '· resets 3pm (UTC)', PROSE].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), '· resets 3pm (UTC)');
+  });
+  it('the ⎿-prefixed banner from the original report is preferred over prose', () => {
+    // The exact render from the incident: Claude Code echoes the banner as a child line.
+    const banner = "  ⎿  You've hit your session limit · resets 6:20pm (Europe/London)";
+    assert.equal(findRateLimitMessage([banner, '', PROSE].join('\n'), [], 12), banner.trim());
+  });
+  it('a "rate limit" render is preferred over prose', () => {
+    const text = ['Rate limit hit. Resets at 4pm', '', PROSE].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), 'Rate limit hit. Resets at 4pm');
+  });
+  it('a render whose limit phrase does NOT lead falls through to the old behavior', () => {
+    // Known limit of the shape rule: "Claude usage limit reached…" buries the phrase behind
+    // a word, so it is not eligible and the historical bottom-up scan takes over — i.e.
+    // unchanged from before this fix, never worse. Pinned so the boundary is visible.
+    const text = ['Claude usage limit reached. Resets at 2pm', '', PROSE].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), PROSE);
+  });
+  it('a "5-hour limit" render is preferred over prose', () => {
+    const text = ['5-hour limit reached - resets 3pm (Europe/Dublin)', '', PROSE].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), '5-hour limit reached - resets 3pm (Europe/Dublin)');
+  });
+  it('a limit-leading line carrying NO reset time is not eligible', () => {
+    // Eligibility needs a reset time to hand to the parser; leading with a limit phrase is
+    // not enough, or prose that merely opens with "rate limit …" would be returned and
+    // parse to null, discarding the real time above it.
+    const text = ["You've hit your limit · resets 4:30pm (UTC)", '', 'rate limit questions are common'].join('\n');
+    assert.ok(findRateLimitMessage(text, [], 12).includes('4:30pm'));
+  });
+  it('works in print mode too, where the scan is unbounded', () => {
+    assert.equal(findRateLimitMessage([BANNER, '', PROSE].join('\n'), [], 0), BANNER);
+  });
+  it('a reset time quoted inside a tool result cannot win the eligibility pass', () => {
+    // The tool-echo mask (#63) must still apply to the new pass. The quoted line has to sit
+    // BELOW the real one to test anything: put it above and the bottom-up scan reaches the
+    // real banner first, so the assertion passes even with the mask disabled.
+    const text = ['· resets 4:30pm (UTC)', '● Bash(grep resets)',
+      '  ⎿  · resets 9am (UTC)'].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), '· resets 4:30pm (UTC)');
+  });
+
   // tailLines bounds the scan to the same chrome-aware window isRateLimited reads, so a
   // caller that gates on liveness can't then parse a line the gate never saw. The monitor
   // re-derives the wait during a fallback, where an unbounded scan could reach a stale
