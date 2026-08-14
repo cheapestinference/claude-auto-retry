@@ -153,25 +153,54 @@ const RESET_PATTERNS = [
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
 ];
 
-// --- Render shapes vs prose (#73) ---
+// --- Renders vs prose (#73) ---
 // A pane line may MENTION a limit or a reset time without BEING one. `/try again in/i` is
 // plain English, so "The API said to try again in 2 minutes before the window rolls" — or
 // the user's own "it told me to try again in 2 minutes, is that right?" — is reset-shaped,
 // and renders BELOW the banner it discusses, where a bottom-up scan finds it first.
 //
-// The discriminator is position within the line, not vocabulary: Claude Code RENDERS these
-// as the leading content of a line (behind at most the ⎿/└/⚠/· echo glyphs it prefixes
-// banners with), while prose carries the same words mid-sentence. This is the discipline
-// SPEND_LIMIT already uses for #71, generalised to the two halves of a banner.
+// The discriminator is the SHAPE of the line, not its vocabulary, and it is stated as a
+// VETO: a reset-shaped line is eligible unless something marks it as conversation. Stated
+// the other way round — an allowlist of known banner shapes — every render this file does
+// not recognise is demoted, including a LIVE one sitting below a stale banner, which is
+// worse than the pre-#73 behavior it replaces ("Claude usage limit reached. Resets at 2pm"
+// below "… resets 11:30am" would hand the monitor the stale time, and #70's latch would
+// then mark it non-correctable). A veto only ever demotes lines it can positively identify,
+// so an unrecognised render keeps the freshness ordering it had before.
 //
-// Deliberately NOT anchored to the message-bullet glyphs (⏺/●) or the prompt glyph (❯):
-// those introduce model output and user input respectively — exactly the lines #73 is
-// about — whereas a banner render uses the echo glyphs or no prefix at all.
-const RENDER_GLYPHS = '(?:[⎿└⚠·•]\\s*)*';
-const LINE_LEADS_WITH_LIMIT = new RegExp(
-  `^\\s*${RENDER_GLYPHS}(?:(?:you'?ve\\s+)?(?:hit|exceeded|reached)\\s+(?:your|the)\\s|\\d+-hour limit|(?:usage|rate)\\s+limit\\b)`, 'i');
-const LINE_LEADS_WITH_RESET = new RegExp(
-  `^\\s*${RENDER_GLYPHS}(?:please\\s+)?(?:resets?\\b|try again in\\b)`, 'i');
+// Two per-line signals, no neighbour lookups:
+//
+//   1. THE MESSAGE GLYPHS. ⏺/● introduce model output and ❯/> the user's own input —
+//      exactly the lines #73 is about. A banner renders behind the echo glyphs (⎿/└/⚠/·)
+//      or with no prefix at all, so it is never marked.
+//   2. WHAT FOLLOWS THE RESET CLAUSE. A render stops at the time, give or take a timezone
+//      qualifier ("· resets 3pm (UTC)", "resets 3am NY", "Please try again in 5 hours").
+//      A sentence keeps going: "…try again in 2 minutes, so I'll wait for that",
+//      "…resets 9am tomorrow according to the header". This is the half that catches prose
+//      whose WRAPPED continuation happens to begin with the clause — tmux capture-pane is
+//      called without -J (src/tmux.js), so a wrap arrives as its own line and a rule keyed
+//      on what LEADS the line sees "  try again in 2 minutes, so I'll wait" as a render.
+const MESSAGE_GLYPH = /^\s*[⏺●❯>]\s/;
+const RESET_TAIL_WORDS = 2;                          // "(Europe/London)" → 0, "NY" → 1
+
+// Text after the reset clause, or null when the line carries no reset time at all.
+function resetClauseTail(line) {
+  let end = -1;
+  for (const p of RESET_PATTERNS) {
+    const m = p.exec(line);
+    if (m) end = Math.max(end, m.index + m[0].length);
+  }
+  return end === -1 ? null : line.slice(end);
+}
+
+function isProseLine(line) {
+  if (MESSAGE_GLYPH.test(line)) return true;
+  const tail = resetClauseTail(line);
+  if (tail === null) return false;
+  // Parenthesised qualifiers are furniture, and punctuation/box-drawing is not a word.
+  const words = tail.replace(/\([^)]*\)/g, ' ').split(/[^\p{L}\p{N}\/:+_-]+/u).filter(Boolean);
+  return words.length > RESET_TAIL_WORDS;
+}
 
 // The spend-limit banner (#71) is the one render allowed to skip the reset-time anchor:
 // "You've hit your org's monthly spend limit · run /usage-credits …" carries NO reset,
@@ -539,30 +568,33 @@ export function findRateLimitMessage(text, customPatterns = [], tailLines = 0) {
   const fullMask = toolEchoMask(all).slice(start, end);
   const skip = (i) => fullMask[i] || isChromeLine(lines[i]);
   const isReset = (i) => RESET_PATTERNS.some(p => p.test(lines[i]));
-  // A line PRESENTS a reset time (rather than mentioning one) when the reset clause leads
-  // it, or when the line leads with the limit itself — the one-line banner form,
-  // "You've hit your session limit · resets 5:20pm".
-  const presentsReset = (i) => isReset(i)
-    && (LINE_LEADS_WITH_RESET.test(lines[i]) || LINE_LEADS_WITH_LIMIT.test(lines[i]));
+  // A line PRESENTS a reset time rather than mentioning one unless its shape marks it as
+  // conversation — a message/prompt glyph, or a sentence continuing past the clause.
+  const presentsReset = (i) => isReset(i) && !isProseLine(lines[i]);
 
   // Scan from the bottom up — the most recent line is the live one. The Claude TUI never
   // clears earlier rate-limit messages from scrollback, so a forward scan would lock onto
   // a stale line (an old "resets 11:30am" lingering above a fresh "resets 4:30pm").
   //
   // Freshness stays the outer rule; what #73 changes is which lines are eligible. Prose
-  // ABOUT a limit is skipped over, so it can no longer outrank the banner above it — but
+  // ABOUT a limit is vetoed, so it can no longer outrank the banner above it — but
   // eligibility is decided per line, never by looking at a neighbour. An earlier fix
   // attempt qualified a candidate by searching for a limit line nearby, which inverted
   // freshness (every reset it could return lay at or above the candidate), let prose that
   // merely contained "usage limit" act as the qualifier, and chained two WINDOWs into a
   // 12-line reach. Per-line eligibility has none of those failure modes.
+  //
+  // This pass can still reach past a lower line — that is the point — so the veto has to
+  // stay narrow enough that it only ever passes over conversation. Widening it into "does
+  // this look like a banner I know" is what re-introduces the freshness inversion, one
+  // unrecognised render at a time.
   for (let i = lines.length - 1; i >= 0; i--) {
     if (skip(i)) continue;
     if (presentsReset(i)) return lines[i].trim();
   }
 
-  // Nothing on screen presents a reset time. Everything below is the pre-#73 behavior
-  // unchanged, so a render this file does not recognise degrades to exactly what it
+  // Every reset-shaped line on screen was vetoed. Everything below is the pre-#73 behavior
+  // unchanged, so a pane made only of talk about a limit degrades to exactly what the scan
   // returned before rather than to null.
   for (let i = lines.length - 1; i >= 0; i--) {
     if (skip(i)) continue;

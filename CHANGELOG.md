@@ -13,16 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   …` matches ordinary English — so a model sentence ("The API said to try again in 2
   minutes …") or the user's own question, rendered *below* the banner it discusses, stole
   the parse and turned a 5-hour wait into ~3 minutes. The monitor then woke into the
-  still-live limit and burned `maxRetries` before the real reset. The discriminator is
-  position within the line, not vocabulary: Claude Code *renders* a banner's limit and
-  reset clauses as the leading content of a line (behind at most the `⎿`/`└`/`⚠`/`·` echo
-  glyphs), while prose carries the same words mid-sentence — the discipline the
-  spend-limit banner already uses, generalised. Lines that merely mention a limit are now
-  skipped over, so the banner above them wins. Eligibility is decided per line and never
-  by inspecting a neighbour, which keeps the bottom-up scan — and therefore freshness —
-  exactly as it was: a stale banner still loses to any newer one below it. Anything the
-  scan does not recognise as a render falls through to the previous behaviour rather than
-  to no match at all.
+  still-live limit and burned `maxRetries` before the real reset. The discriminator is the
+  shape of the line, not its vocabulary, and it is stated as a *veto*: a reset-shaped line
+  stays eligible unless it carries a message/prompt glyph (`⏺`/`●`/`❯`) or a sentence
+  running on past the reset clause ("…try again in 2 minutes, so I'll wait"), which is what
+  catches prose whose wrapped continuation happens to begin with the clause. Lines that
+  merely mention a limit are vetoed, so the banner above them wins. Eligibility is decided
+  per line and never by inspecting a neighbour, which keeps the bottom-up scan — and
+  therefore freshness — as it was: a stale banner still loses to any newer render below it,
+  including renders this file does not recognise. Anything vetoed falls through to the
+  previous behaviour rather than to no match at all.
 - **The org/monthly spend-limit banner is now detected (#71).** Team/org accounts (and
   individual accounts whose extra-usage budget is exhausted) get "You've hit your org's
   monthly spend limit · run /usage-credits …" — undetected for two independent reasons:

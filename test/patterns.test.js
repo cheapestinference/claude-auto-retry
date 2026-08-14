@@ -391,12 +391,62 @@ describe('findRateLimitMessage', () => {
     const text = ['Rate limit hit. Resets at 4pm', '', PROSE].join('\n');
     assert.equal(findRateLimitMessage(text, [], 12), 'Rate limit hit. Resets at 4pm');
   });
-  it('a render whose limit phrase does NOT lead falls through to the old behavior', () => {
-    // Known limit of the shape rule: "Claude usage limit reached…" buries the phrase behind
-    // a word, so it is not eligible and the historical bottom-up scan takes over — i.e.
-    // unchanged from before this fix, never worse. Pinned so the boundary is visible.
+  it('a render whose limit phrase does NOT lead is still preferred over prose', () => {
+    // "Claude usage limit reached…" buries the phrase behind a word, so no allowlist of
+    // banner shapes reaches it. The rule is a veto instead: the line says nothing that
+    // marks it as conversation, so it stays eligible.
     const text = ['Claude usage limit reached. Resets at 2pm', '', PROSE].join('\n');
-    assert.equal(findRateLimitMessage(text, [], 12), PROSE);
+    assert.equal(findRateLimitMessage(text, [], 12), 'Claude usage limit reached. Resets at 2pm');
+  });
+  it('a stale banner never outranks an unrecognised render below it', () => {
+    // The freshness inversion an allowlist would introduce, and the reason the rule is a
+    // veto. Demoting every render this file doesn't know hands the monitor the stale time —
+    // and #70's latch, seeing a parsed result, marks it non-correctable.
+    const text = ["You've hit your limit · resets 11:30am (UTC)", 'output',
+      'API Error: rate_limit_error, try again in 15 minutes'].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), 'API Error: rate_limit_error, try again in 15 minutes');
+  });
+  it('a timezone-qualified render is not mistaken for prose', () => {
+    // The veto's second signal counts what follows the reset clause; a bare timezone word
+    // ("resets 3am NY", the #6 fixture) is furniture, not a sentence carrying on.
+    const text = ['5-hour limit reached - resets 3am NY', '', PROSE].join('\n');
+    assert.equal(findRateLimitMessage(text, [], 12), '5-hour limit reached - resets 3am NY');
+  });
+  it('a parenthesised timezone does not spend the tail budget', () => {
+    // Qualifiers in brackets are furniture whatever their length — "(NZDT, UTC+13)" would
+    // otherwise consume the whole budget and veto a real render.
+    const banner = 'Rate limit hit. Resets at 11:40pm Auckland (NZDT, UTC+13)';
+    assert.equal(findRateLimitMessage([banner, '', PROSE].join('\n'), [], 12), banner);
+  });
+  it('WRAPPED prose whose continuation line begins with the clause cannot win', () => {
+    // tmux capture-pane is unjoined, so a wrapped sentence arrives as its own line — and
+    // the wrap can land right before "try again in …", which is then what LEADS the line.
+    // The sentence continuing past the clause is what marks it.
+    const wrapped = ['⏺ The API told me the window is nearly over and that I should',
+      '  try again in 2 minutes, so I will wait for that.'];
+    assert.equal(findRateLimitMessage([BANNER, '', ...wrapped].join('\n'), [], 12), BANNER);
+  });
+  it('WRAPPED prose continuing past a reset time cannot win', () => {
+    const wrapped = ['⏺ Your session limit is still live and it',
+      '  resets 9:00am tomorrow according to the header.'];
+    assert.equal(findRateLimitMessage([BANNER, '', ...wrapped].join('\n'), [], 12), BANNER);
+  });
+  it('a short question at the prompt cannot win', () => {
+    // Nothing but the prompt glyph marks this one: the sentence ends at the clause, so the
+    // tail signal alone would accept "❯ so it resets 5pm?" as a render.
+    const typed = '❯ so it resets 5pm?';
+    assert.equal(findRateLimitMessage([BANNER, '', typed].join('\n'), [], 12), BANNER);
+  });
+  it('a render carrying both clauses is measured from the LAST one', () => {
+    // "· resets 3pm … or try again in 5 hours" — measuring the tail from the first clause
+    // would read the second as a sentence running on and veto a real banner.
+    const banner = "You've hit your limit · resets 3pm (UTC), or try again in 5 hours";
+    assert.equal(findRateLimitMessage([banner, '', PROSE].join('\n'), [], 12), banner);
+  });
+  it('typed text carrying no prompt glyph cannot win', () => {
+    // Submitted input re-renders without ❯ in some layouts; the sentence shape still marks it.
+    const typed = 'try again in 2 minutes was what it said, right?';
+    assert.equal(findRateLimitMessage([BANNER, '', typed].join('\n'), [], 12), BANNER);
   });
   it('a "5-hour limit" render is preferred over prose', () => {
     const text = ['5-hour limit reached - resets 3pm (Europe/Dublin)', '', PROSE].join('\n');

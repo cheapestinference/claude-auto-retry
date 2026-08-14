@@ -212,6 +212,10 @@ describe('processOneTick', () => {
   for (const [label, prose] of [
     ['model prose', '⏺ The API said to try again in 2 minutes before the limit window rolls'],
     ['user-typed text', '❯ it told me to try again in 2 minutes, is that right?'],
+    // The wrap lands right before the clause, so "try again in 2 minutes …" is what leads
+    // the line — tmux capture-pane is unjoined, so this is one pane line, not a fragment.
+    ['wrapped model prose', ['⏺ The API told me the window is nearly over and that I should',
+      '  try again in 2 minutes, so I will wait for that.'].join('\n')],
   ]) {
     it(`derives the wait from the banner, not ${label} below it (#73)`, async () => {
       const t = mockTmux([bannerAt(5 * 3600_000), '', prose].join('\n'));
