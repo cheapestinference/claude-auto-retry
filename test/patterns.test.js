@@ -420,6 +420,17 @@ describe('org/monthly spend-limit banner (#71)', () => {
     const curly = "You’ve hit your org’s monthly spend limit · run /usage-credits to raise it";
     assert.equal(isRateLimited(withCompanion(curly), [], 12), true);
   });
+  it('does NOT fire on a WRAPPED quotation of the banner', () => {
+    // Model output wraps with a hanging indent, so the continuation begins at whitespace
+    // and then whatever the sentence was up to. Indented with no echo marker is a wrap,
+    // not a render — otherwise this false-fires a 5h wait on an idle session.
+    const pane = ['⏺ The team banner reads:', `  ${SPEND_ORG}`, '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('still detects the render behind an INDENTED echo marker', () => {
+    // The exclusion is "indented with no marker", not "indented": the ⎿ echo form is real.
+    assert.equal(isRateLimited(withCompanion(`  ⎿  ${SPEND_ORG}`), [], 12), true);
+  });
 });
 
 describe('a banner that names /usage-credits inline is content, not chrome', () => {

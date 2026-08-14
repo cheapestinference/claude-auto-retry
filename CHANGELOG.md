@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   apostrophe in "you've" while the qualifier beside it already admitted `’`, so a render in
   typographic quotes was missed too. Both compounded with the chrome misclassification
   above: invisible rather than merely unanchored.
+- **A wrapped quotation of the spend banner no longer false-fires a wait.** `^\s*` is not an
+  anchor when model output wraps with a hanging indent: a continuation line beginning
+  "You've hit your org's monthly spend limit …" entered a 5-hour wait and typed retries into
+  an idle session. A render starts at column 0 or behind an echo marker; indented with no
+  marker is a wrap. (Trailing punctuation deliberately stays out of it — "You've hit your
+  monthly spend limit." is a real render with a full stop.)
 
 ## [0.7.1] - 2026-08-14
 

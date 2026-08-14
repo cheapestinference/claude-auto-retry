@@ -178,7 +178,17 @@ const RESET_PATTERNS = [
 //     only ⎿/└ made "⚠ You've hit your org's monthly spend limit …" invisible.
 //   - APOSTROPHES ARE TYPOGRAPHIC. The qualifier class already admits ’ for "org’s"; the
 //     "you've" ahead of it did not, so a render in curly quotes was missed as well.
-const SPEND_LIMIT = /^\s*(?:[⎿└⚠·•]\s*)*you['’]?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
+//
+// And one it has to EXCLUDE: `^\s*` is not an anchor. Model output wraps with a hanging
+// indent, so a continuation line begins with whitespace and then whatever the sentence was
+// up to — quoting the banner ("⏺ The team banner reads:" / "  You've hit your org's monthly
+// spend limit · …") false-fired a 5h wait and then typed retries into an idle session. A
+// render starts at column 0 or behind an echo marker; indented with no marker is a wrap.
+// (A quotation that lands at column 0 still fires; the remaining anchors are the live-region
+// gate and the bounded, correctable fallback the wait lands on.) Trailing punctuation is
+// deliberately NOT a signal: "You've hit your monthly spend limit." — the individual variant
+// from the #71 report — is a real render with a full stop.
+const SPEND_LIMIT = /^(?:(?:\s*[⎿└⚠·•])+\s*)?you['’]?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
 
 const WINDOW = 6;
 
