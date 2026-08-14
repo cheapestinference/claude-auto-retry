@@ -431,6 +431,58 @@ describe('findRateLimitMessage', () => {
       '  resets 9:00am tomorrow according to the header.'];
     assert.equal(findRateLimitMessage([BANNER, '', ...wrapped].join('\n'), [], 12), BANNER);
   });
+  it('WRAPPED prose ending AT the clause cannot win either', () => {
+    // The tail is empty here, so only the full stop marks it — a render never ends in one.
+    const wrapped = ['⏺ I checked the header and the limit', '  resets 3pm.'];
+    assert.equal(findRateLimitMessage([BANNER, '', ...wrapped].join('\n'), [], 12), BANNER);
+  });
+
+  // --- Shapes the veto must NOT claim. Each of these is a real render that the pre-#73
+  //     scan returned; demoting one hands the monitor whatever stale line sits above it. ---
+  const STALE = "You've hit your limit · resets 11:30am (UTC)";
+  it('a banner rendered on a message bullet is not vetoed (#63 fixture)', () => {
+    // "API errors render with the same ● glyph but never as `Name(...)`" — test/tool-echo.
+    // The bullet marks a line only when what follows it is not a limit or reset clause.
+    const live = "● You've hit your session limit · resets 2:10am (Australia/Melbourne)";
+    assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
+  });
+  it('a compound duration is not read as a sentence carrying on', () => {
+    // The clause matcher stops at the first unit ("resets in 3"), leaving "hours 15 minutes"
+    // in the tail — three words, and the whole budget, spent on the duration itself.
+    for (const live of ["You've hit your limit · resets in 3 hours 15 minutes",
+      'Please try again in 4 hours and 12 minutes']) {
+      assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
+    }
+  });
+  it('a dual-limit render is measured from its last clause, same matcher twice', () => {
+    const live = '5-hour limit resets 3pm, weekly limit resets 9am Monday';
+    assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
+  });
+  it('a separator does not count as one of the tail words', () => {
+    for (const live of ['5-hour limit reached · resets 3pm - see above',
+      '5-hour limit reached · resets 3pm / 10:30 UTC']) {
+      assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
+    }
+  });
+  it('typed text still loses when the prompt glyph carries no space', () => {
+    assert.equal(findRateLimitMessage([BANNER, 'output', '>try again in 2 minutes ok?'].join('\n'), [], 12), BANNER);
+  });
+
+  // --- One case per signal, shaped so the other two do not fire: each of these is vetoed
+  //     by exactly one of the prompt glyph, the message bullet, and the tail budget. ---
+  it('an unpunctuated instruction at the prompt cannot win', () => {
+    assert.equal(findRateLimitMessage([BANNER, '', '❯ try again in 5 minutes'].join('\n'), [], 12), BANNER);
+  });
+  it('an unpunctuated sentence on a message bullet cannot win', () => {
+    assert.equal(findRateLimitMessage([BANNER, '', '⏺ It said to try again in 2 minutes'].join('\n'), [], 12), BANNER);
+  });
+  it('an unpunctuated wrapped continuation cannot win', () => {
+    // The wrap lands before the clause and the sentence runs on into the NEXT line, so
+    // neither glyph nor full stop is on this one — only the tail marks it.
+    const wrapped = ['⏺ Your session limit is still live and it',
+      '  resets 9:00am tomorrow according to the header', '  of the transcript'];
+    assert.equal(findRateLimitMessage([BANNER, '', ...wrapped].join('\n'), [], 12), BANNER);
+  });
   it('a short question at the prompt cannot win', () => {
     // Nothing but the prompt glyph marks this one: the sentence ends at the clause, so the
     // tail signal alone would accept "❯ so it resets 5pm?" as a render.

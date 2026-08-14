@@ -168,38 +168,62 @@ const RESET_PATTERNS = [
 // then mark it non-correctable). A veto only ever demotes lines it can positively identify,
 // so an unrecognised render keeps the freshness ordering it had before.
 //
-// Two per-line signals, no neighbour lookups:
+// Three per-line signals, no neighbour lookups:
 //
-//   1. THE MESSAGE GLYPHS. ⏺/● introduce model output and ❯/> the user's own input —
-//      exactly the lines #73 is about. A banner renders behind the echo glyphs (⎿/└/⚠/·)
-//      or with no prefix at all, so it is never marked.
-//   2. WHAT FOLLOWS THE RESET CLAUSE. A render stops at the time, give or take a timezone
-//      qualifier ("· resets 3pm (UTC)", "resets 3am NY", "Please try again in 5 hours").
-//      A sentence keeps going: "…try again in 2 minutes, so I'll wait for that",
-//      "…resets 9am tomorrow according to the header". This is the half that catches prose
-//      whose WRAPPED continuation happens to begin with the clause — tmux capture-pane is
-//      called without -J (src/tmux.js), so a wrap arrives as its own line and a rule keyed
-//      on what LEADS the line sees "  try again in 2 minutes, so I'll wait" as a render.
-const MESSAGE_GLYPH = /^\s*[⏺●❯>]\s/;
+//   1. THE PROMPT GLYPH. ❯/> introduce the user's own input, which is never a render.
+//   2. SENTENCE PUNCTUATION. A render does not end in ./?/! — "· resets 3pm (UTC)" — while
+//      a sentence does, including one whose WRAPPED continuation happens to begin with the
+//      clause ("  try again in 2 minutes, so I'll wait."). tmux capture-pane is called
+//      without -J (src/tmux.js), so a wrap arrives as its own line: a rule keyed on what
+//      LEADS the line would read that continuation as a render.
+//   3. WHAT FOLLOWS THE RESET CLAUSE. A render stops at the time, give or take a timezone
+//      qualifier or the rest of a compound duration ("· resets 3pm (UTC)", "resets 3am NY",
+//      "resets in 3 hours 15 minutes"). A sentence keeps going: "…resets 9am tomorrow
+//      according to the header".
+//
+// The message bullets ⏺/● are NOT a signal on their own: #63's fixture has a live banner
+// rendering as "● You've hit your session limit · resets 2:10am", so vetoing the glyph
+// demotes a real render. They mark a line only when what follows them is not a limit or
+// reset clause — i.e. the bullet introduces a sentence ABOUT one. That test is an exemption
+// inside the veto and can only ever RESCUE a line, so it carries none of the allowlist's
+// freshness risk: a render it fails to recognise is judged by signals 2 and 3 as before.
+const PROMPT_GLYPH = /^\s*[❯>]/;
+const BULLET_GLYPH = /^\s*[⏺●]\s/;
+const BULLET_LEADS_WITH_CLAUSE = new RegExp(
+  `^\\s*[⏺●]\\s*(?:(?:you'?ve\\s+)?(?:hit|exceeded|reached)\\s+(?:your|the)\\s|\\d+-hour limit`
+  + `|(?:usage|rate)\\s+limit\\b|(?:please\\s+)?(?:resets?\\b|try again in\\b))`, 'i');
+const SENTENCE_END = /[.?!]["'’”)\]]?\s*$/;
 const RESET_TAIL_WORDS = 2;                          // "(Europe/London)" → 0, "NY" → 1
+// The clause matchers stop at the first unit ("resets in 3", "try again in 4 hours"), so the
+// rest of a compound duration is part of the clause, not the start of a sentence.
+const DURATION_TAIL = /^(?:\s*(?:and|&|\d+|h|hrs?|hours?|m|mins?|minutes?|s|secs?|seconds?)\b)+/i;
+// Scanned globally: a dual-limit render ("5-hour limit resets 3pm, weekly limit resets 9am
+// Monday") must be measured from its LAST clause, including when both use the same matcher.
+const RESET_PATTERNS_G = RESET_PATTERNS.map((p) => new RegExp(p.source, `${p.flags}g`));
 
-// Text after the reset clause, or null when the line carries no reset time at all.
+// Text after the last reset clause, or null when the line carries no reset time at all.
 function resetClauseTail(line) {
   let end = -1;
-  for (const p of RESET_PATTERNS) {
-    const m = p.exec(line);
-    if (m) end = Math.max(end, m.index + m[0].length);
+  for (const p of RESET_PATTERNS_G) {
+    p.lastIndex = 0;
+    for (let m = p.exec(line); m !== null; m = p.exec(line)) end = Math.max(end, m.index + m[0].length);
   }
   return end === -1 ? null : line.slice(end);
 }
 
-function isProseLine(line) {
-  if (MESSAGE_GLYPH.test(line)) return true;
+// True when the line PRESENTS a reset time rather than mentioning one — the eligibility
+// test for findRateLimitMessage's first pass. Also answers "does this line carry a reset
+// time at all", so the clause matchers run once per line rather than twice.
+function presentsResetTime(line) {
   const tail = resetClauseTail(line);
   if (tail === null) return false;
-  // Parenthesised qualifiers are furniture, and punctuation/box-drawing is not a word.
-  const words = tail.replace(/\([^)]*\)/g, ' ').split(/[^\p{L}\p{N}\/:+_-]+/u).filter(Boolean);
-  return words.length > RESET_TAIL_WORDS;
+  if (PROMPT_GLYPH.test(line)) return false;
+  if (BULLET_GLYPH.test(line) && !BULLET_LEADS_WITH_CLAUSE.test(line)) return false;
+  if (SENTENCE_END.test(line)) return false;
+  // Parenthesised qualifiers are furniture; punctuation and box-drawing are not words.
+  const words = tail.replace(DURATION_TAIL, ' ').replace(/\([^)]*\)/g, ' ')
+    .split(/[^\p{L}\p{N}\/:+_-]+/u).filter((w) => /[\p{L}\p{N}]/u.test(w));
+  return words.length <= RESET_TAIL_WORDS;
 }
 
 // The spend-limit banner (#71) is the one render allowed to skip the reset-time anchor:
@@ -568,9 +592,7 @@ export function findRateLimitMessage(text, customPatterns = [], tailLines = 0) {
   const fullMask = toolEchoMask(all).slice(start, end);
   const skip = (i) => fullMask[i] || isChromeLine(lines[i]);
   const isReset = (i) => RESET_PATTERNS.some(p => p.test(lines[i]));
-  // A line PRESENTS a reset time rather than mentioning one unless its shape marks it as
-  // conversation — a message/prompt glyph, or a sentence continuing past the clause.
-  const presentsReset = (i) => isReset(i) && !isProseLine(lines[i]);
+  const presentsReset = (i) => presentsResetTime(lines[i]);
 
   // Scan from the bottom up — the most recent line is the live one. The Claude TUI never
   // clears earlier rate-limit messages from scrollback, so a forward scan would lock onto

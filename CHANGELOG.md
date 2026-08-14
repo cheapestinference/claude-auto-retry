@@ -15,10 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the parse and turned a 5-hour wait into ~3 minutes. The monitor then woke into the
   still-live limit and burned `maxRetries` before the real reset. The discriminator is the
   shape of the line, not its vocabulary, and it is stated as a *veto*: a reset-shaped line
-  stays eligible unless it carries a message/prompt glyph (`⏺`/`●`/`❯`) or a sentence
-  running on past the reset clause ("…try again in 2 minutes, so I'll wait"), which is what
-  catches prose whose wrapped continuation happens to begin with the clause. Lines that
-  merely mention a limit are vetoed, so the banner above them wins. Eligibility is decided
+  stays eligible unless it is the user's input row (`❯`/`>`), ends in sentence punctuation,
+  runs on past the reset clause ("…resets 9am tomorrow according to the header"), or sits on
+  a message bullet introducing something other than a limit or reset clause. The last two
+  are what catch prose whose *wrapped* continuation happens to begin with the clause. Lines
+  that merely mention a limit are vetoed, so the banner above them wins. Eligibility is decided
   per line and never by inspecting a neighbour, which keeps the bottom-up scan — and
   therefore freshness — as it was: a stale banner still loses to any newer render below it,
   including renders this file does not recognise. Anything vetoed falls through to the
