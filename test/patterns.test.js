@@ -406,6 +406,38 @@ describe('org/monthly spend-limit banner (#71)', () => {
   });
 });
 
+describe('a banner that names /usage-credits inline is content, not chrome', () => {
+  // The companion hint renders on its own row, but a banner can also name it mid-line. The
+  // chrome allowlist matched the hint anywhere, so those banners were stripped as
+  // furniture: the limit was still detected via the live-region backstop, but the line
+  // carrying the reset time was invisible to the parse, and the monitor took the 5h
+  // fallback instead of waking at the real time.
+  const inlineHint = "You've hit your session limit · resets 5:20pm (UTC) · run /usage-credits to finish";
+  it('parses the reset time off a banner naming the hint inline', () => {
+    const pane = [inlineHint, '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+    assert.equal(findRateLimitMessage(pane, [], 12), inlineHint);
+  });
+  it('does NOT fire on prose that names the hint mid-sentence', () => {
+    // The hint stops being furniture on these lines, so they become content the detectors
+    // can see. They must still fail on their own merits: no reset time, no banner shape.
+    for (const pane of [
+      ['⏺ When you hit your monthly spend limit, run /usage-credits', '', '❯ '],
+      ['⏺ You can run /usage-credits when you hit your usage limit', '', '❯ '],
+    ]) assert.equal(isRateLimited(pane.join('\n'), [], 12), false);
+  });
+  it('still treats the companion ROW as chrome', () => {
+    // Anchored, not abandoned: the hint leading its line is still furniture, indented or
+    // behind an echo marker, or the tail budget goes on it instead of on the banner.
+    const pane = ["You've hit your session limit · resets 2am (Europe/Zurich)",
+      "     /usage-credits to finish what you're working on.",
+      '', '✻ Brewed for 12m 3s', '', '  8 tasks (4 done, 1 in progress, 3 open)',
+      '  □ a', '  □ b', '  □ c', '  □ d', '  □ e', '  □ f', '  □ g',
+      '', '──────', '❯ ', '──────'].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
+});
+
 // --- Usage-meter statusline footer (#61) ---
 // A ccusage-style statusline renders a permanent usage meter at the very bottom of the
 // pane: "current ●●●●●●●●●● 100%  ⟳ resets in 1 hr 47 min". That row matches

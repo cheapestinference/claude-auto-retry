@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A banner that names `/usage-credits` inline is no longer treated as UI furniture.** The
+  chrome allowlist matched the hint anywhere on a line, but the companion row is not the
+  only place it renders — a session banner can carry it inline ("You've hit your session
+  limit · resets 5:20pm · run /usage-credits to finish"), and the spend-limit banner always
+  does. Those lines were stripped as chrome, so the tail dropped the only line naming the
+  limit: the spend banner needed a special case to be seen at all, and a session banner's
+  reset time was invisible to the parse, sending the monitor to the `fallbackWaitHours`
+  default instead of the real reset. The entry is now anchored to the hint *leading* its
+  row, which covers every banner that mentions it — and removes both the special case and
+  its forward reference to a constant declared 100 lines below.
+
 ## [0.7.1] - 2026-08-14
 
 ### Fixed

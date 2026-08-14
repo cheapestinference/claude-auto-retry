@@ -22,6 +22,15 @@ export function stripAnsi(text) {
 // doubles as furniture in the chrome allowlist and as the high-confidence live-limit
 // backstop signal below — one source of truth for both.
 const USAGE_CREDITS = /\/usage-credits\b/i;
+// …but only the SIGNAL may match the hint anywhere on the line. As FURNITURE it has to
+// LEAD its line, because a banner can name the hint INLINE — "You've hit your session
+// limit · resets 5:20pm · run /usage-credits to finish" is one line, not two, and the
+// spend-limit render (#71) always carries it. Matched loosely, the chrome allowlist
+// classified those banners as furniture: contentTail stripped them, so the only line
+// naming the limit — and, for a session banner, the only line carrying the reset time —
+// was invisible to every detector. The companion always renders on its own row (indented,
+// or behind the ⎿/└/· echo marker).
+const USAGE_CREDITS_HINT = /^\s*(?:[⎿└·•]\s*)*\/usage-credits\b/i;
 
 // Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
 // Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
@@ -86,7 +95,8 @@ const CHROME_LINE = [
   /\/clear to save/i,                               // "new task? /clear to save …k tokens" — anchored to the
                                                      // save hint; bare /new task\?/ matched prose questions
                                                      // ("Should I start the new task?")
-  USAGE_CREDITS,                                     // live-limit companion hint (shared w/ the backstop)
+  USAGE_CREDITS_HINT,                                // live-limit companion ROW — anchored, so a banner
+                                                     // naming the hint mid-line stays content
   /^\s*[✻✢✽✳✴✶✷]\s/,                                 // status spinner ("✻ Brewed for …")
   // Usage-meter statusline rows (#61, ccusage-style). The "⟳ resets in 1 hr 47 min"
   // countdown matches RESET_PATTERNS and renders permanently at the very bottom, BELOW
@@ -106,12 +116,11 @@ const CHROME_LINE = [
 ];
 // A live working footer ("✻ Cogitating… (esc to interrupt)") matches the spinner glyph
 // pattern above, so it must be excluded explicitly — it is live content, never furniture.
-// Likewise the spend-limit banner (#71): it carries "/usage-credits" INLINE ("…spend
-// limit · run /usage-credits to raise it"), so the companion entry would classify the
-// banner itself as furniture and findRateLimitMessage would skip the only line naming
-// the limit. A line that IS a limit banner is content, never chrome.
-const isChromeLine = (l) => !isWorkingLine(l) && !SPEND_LIMIT.test(l)
-  && CHROME_LINE.some((r) => r.test(l));
+// The spend-limit banner (#71) needed a second exemption here for the same reason a session
+// banner does: it names /usage-credits inline. Anchoring the companion entry to the hint
+// LEADING its row covers every banner that mentions it, so the special case is gone — along
+// with its forward reference to a const declared 100 lines further down.
+const isChromeLine = (l) => !isWorkingLine(l) && CHROME_LINE.some((r) => r.test(l));
 
 // Last `n` lines AFTER dropping trailing chrome, so a tall widget / input box below a
 // banner doesn't consume the window budget. Operates on an array of already-split lines.
