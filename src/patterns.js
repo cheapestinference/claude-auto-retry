@@ -30,7 +30,7 @@ const USAGE_CREDITS = /\/usage-credits\b/i;
 // naming the limit — and, for a session banner, the only line carrying the reset time —
 // was invisible to every detector. The companion always renders on its own row (indented,
 // or behind the ⎿/└/· echo marker).
-const USAGE_CREDITS_HINT = /^\s*(?:[⎿└·•]\s*)*\/usage-credits\b/i;
+const USAGE_CREDITS_HINT = /^\s*(?:[⎿└·]\s*)*\/usage-credits\b/i;
 
 // Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
 // Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
@@ -174,8 +174,9 @@ const RESET_PATTERNS = [
 // Two things the shape has to tolerate, neither of which it did — and each a TOTAL miss,
 // not a weaker match, because a banner naming /usage-credits inline that fails this pattern
 // is also the banner nothing else in the file recognises:
-//   - THE ECHO MARKER VARIES. ⚠ and · prefix limit renders elsewhere in this file; admitting
-//     only ⎿/└ made "⚠ You've hit your org's monthly spend limit …" invisible.
+//   - THE MARKER VARIES. ⚠ and · prefix limit renders elsewhere in this file (see the TUI
+//     sketch above); admitting only ⎿/└ made "⚠ You've hit your org's monthly spend limit …"
+//     invisible.
 //   - APOSTROPHES ARE TYPOGRAPHIC. The qualifier class already admits ’ for "org’s"; the
 //     "you've" ahead of it did not, so a render in curly quotes was missed as well.
 //
@@ -188,7 +189,18 @@ const RESET_PATTERNS = [
 // gate and the bounded, correctable fallback the wait lands on.) Trailing punctuation is
 // deliberately NOT a signal: "You've hit your monthly spend limit." — the individual variant
 // from the #71 report — is a real render with a full stop.
-const SPEND_LIMIT = /^(?:(?:\s*[⎿└⚠·•])+\s*)?you['’]?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
+//
+// WHICH MARKER MAY BE INDENTED IS THEREFORE PART OF THE SHAPE, and the two classes differ:
+//   - ⎿/└ are TOOL-ECHO markers. They render as indented children of the notice above them
+//     ("● Agent \"…\" finished" / "  ⎿ You've hit …"), so they must be allowed leading space.
+//     Neither is a character prose reaches for, so that costs nothing.
+//   - ⚠/· are BANNER markers, and the TUI renders them flush left — every render in this
+//     file and its suite sits at column 0. Indented, they are prose BULLETS: a model quoting
+//     the banner bullets it far more often than it hangs it under a bare indent, so admitting
+//     them there reopens the very wrap hole the paragraph above closes. Column 0 only.
+// (A leading `•` is not admitted at all: no render in this file uses it, and it is the one
+// glyph that is purely a prose bullet.)
+const SPEND_LIMIT = /^(?:\s*[⎿└]\s*|[⚠·]\s*)?you['’]?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
 
 const WINDOW = 6;
 

@@ -431,6 +431,17 @@ describe('org/monthly spend-limit banner (#71)', () => {
     // The exclusion is "indented with no marker", not "indented": the ⎿ echo form is real.
     assert.equal(isRateLimited(withCompanion(`  ⎿  ${SPEND_ORG}`), [], 12), true);
   });
+  it('does NOT fire on an indented BULLET quotation of the banner', () => {
+    // The same wrap the test above pins, written as a list item — the likelier shape by far,
+    // since a model quoting a banner bullets it. ⚠/· earn their place at column 0 (that is
+    // how the TUI renders them, here and everywhere else in this file), but INDENTED they
+    // are prose bullets, and admitting them there reopens the wrap hole. The tool-echo
+    // markers ⎿/└ are the only ones that legitimately render indented.
+    for (const bullet of ['·', '•', '-', '*']) {
+      const pane = ['⏺ Two things could be happening:', `  ${bullet} ${SPEND_ORG}`, '', '❯ '].join('\n');
+      assert.equal(isRateLimited(pane, [], 12), false, `bullet ${bullet} fired`);
+    }
+  });
 });
 
 describe('a banner that names /usage-credits inline is content, not chrome', () => {
