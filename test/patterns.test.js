@@ -404,6 +404,22 @@ describe('org/monthly spend-limit banner (#71)', () => {
   it('findRateLimitMessage returns the spend line (unparseable → bounded fallback downstream)', () => {
     assert.match(findRateLimitMessage(spendRender, [], 12), /spend limit/i);
   });
+
+  // --- Render shapes the banner pattern has to tolerate. Each was a total miss: the shape
+  //     failed, and a spend banner nothing recognises is also the banner nothing else in
+  //     the file can fall back on. ---
+  const withCompanion = (banner) => [banner,
+    "     /usage-credits to finish what you're working on.", '', '❯ '].join('\n');
+  for (const [label, marker] of [['⚠', '⚠ '], ['·', '· '], ['└ echo', '  └ ']]) {
+    it(`detects the spend banner behind the ${label} marker`, () => {
+      assert.equal(isRateLimited(withCompanion(marker + SPEND_ORG), [], 12), true);
+    });
+  }
+  it('detects the spend banner written with typographic apostrophes', () => {
+    // The qualifier class already admitted ’ for "org’s"; the "you’ve" ahead of it did not.
+    const curly = "You’ve hit your org’s monthly spend limit · run /usage-credits to raise it";
+    assert.equal(isRateLimited(withCompanion(curly), [], 12), true);
+  });
 });
 
 describe('a banner that names /usage-credits inline is content, not chrome', () => {

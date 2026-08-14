@@ -166,11 +166,19 @@ const RESET_PATTERNS = [
 // "You've hit your org's monthly spend limit · run /usage-credits …" carries NO reset,
 // yet both reporters confirmed the underlying 5h block resets and waiting works. With no
 // reset line to anchor on, the shape itself carries the false-positive defense: both real
-// renders START the line with "You've hit …" (optionally behind the ⎿/└ echo marker),
-// while prose explaining spend limits references them mid-sentence ("when you hit your
-// monthly spend limit …"). The remaining anchors are the /usage-credits companion in the
-// live region, and the wait produced downstream being the bounded, correctable fallback.
-const SPEND_LIMIT = /^\s*(?:[⎿└]\s*)?you'?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
+// renders START the line with "You've hit …" (optionally behind an echo marker), while
+// prose explaining spend limits references them mid-sentence ("when you hit your monthly
+// spend limit …"). The remaining anchors are the /usage-credits companion in the live
+// region, and the wait produced downstream being the bounded, correctable fallback.
+//
+// Two things the shape has to tolerate, neither of which it did — and each a TOTAL miss,
+// not a weaker match, because a banner naming /usage-credits inline that fails this pattern
+// is also the banner nothing else in the file recognises:
+//   - THE ECHO MARKER VARIES. ⚠ and · prefix limit renders elsewhere in this file; admitting
+//     only ⎿/└ made "⚠ You've hit your org's monthly spend limit …" invisible.
+//   - APOSTROPHES ARE TYPOGRAPHIC. The qualifier class already admits ’ for "org’s"; the
+//     "you've" ahead of it did not, so a render in curly quotes was missed as well.
+const SPEND_LIMIT = /^\s*(?:[⎿└⚠·•]\s*)*you['’]?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
 
 const WINDOW = 6;
 

@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default instead of the real reset. The entry is now anchored to the hint *leading* its
   row, which covers every banner that mentions it — and removes both the special case and
   its forward reference to a constant declared 100 lines below.
+- **Spend-limit render shapes that were total misses (#71 follow-up).** The banner pattern
+  admitted only the `⎿`/`└` echo markers, so the `⚠`- and `·`-prefixed renders — markers
+  this file already expects on limit banners — were never matched; and it required an ASCII
+  apostrophe in "you've" while the qualifier beside it already admitted `’`, so a render in
+  typographic quotes was missed too. Both compounded with the chrome misclassification
+  above: invisible rather than merely unanchored.
 
 ## [0.7.1] - 2026-08-14
 
