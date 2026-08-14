@@ -184,14 +184,27 @@ const RESET_PATTERNS = [
 // The message bullets ⏺/● are NOT a signal on their own: #63's fixture has a live banner
 // rendering as "● You've hit your session limit · resets 2:10am", so vetoing the glyph
 // demotes a real render. They mark a line only when what follows them is not a limit or
-// reset clause — i.e. the bullet introduces a sentence ABOUT one. That test is an exemption
-// inside the veto and can only ever RESCUE a line, so it carries none of the allowlist's
-// freshness risk: a render it fails to recognise is judged by signals 2 and 3 as before.
+// reset clause — i.e. the bullet introduces a sentence ABOUT one. Being an exemption rather
+// than an allowlist does NOT by itself make it safe, which is the trap this originally fell
+// into: the veto's other two signals do not fire on a bulleted render, so a render the
+// exemption fails to recognise is not "judged as before" — it is demoted, and the stale
+// banner above it wins. The rescue test therefore has to be as wide as the file's own idea
+// of what names a limit, which is why it asks LIMIT_PATTERNS instead of restating it.
 const PROMPT_GLYPH = /^\s*[❯>]/;
 const BULLET_GLYPH = /^\s*[⏺●]\s/;
-const BULLET_LEADS_WITH_CLAUSE = new RegExp(
-  `^\\s*[⏺●]\\s*(?:(?:you'?ve\\s+)?(?:hit|exceeded|reached)\\s+(?:your|the)\\s|\\d+-hour limit`
-  + `|(?:usage|rate)\\s+limit\\b|(?:please\\s+)?(?:resets?\\b|try again in\\b))`, 'i');
+// "Names a limit" is asked of LIMIT_PATTERNS rather than re-enumerated here. Spelling the
+// phrasings out a second time made the exemption an ALLOWLIST, which is the freshness
+// inversion in slow motion: it recognised "● You've hit your session limit …" but not
+// "● Claude usage limit reached · resets 2pm", "● Session limit reached · resets 9pm",
+// "⏺ Your 5-hour limit resets 3pm" or "● You're out of extra usage · resets 3pm" — every
+// one of them a phrase LIMIT_PATTERNS already carries, and every one of them demoted in
+// favour of whatever stale banner sat above it. One source of truth, so a render the file
+// learns to recognise anywhere is recognised here too.
+// `try again in` is excluded: it is a RESET clause in limit clothing ("⏺ I will try again
+// in 3 minutes" is prose), so it must not vouch for a line on its own.
+const NAMES_A_LIMIT = LIMIT_PATTERNS.filter((p) => !/try again in/.test(p.source));
+// The bullet may also be followed directly by the reset clause itself, with no limit named.
+const BULLET_LEADS_WITH_CLAUSE = /^\s*[⏺●]\s*(?:please\s+)?(?:resets?\b|try again in\b)/i;
 const SENTENCE_END = /[.?!]["'’”)\]]?\s*$/;
 const RESET_TAIL_WORDS = 2;                          // "(Europe/London)" → 0, "NY" → 1
 // The clause matchers stop at the first unit ("resets in 3", "try again in 4 hours"), so the
@@ -218,7 +231,8 @@ function presentsResetTime(line) {
   const tail = resetClauseTail(line);
   if (tail === null) return false;
   if (PROMPT_GLYPH.test(line)) return false;
-  if (BULLET_GLYPH.test(line) && !BULLET_LEADS_WITH_CLAUSE.test(line)) return false;
+  if (BULLET_GLYPH.test(line) && !BULLET_LEADS_WITH_CLAUSE.test(line)
+      && !NAMES_A_LIMIT.some((p) => p.test(line))) return false;
   if (SENTENCE_END.test(line)) return false;
   // Parenthesised qualifiers are furniture; punctuation and box-drawing are not words.
   const words = tail.replace(DURATION_TAIL, ' ').replace(/\([^)]*\)/g, ' ')

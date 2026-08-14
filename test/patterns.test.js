@@ -446,6 +446,49 @@ describe('findRateLimitMessage', () => {
     const live = "● You've hit your session limit · resets 2:10am (Australia/Melbourne)";
     assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
   });
+  // The bullet exemption is an ALLOWLIST of limit phrasings, so it recognises only the
+  // wordings enumerated in BULLET_LEADS_WITH_CLAUSE. Every render below is one this file
+  // already treats as real — each phrase comes straight out of LIMIT_PATTERNS — but none
+  // of them leads with a phrase the exemption lists, so the bullet condemns them and the
+  // STALE banner above wins. That is the freshness inversion the veto is documented as
+  // never introducing ("Widening it into 'does this look like a banner I know' is what
+  // re-introduces the freshness inversion, one unrecognised render at a time"), reached
+  // by narrowing instead. The bullet is the ONLY discriminator: strip it and each line
+  // wins, which is what the second assertion pins.
+  for (const live of [
+    '● Claude usage limit reached · resets 2pm',        // /limit reached/, /usage limit/
+    '● Session limit reached · resets 9pm',             // /limit reached/
+    '⏺ Your 5-hour limit resets 3pm',                   // /\d+-hour limit/ — not bullet-leading
+    "● You're out of extra usage · resets 3pm",         // /out of.*usage/
+  ]) {
+    it(`a message bullet does not demote a real render: ${live.slice(0, 34)}…`, () => {
+      assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
+      const bare = live.replace(/^[⏺●]\s*/, '');
+      assert.equal(findRateLimitMessage([STALE, 'some output', bare].join('\n'), [], 12), bare,
+        'without the bullet this same line wins — the bullet is the only discriminator');
+    });
+  }
+
+  // OPEN — deliberately left red-as-todo rather than fixed, because there is no free answer.
+  // SENTENCE_END is load-bearing: dropping it un-vetoes "⏺ You've hit your usage limit, so
+  // try again in 2 minutes." (pinned above) and the wrapped-prose case, both of which are
+  // renders by every other available signal. Fixing this needs a discriminator that does not
+  // exist yet, not a tweak — so it is recorded here as a known demotion rather than papered
+  // over. Flip back to `it(` once a signal separating the two is found.
+  it.todo('a full stop does not demote a real render', () => {
+    // SENTENCE_END vetoes any reset-shaped line ending in .?!, but renders do end in a full
+    // stop — the #71 fixture pinned below in this same file is "You've hit your monthly
+    // spend limit." A period is punctuation, not evidence of prose, and treating it as the
+    // signal hands the monitor the stale line above.
+    for (const live of ["You've hit your session limit · resets 5:20pm.",
+      "● You've hit your session limit · resets 5:20pm."]) {
+      assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
+      const bare = live.replace(/\.$/, '');
+      assert.equal(findRateLimitMessage([STALE, 'some output', bare].join('\n'), [], 12), bare,
+        'without the full stop this same line wins — the period is the only discriminator');
+    }
+  });
+
   it('a compound duration is not read as a sentence carrying on', () => {
     // The clause matcher stops at the first unit ("resets in 3"), leaving "hours 15 minutes"
     // in the tail — three words, and the whole budget, spent on the duration itself.
