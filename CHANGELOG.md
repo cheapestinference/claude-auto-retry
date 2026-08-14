@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The org/monthly spend-limit banner is now detected (#71).** Team/org accounts (and
+  individual accounts whose extra-usage budget is exhausted) get "You've hit your org's
+  monthly spend limit · run /usage-credits …" — undetected for two independent reasons:
+  the render carries no reset time (and detection deliberately anchors on one), and the
+  `org's` possessive defeated the limit-pattern shape. Both reporters confirmed the
+  underlying 5-hour block resets and waiting works, so the banner now routes into the
+  usage wait as a limit with unknown reset: the bounded `fallbackWaitHours` default,
+  latched correctable — if a real "resets <time>" banner appears mid-wait, the wake-up
+  shortens to the true instant, and genuine budget exhaustion ends in the normal
+  max-retries give-up. With no reset line to anchor on, the false-positive defense moves
+  into the shape: only the banner phrasing (line starts "You've hit …"), only next to its
+  `/usage-credits` companion, and only in the live region — prose *explaining* spend
+  limits, and stale banners with real work below, stay inert. The banner also had to be
+  exempted from chrome classification: it carries "/usage-credits" inline, so the
+  companion furniture rule would otherwise classify the banner itself as chrome and hide
+  it from the reset-message scan.
 - **A fallback wait is now corrected once the real reset time appears on screen.** The
   `/rate-limit-options` menu does not always render a reset line, so confirming "Stop and
   wait" could commit the `fallbackWaitHours` default (5h) — and the waiting branch returned

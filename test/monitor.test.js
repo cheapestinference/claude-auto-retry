@@ -474,6 +474,24 @@ describe('processOneTick', () => {
     assert.equal(t._sent.length, 0);
   });
 
+  // --- #71: the spend-limit banner carries no reset time, so the wait it produces must be
+  //     the bounded fallback AND stay latched correctable — if the 5h block resets
+  //     underneath and a real "resets <time>" banner appears, the mid-wait correction
+  //     shortens to the true instant; genuine budget exhaustion ends in the normal
+  //     max-retries give-up rather than an unbounded loop. ---
+  it('enters the bounded fallback wait on the spend-limit banner, latched for correction (#71)', async () => {
+    const SPEND_ORG = "You've hit your org's monthly spend limit · run /usage-credits to raise it, or visit claude.ai/admin-settings/usage";
+    const pane = [SPEND_ORG, `  ⎿  ${SPEND_ORG}`,
+      "     /usage-credits to finish what you're working on.", '', '❯ '].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    const expected = DEFAULT_CONFIG.fallbackWaitHours * 3600_000;
+    const delta = s.waitUntil - Date.now();
+    assert.ok(Math.abs(delta - expected) < 120_000, `wait ${delta}ms not ≈ fallback ${expected}ms`);
+    assert.equal(s._waitIsFallback, true);
+  });
+
   // --- Regression: a LIVE limit banner pushed far up the pane by UI chrome (a tall task
   //     widget + input box + footer) must still be detected. Observed live: a session-limit
   //     banner ~16 lines up behind a task list went unretried for ~54 min because the fixed

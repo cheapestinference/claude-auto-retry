@@ -106,7 +106,12 @@ const CHROME_LINE = [
 ];
 // A live working footer ("✻ Cogitating… (esc to interrupt)") matches the spinner glyph
 // pattern above, so it must be excluded explicitly — it is live content, never furniture.
-const isChromeLine = (l) => !isWorkingLine(l) && CHROME_LINE.some((r) => r.test(l));
+// Likewise the spend-limit banner (#71): it carries "/usage-credits" INLINE ("…spend
+// limit · run /usage-credits to raise it"), so the companion entry would classify the
+// banner itself as furniture and findRateLimitMessage would skip the only line naming
+// the limit. A line that IS a limit banner is content, never chrome.
+const isChromeLine = (l) => !isWorkingLine(l) && !SPEND_LIMIT.test(l)
+  && CHROME_LINE.some((r) => r.test(l));
 
 // Last `n` lines AFTER dropping trailing chrome, so a tall widget / input box below a
 // banner doesn't consume the window budget. Operates on an array of already-split lines.
@@ -132,7 +137,8 @@ function contentTail(lines, n, maxRaw = Infinity) {
 // Detection: find a "limit" line and a "resets" line within 6 lines of each other.
 
 const LIMIT_PATTERNS = [
-  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w-]+\s+){0,3}limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
+  // Qualifier tokens admit possessives — "hit your org's monthly spend limit" (#71).
+  /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w'’-]+\s+){0,3}limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
   /\d+-hour limit/i,                                // "5-hour limit"
   /limit reached/i,                                  // "limit reached"
   /usage limit/i,                                    // "usage limit"
@@ -146,6 +152,16 @@ const RESET_PATTERNS = [
   /resets?\s+in[:\s]\s*\d/i,                                   // "resets in: 3 hours"
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
 ];
+
+// The spend-limit banner (#71) is the one render allowed to skip the reset-time anchor:
+// "You've hit your org's monthly spend limit · run /usage-credits …" carries NO reset,
+// yet both reporters confirmed the underlying 5h block resets and waiting works. With no
+// reset line to anchor on, the shape itself carries the false-positive defense: both real
+// renders START the line with "You've hit …" (optionally behind the ⎿/└ echo marker),
+// while prose explaining spend limits references them mid-sentence ("when you hit your
+// monthly spend limit …"). The remaining anchors are the /usage-credits companion in the
+// live region, and the wait produced downstream being the bounded, correctable fallback.
+const SPEND_LIMIT = /^\s*(?:[⎿└]\s*)?you'?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
 
 const WINDOW = 6;
 
@@ -240,9 +256,13 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
     // its reset time next to the companion; a session merely *explaining* usage limits ("when
     // you hit your usage limit you can run /usage-credits …") has the companion + a loose
     // "usage limit" LIMIT match but no reset time, and would otherwise false-fire a retry.
+    // The SPEND_LIMIT alternative (#71) is the one exception to the reset-anchor rule:
+    // that banner never prints a reset time, so the companion + live-region gates above
+    // are its whole defense, and the pattern stays banner-shaped to compensate.
     if (companionIdx !== -1
         && all.slice(companionIdx + 1).every(isChromeLine)
-        && hasNearbyMatch(all, companionIdx, RESET_PATTERNS, fullMask)) {
+        && (hasNearbyMatch(all, companionIdx, RESET_PATTERNS, fullMask)
+          || hasNearbyMatch(all, companionIdx, [SPEND_LIMIT], fullMask))) {
       return true;
     }
   }

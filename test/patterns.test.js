@@ -363,6 +363,49 @@ describe('findRateLimitMessage', () => {
   });
 });
 
+describe('org/monthly spend-limit banner (#71)', () => {
+  // Team/org accounts (and individuals whose extra-usage budget is exhausted) get a limit
+  // banner about the SPEND budget, with NO reset time — both reporters confirmed the
+  // underlying 5h block resets and waiting works. Detection is companion-anchored: only
+  // the live-region /usage-credits backstop may accept it (no reset line exists to anchor
+  // on), so wording about spend limits with real work below stays inert, and the wait it
+  // produces downstream is the bounded, correctable fallback.
+  const SPEND_ORG = "You've hit your org's monthly spend limit · run /usage-credits to raise it, or visit claude.ai/admin-settings/usage";
+  const spendRender = [
+    SPEND_ORG,
+    `  ⎿  ${SPEND_ORG}`,
+    "     /usage-credits to finish what you're working on.",
+    '', '❯ ',
+  ].join('\n');
+  it('detects the org spend-limit render (possessive + no reset time)', () => {
+    assert.equal(isRateLimited(spendRender, [], 12), true);
+  });
+  it('detects the individual "monthly spend limit" variant next to its companion', () => {
+    const pane = ["You've hit your monthly spend limit.",
+      "     /usage-credits to finish what you're working on.", '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
+  it('does NOT fire on a stale spend banner with real work below it', () => {
+    const pane = [SPEND_ORG, "     /usage-credits to finish what you're working on.",
+      ...Array(15).fill('● wrote some code'), '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('does NOT fire on spend-limit wording without the /usage-credits companion', () => {
+    const pane = ['the org hit its monthly spend limit yesterday, budget resets on the 1st', '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('does NOT fire on prose EXPLAINING spend limits ending at the prompt', () => {
+    // Without a reset-time anchor the only prose defense is the banner shape itself:
+    // both real renders start "You've hit …"; explanations reference it mid-sentence.
+    const pane = ["⏺ When you hit your org's monthly spend limit, running",
+      '/usage-credits raises it from the admin console.', '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+  it('findRateLimitMessage returns the spend line (unparseable → bounded fallback downstream)', () => {
+    assert.match(findRateLimitMessage(spendRender, [], 12), /spend limit/i);
+  });
+});
+
 // --- Usage-meter statusline footer (#61) ---
 // A ccusage-style statusline renders a permanent usage meter at the very bottom of the
 // pane: "current ●●●●●●●●●● 100%  ⟳ resets in 1 hr 47 min". That row matches
