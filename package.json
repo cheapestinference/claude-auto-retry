@@ -1,6 +1,6 @@
 {
   "name": "claude-auto-retry",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Automatically retry Claude Code sessions on subscription rate limits and sustained API overload (529/500/503) with exponential backoff",
   "type": "module",
   "bin": {
