@@ -14,7 +14,7 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 
 ---
 
-> 💡 **Why wait out the limit at all?** This tool auto-resumes Claude Code the moment you're rate-limited — but if you run overnight jobs or always-on agents, there's a way to stop hitting the wall in the first place. **[See how it's done →](https://cheapestinference.com/blog/claude-code-usage-limit-auto-retry/)**
+> 💡 **Why wait out the limit at all?** This tool auto-resumes Claude Code the moment you're rate-limited — but if you run overnight jobs or always-on agents, there's a way to stop hitting the wall in the first place. **[See how it's done →](https://cheapestinference.com/blog/claude-code-usage-limit-auto-retry/?utm_source=claude-auto-retry)**
 
 ## The Problem
 
