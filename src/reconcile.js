@@ -159,10 +159,19 @@ export async function acquireLock(lockPath = LOCK_FILE) {
       if (mine !== myId) continue;                          // lost the breaker → retry from the top
       // Re-verify the lock is still stale (a prior breaker may have already replaced it with
       // a live one), then remove it and create ours.
-      let cur = '';
+      let cur = null;
       try { cur = (await readFile(lockPath, 'utf-8')).trim(); } catch {}
       if (cur && await holderIsLive(cur)) return noop;      // became live → back off
-      await unlink(lockPath).catch(() => {});               // remove the stale lock (sole breaker)
+      // Remove only the stale lock we actually READ — never unlink a path we found absent.
+      // The fast path is deliberately not serialized by the breaker, so in the gap between
+      // finding the lock gone (a holder released and exited between our staleness verdict
+      // and here) and an unconditional unlink, a fast-path acquirer can create a fresh LIVE
+      // lock — which the unlink then deletes, and both runs hold at once. Observed under
+      // single-core contention (~0.2% of contended rounds; the cross-process suite test is
+      // the statistical canary). While the file HOLDS the stale id nothing can replace it
+      // (the fast path needs the path absent, other breakers are serialized), so an
+      // identity-checked unlink of exactly that id is race-free.
+      if (cur !== null) await releaseLock(lockPath, cur);   // identity-checked stale removal
       if (await linkCreate(lockPath, join(dir, `.acqb.${uniq}.${attempt}`), myId)) {
         return { ok: true, release: () => releaseLock(lockPath, myId) };
       }

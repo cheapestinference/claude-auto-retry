@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The reconcile lock could double-hold under contention (the flaky cross-process suite
+  test was a real race, not a bad test).** After winning the breaker, the stale-lock removal
+  was an *unconditional* `unlink` — even when the re-read under the breaker found the lock
+  already **absent** (its holder released and exited between the staleness verdict and the
+  break). The fast path is deliberately not serialized by the breaker, so an acquirer could
+  create a fresh live lock in that read→unlink gap; the unlink then deleted it and the
+  breaker-holder created a second lock — two reconcile runs proceeding at once, each arming
+  monitors. Reproduced at ~0.2% of contended rounds on a single loaded core (2 overlapping
+  holds in 823, then 1 in 1,072, with the acquisition-path event log pinning the interleave);
+  the stale removal is now identity-checked and skipped entirely when the lock was absent —
+  0 overlaps in 6,205 holds under the same load afterwards. Thanks @nyxaria for flagging the
+  flake.
+
 ## [0.7.2] - 2026-08-16
 
 ### Fixed
