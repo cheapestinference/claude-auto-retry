@@ -469,23 +469,61 @@ describe('findRateLimitMessage', () => {
     });
   }
 
-  // OPEN — deliberately left red-as-todo rather than fixed, because there is no free answer.
-  // SENTENCE_END is load-bearing: dropping it un-vetoes "⏺ You've hit your usage limit, so
-  // try again in 2 minutes." (pinned above) and the wrapped-prose case, both of which are
-  // renders by every other available signal. Fixing this needs a discriminator that does not
-  // exist yet, not a tweak — so it is recorded here as a known demotion rather than papered
-  // over. Flip back to `it(` once a signal separating the two is found.
-  it.todo('a full stop does not demote a real render', () => {
-    // SENTENCE_END vetoes any reset-shaped line ending in .?!, but renders do end in a full
-    // stop — the #71 fixture pinned below in this same file is "You've hit your monthly
-    // spend limit." A period is punctuation, not evidence of prose, and treating it as the
-    // signal hands the monitor the stale line above.
+  // --- The three master-vs-branch behavioural diffs found in review. Each is the same
+  //     failure this fix exists to prevent, reached from the other side: a real render
+  //     demoted, so the STALE banner above it wins — and because the stale line PARSES,
+  //     `_waitIsFallback` is false (monitor.js:111) and only fallbacks are correctable
+  //     (:139), so the wrong wait latches and the monitor wakes early into a live limit.
+  //     Every one of these is a line the pre-#73 scan returned. ---
+  it('a full stop does not demote a real render', () => {
+    // SENTENCE_END vetoed any reset-shaped line ending in .?!, but renders do end in a full
+    // stop — this file's own #71 fixture is "You've hit your monthly spend limit." A period
+    // is punctuation, not evidence of prose.
+    for (const live of ["You've hit your session limit · resets 5:20pm.",
+      "● You've hit your session limit · resets 5:20pm.",
+      'Rate limit exceeded. Please try again in 5 hours.',
+      'Claude usage limit reached. Your limit will reset at 6pm (Asia/Kolkata).']) {
+      assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
+    }
+  });
+  it('a full stop is the only discriminator — the same line bare still wins', () => {
     for (const live of ["You've hit your session limit · resets 5:20pm.",
       "● You've hit your session limit · resets 5:20pm."]) {
-      assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
       const bare = live.replace(/\.$/, '');
-      assert.equal(findRateLimitMessage([STALE, 'some output', bare].join('\n'), [], 12), bare,
-        'without the full stop this same line wins — the period is the only discriminator');
+      assert.equal(findRateLimitMessage([STALE, 'some output', bare].join('\n'), [], 12), bare);
+    }
+  });
+  it('the bullet does not demote the API-error render (underscored vocabulary)', () => {
+    // `/rate limit/i` does not reach `rate_limit_error`, and `API Error:` leads the line so
+    // the clause-leading rescue misses it too — leaving the bullet as the whole verdict. The
+    // pinning test above carries the same wording WITHOUT the ●, which is what let this pass:
+    // toolEchoMask's own comment documents that real API errors render `● API Error: …`.
+    const live = '● API Error: 429 rate_limit_error, try again in 15 minutes';
+    assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
+  });
+  it('a limit-naming render survives a tail longer than the budget', () => {
+    // The tail budget is a prose signal, and prose is what it may veto. A render that NAMES
+    // a limit is a render however long its inline hint runs. The second of these is the shape
+    // #75 turns from chrome into content: every inline-hint banner has a >2-word tail, so the
+    // day both land, this veto would demote exactly the render #75 makes parseable.
+    for (const live of ["You've hit your session limit · resets 5:20pm · /upgrade to increase your limits",
+      "You've hit your limit · resets 5:20pm (UTC) · run /usage-credits to finish"]) {
+      assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
+    }
+  });
+
+  // --- Residual prose shapes the veto let through, reported alongside the three above. ---
+  it('stacked closers still end a sentence', () => {
+    // `.”)` — SENTENCE_END allowed a single optional closer, so a quote inside a paren ran
+    // past it. Renders carry no [.?!] before a closer, so widening costs nothing.
+    const prose = 'It failed (the API said “try again in 2 minutes.”)';
+    assert.equal(findRateLimitMessage([BANNER, '', prose].join('\n'), [], 12), BANNER);
+  });
+  it('the ∙ message glyph marks a line the same as ⏺ and ●', () => {
+    // TOOL_ECHO_HEADER already knows [●⏺∙]; the veto knew only two of the three.
+    for (const glyph of ['⏺', '●', '∙']) {
+      assert.equal(findRateLimitMessage([BANNER, '', `${glyph} It said to try again in 2 minutes`].join('\n'), [], 12),
+        BANNER, `${glyph} should mark the line as a message`);
     }
   });
 
