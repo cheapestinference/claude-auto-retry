@@ -15,15 +15,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the parse and turned a 5-hour wait into ~3 minutes. The monitor then woke into the
   still-live limit and burned `maxRetries` before the real reset. The discriminator is the
   shape of the line, not its vocabulary, and it is stated as a *veto*: a reset-shaped line
-  stays eligible unless it is the user's input row (`❯`/`>`), ends in sentence punctuation,
-  runs on past the reset clause ("…resets 9am tomorrow according to the header"), or sits on
-  a message bullet introducing something other than a limit or reset clause. The last two
-  are what catch prose whose *wrapped* continuation happens to begin with the clause. Lines
-  that merely mention a limit are vetoed, so the banner above them wins. Eligibility is decided
-  per line and never by inspecting a neighbour, which keeps the bottom-up scan — and
-  therefore freshness — as it was: a stale banner still loses to any newer render below it,
-  including renders this file does not recognise. Anything vetoed falls through to the
-  previous behaviour rather than to no match at all.
+  stays eligible unless something marks it as conversation — the user's input row (`❯`/`>`),
+  sentence punctuation, a run-on past the reset clause ("…resets 9am tomorrow according to
+  the header"), or a message bullet introducing something other than a limit or reset
+  clause. The last two are what catch prose whose *wrapped* continuation happens to begin
+  with the clause. Eligibility is decided per line and never by inspecting a neighbour, so
+  the bottom-up scan — and therefore freshness — is unchanged, and anything vetoed falls
+  through to the previous behaviour rather than to no match at all.
+
+  Every signal except the prompt glyph is subordinate to whether the line **names a limit**:
+  a line that does is treated as a render however it is punctuated, glyphed or trailed. That
+  ordering is the correction to this change's own first three revisions, each of which
+  claimed the veto "only demotes what it can positively identify" and then demoted real
+  renders three ways — period-terminated banners ("Rate limit exceeded. Please try again in
+  5 hours."), banners with an inline hint ("· resets 5:20pm · /upgrade to increase your
+  limits"), and the API-error render whose vocabulary is underscored (`rate_limit_error`).
+  The two errors do not cost the same: returning prose parses a *short* wait, which is a
+  fallback and so gets revisited (#70), while returning a stale banner parses a *long* one
+  that latches non-correctable. Doubt therefore resolves toward the fresher line.
+
+  **Known boundary:** prose that names a limit *itself* — "⏺ You've hit your usage limit, so
+  try again in 2 minutes." — is per-line indistinguishable from a render and still outranks
+  the banner. This is unchanged from previous behaviour rather than introduced here, and it
+  is the recoverable direction of the two. Also unchanged: an unglyphed, unpunctuated
+  continuation that begins with the clause and ends within two words (`│  try again in 20
+  minutes  │`), which cannot be separated from a wrapped banner line (`  resets 8:40pm
+  (Europe/London)`) without dropping the only line carrying the time.
 - **The org/monthly spend-limit banner is now detected (#71).** Team/org accounts (and
   individual accounts whose extra-usage budget is exhausted) get "You've hit your org's
   monthly spend limit · run /usage-credits …" — undetected for two independent reasons:

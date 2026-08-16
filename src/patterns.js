@@ -136,7 +136,13 @@ function contentTail(lines, n, maxRaw = Infinity) {
 //   "· resets 3pm (UTC)"
 // Detection: find a "limit" line and a "resets" line within 6 lines of each other.
 
-const LIMIT_PATTERNS = [
+// Declared as two named subsets rather than one list the #73 code then re-derives by
+// grepping regex SOURCE text: `LIMIT_PATTERNS.filter(p => !/try again in/.test(p.source))`
+// reads the implementation of a pattern to decide what it means, so rewording the retry
+// hint once (`/try again (?:in|at)/`) would silently stop excluding it and let a retry hint
+// vouch for a line as if it named a limit. The subsets say which is which; LIMIT_PATTERNS
+// stays the union, so every existing caller is unchanged.
+const LIMIT_NAME_PATTERNS = [
   // Qualifier tokens admit possessives — "hit your org's monthly spend limit" (#71).
   /(?:hit|exceeded|reached).*(?:your|the)\s*(?:[\w'’-]+\s+){0,3}limit/i,  // "hit/exceeded/reached your [session|weekly|5-hour] limit"
   /\d+-hour limit/i,                                // "5-hour limit"
@@ -144,8 +150,14 @@ const LIMIT_PATTERNS = [
   /usage limit/i,                                    // "usage limit"
   /out of.*usage/i,                                  // "out of extra usage"
   /rate limit/i,                                     // "rate limit"
+];
+// A retry hint is a RESET clause in limit clothing: "⏺ I will try again in 3 minutes" is
+// prose. It counts as a limit for detection (a pane saying it is rate-limited) but must
+// never, on its own, vouch for a line being a render.
+const RETRY_HINT_PATTERNS = [
   /try again in/i,                                   // "try again in X hours" (implies rate limiting)
 ];
+const LIMIT_PATTERNS = [...LIMIT_NAME_PATTERNS, ...RETRY_HINT_PATTERNS];
 
 const RESET_PATTERNS = [
   /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/i,   // "resets 3pm" / "resets at 3:00 PM"
@@ -165,12 +177,23 @@ const RESET_PATTERNS = [
 // not recognise is demoted, including a LIVE one sitting below a stale banner, which is
 // worse than the pre-#73 behavior it replaces ("Claude usage limit reached. Resets at 2pm"
 // below "… resets 11:30am" would hand the monitor the stale time, and #70's latch would
-// then mark it non-correctable). A veto only ever demotes lines it can positively identify,
-// so an unrecognised render keeps the freshness ordering it had before.
+// then mark it non-correctable).
 //
-// Three per-line signals, no neighbour lookups:
+// "A veto only demotes what it can positively identify, so an unrecognised render keeps the
+// freshness ordering it had before" is the property this is FOR — but being a veto does not
+// establish it, and stating it that way concealed three violations for three revisions. A
+// signal that fires on a real render demotes it whichever direction the rule is phrased in.
+// What actually holds the property is the ordering below: everything except the prompt glyph
+// is subordinate to whether the line names a limit.
 //
-//   1. THE PROMPT GLYPH. ❯/> introduce the user's own input, which is never a render.
+// Four per-line signals, no neighbour lookups:
+//
+//   0. NAMING A LIMIT. Checked FIRST (after the prompt glyph) and rescues the line outright:
+//      signals 2-4 are evidence of prose, and prose is all they may veto. This is what the
+//      first three revisions got wrong — each demoted a render that plainly named a limit.
+//   1. THE PROMPT GLYPH. ❯/> introduce the user's own input, which is never a render — the
+//      one signal that outranks naming a limit, since the user typing about their own limit
+//      is the #73 report's second half.
 //   2. SENTENCE PUNCTUATION. A render does not end in ./?/! — "· resets 3pm (UTC)" — while
 //      a sentence does, including one whose WRAPPED continuation happens to begin with the
 //      clause ("  try again in 2 minutes, so I'll wait."). tmux capture-pane is called
@@ -181,31 +204,53 @@ const RESET_PATTERNS = [
 //      "resets in 3 hours 15 minutes"). A sentence keeps going: "…resets 9am tomorrow
 //      according to the header".
 //
-// The message bullets ⏺/● are NOT a signal on their own: #63's fixture has a live banner
-// rendering as "● You've hit your session limit · resets 2:10am", so vetoing the glyph
-// demotes a real render. They mark a line only when what follows them is not a limit or
-// reset clause — i.e. the bullet introduces a sentence ABOUT one. Being an exemption rather
-// than an allowlist does NOT by itself make it safe, which is the trap this originally fell
-// into: the veto's other two signals do not fire on a bulleted render, so a render the
-// exemption fails to recognise is not "judged as before" — it is demoted, and the stale
-// banner above it wins. The rescue test therefore has to be as wide as the file's own idea
-// of what names a limit, which is why it asks LIMIT_PATTERNS instead of restating it.
+// WHY THE SIGNALS ARE ORDERED THE WAY THEY ARE — the two errors do not cost the same.
+// Returning prose parses a SHORT wait: the monitor wakes early, finds the limit still
+// live, and re-derives. Returning a stale banner parses a LONG one — and because a stale
+// line parses, `_waitIsFallback` is false (monitor.js:111) and only fallbacks are
+// correctable (:139), so #70's latch refuses to revisit it. Under-waiting self-corrects;
+// over-waiting is unrecoverable until the wait expires. Every signal below therefore only
+// ever fires where the line is unambiguously conversation, and a line that NAMES a limit
+// is treated as a render — the prompt glyph excepted, since the user's own input row is
+// never a render whatever it says.
+//
+// This is the correction to the first three cuts of this fix, all of which stated the
+// invariant as "a veto only demotes what it can positively identify" and then broke it
+// three ways: SENTENCE_END demoted every period-terminated render ("Rate limit exceeded.
+// Please try again in 5 hours."), the tail budget demoted every render with an inline hint
+// ("· resets 5:20pm · /upgrade to increase your limits"), and the bullet veto demoted the
+// API-error render whose vocabulary is underscored. Each one identified a RENDER and
+// demoted it. Making "names a limit" a uniform rescue is what actually holds the invariant.
+//
+// The message bullets are NOT a signal on their own: #63's fixture has a live banner
+// rendering as "● You've hit your session limit · resets 2:10am". They mark a line only
+// when nothing else on it says "render" — i.e. the bullet introduces a sentence ABOUT a
+// limit rather than a limit.
 const PROMPT_GLYPH = /^\s*[❯>]/;
-const BULLET_GLYPH = /^\s*[⏺●]\s/;
-// "Names a limit" is asked of LIMIT_PATTERNS rather than re-enumerated here. Spelling the
-// phrasings out a second time made the exemption an ALLOWLIST, which is the freshness
-// inversion in slow motion: it recognised "● You've hit your session limit …" but not
-// "● Claude usage limit reached · resets 2pm", "● Session limit reached · resets 9pm",
-// "⏺ Your 5-hour limit resets 3pm" or "● You're out of extra usage · resets 3pm" — every
-// one of them a phrase LIMIT_PATTERNS already carries, and every one of them demoted in
-// favour of whatever stale banner sat above it. One source of truth, so a render the file
-// learns to recognise anywhere is recognised here too.
-// `try again in` is excluded: it is a RESET clause in limit clothing ("⏺ I will try again
-// in 3 minutes" is prose), so it must not vouch for a line on its own.
-const NAMES_A_LIMIT = LIMIT_PATTERNS.filter((p) => !/try again in/.test(p.source));
+// One class, shared with TOOL_ECHO_HEADER below, which already knew all three glyphs while
+// the veto knew two — leaving "∙ It said to try again in 2 minutes" eligible when the
+// identical ⏺ line was vetoed.
+const MESSAGE_GLYPH = '[●⏺∙]';
+const BULLET_GLYPH = new RegExp(`^\\s*${MESSAGE_GLYPH}\\s`);
+// "Names a limit" is asked of the declared subset, so a phrasing the file learns anywhere
+// is recognised here too. Restating the phrasings made this an ALLOWLIST once already: it
+// knew "● You've hit your session limit …" but not "● Claude usage limit reached · resets
+// 2pm", "● Session limit reached · resets 9pm", "⏺ Your 5-hour limit resets 3pm" or
+// "● You're out of extra usage · resets 3pm" — each a phrase LIMIT_PATTERNS already carried,
+// each demoted under whatever stale banner sat above it.
+// Plus the API's own underscored vocabulary, which `● API Error: 429 rate_limit_error, try
+// again in 15 minutes` renders and `/rate limit/i` cannot reach. It is added HERE rather
+// than to LIMIT_NAME_PATTERNS deliberately: the rescue can only ever make a line eligible,
+// so widening it cannot demote anything, whereas widening LIMIT_PATTERNS would widen
+// isRateLimited too — and `rate_limit_error` occurs in source, JSON error bodies and grep
+// output, which measurably flipped whole panes to "limited" when tried that way.
+const API_LIMIT_VOCAB = /rate[_-]limit/i;            // "rate_limit_error", "rate-limited"
+const NAMES_A_LIMIT = [...LIMIT_NAME_PATTERNS, API_LIMIT_VOCAB];
 // The bullet may also be followed directly by the reset clause itself, with no limit named.
-const BULLET_LEADS_WITH_CLAUSE = /^\s*[⏺●]\s*(?:please\s+)?(?:resets?\b|try again in\b)/i;
-const SENTENCE_END = /[.?!]["'’”)\]]?\s*$/;
+const BULLET_LEADS_WITH_CLAUSE = new RegExp(`^\\s*${MESSAGE_GLYPH}\\s*(?:please\\s+)?(?:resets?\\b|try again in\\b)`, 'i');
+// Closers repeat: `.”)` ends "It failed (the API said “try again in 2 minutes.”)". Renders
+// carry no [.?!] before a closer, so consuming a run of them costs nothing.
+const SENTENCE_END = /[.?!]["'’”)\]]*\s*$/;
 const RESET_TAIL_WORDS = 2;                          // "(Europe/London)" → 0, "NY" → 1
 // The clause matchers stop at the first unit ("resets in 3", "try again in 4 hours"), so the
 // rest of a compound duration is part of the clause, not the start of a sentence.
@@ -215,11 +260,23 @@ const DURATION_TAIL = /^(?:\s*(?:and|&|\d+|h|hrs?|hours?|m|mins?|minutes?|s|secs
 const RESET_PATTERNS_G = RESET_PATTERNS.map((p) => new RegExp(p.source, `${p.flags}g`));
 
 // Text after the last reset clause, or null when the line carries no reset time at all.
+// The explicit lastIndex advance is a guard, not an optimisation: a `g` pattern that can
+// match empty never advances, so `exec` would re-return the same zero-length match forever.
+// No current RESET_PATTERN can match empty, but one gaining an optional-only branch would
+// hang the monitor rather than mis-parse a line — this loop runs over untrusted pane text
+// on the hot path. It does NOT cover the other way to hang this loop: a non-global `exec`
+// ignores lastIndex outright and always restarts at 0, so the `g` in RESET_PATTERNS_G above
+// is load-bearing for termination, not just for finding the last clause. Mutation testing
+// hangs on that mutant rather than failing it; the dual-limit test is what pins the flag.
 function resetClauseTail(line) {
   let end = -1;
   for (const p of RESET_PATTERNS_G) {
     p.lastIndex = 0;
-    for (let m = p.exec(line); m !== null; m = p.exec(line)) end = Math.max(end, m.index + m[0].length);
+    for (let m = p.exec(line); m !== null; m = p.exec(line)) {
+      const next = m.index + m[0].length;
+      end = Math.max(end, next);
+      p.lastIndex = Math.max(next, m.index + 1);
+    }
   }
   return end === -1 ? null : line.slice(end);
 }
@@ -230,9 +287,14 @@ function resetClauseTail(line) {
 function presentsResetTime(line) {
   const tail = resetClauseTail(line);
   if (tail === null) return false;
+  // Absolute: the input row is the user's, whatever it says about limits.
   if (PROMPT_GLYPH.test(line)) return false;
-  if (BULLET_GLYPH.test(line) && !BULLET_LEADS_WITH_CLAUSE.test(line)
-      && !NAMES_A_LIMIT.some((p) => p.test(line))) return false;
+  // Uniform rescue, ahead of every remaining signal. Each of those signals is evidence of
+  // prose, and prose is all they may veto — a line naming a limit is a render however it is
+  // punctuated, glyphed, or trailed. See the cost argument above: this is the direction the
+  // errors are allowed to fall.
+  if (NAMES_A_LIMIT.some((p) => p.test(line))) return true;
+  if (BULLET_GLYPH.test(line) && !BULLET_LEADS_WITH_CLAUSE.test(line)) return false;
   if (SENTENCE_END.test(line)) return false;
   // Parenthesised qualifiers are furniture; punctuation and box-drawing are not words.
   const words = tail.replace(DURATION_TAIL, ' ').replace(/\([^)]*\)/g, ' ')
@@ -277,7 +339,7 @@ function hasNearbyMatch(lines, idx, patterns, mask = null) {
 // truncated) across rows leaves its continuation unmasked, and "full pane" means the
 // captured pane — a result block taller than the monitor's ~120-line capture leaves its
 // header outside the capture entirely, and the leading children are unmasked again.
-const TOOL_ECHO_HEADER = /^\s*[●⏺∙]\s*\S+\(/;   // "● Bash(grep …", "⏺ Read(file …"
+const TOOL_ECHO_HEADER = new RegExp(`^\\s*${MESSAGE_GLYPH}\\s*\\S+\\(`);   // "● Bash(grep …", "⏺ Read(file …"
 const TOOL_ECHO_RESULT = /^\s*[⎿└]/;             // "  ⎿  3"
 export function toolEchoMask(lines) {
   const mask = new Array(lines.length).fill(false);
@@ -620,10 +682,12 @@ export function findRateLimitMessage(text, customPatterns = [], tailLines = 0) {
   // merely contained "usage limit" act as the qualifier, and chained two WINDOWs into a
   // 12-line reach. Per-line eligibility has none of those failure modes.
   //
-  // This pass can still reach past a lower line — that is the point — so the veto has to
-  // stay narrow enough that it only ever passes over conversation. Widening it into "does
-  // this look like a banner I know" is what re-introduces the freshness inversion, one
-  // unrecognised render at a time.
+  // This pass can still reach past a lower line — that is the point — so every line it
+  // passes over had better be conversation. The failure mode is asymmetric: skipping a real
+  // render costs a stale, LATCHED wait (see presentsResetTime), while stopping on prose
+  // costs a short one that #70 revisits. So the prose signals are kept subordinate to the
+  // limit name rather than being tuned to recognise banners — "does this look like a banner
+  // I know" is what inverts freshness, one unrecognised render at a time.
   for (let i = lines.length - 1; i >= 0; i--) {
     if (skip(i)) continue;
     if (presentsReset(i)) return lines[i].trim();

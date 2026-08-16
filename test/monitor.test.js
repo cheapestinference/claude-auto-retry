@@ -229,6 +229,38 @@ describe('processOneTick', () => {
     });
   }
 
+  // --- The other direction, found in review: a real render DEMOTED below a stale banner.
+  //     This is the worse failure of the two. The stale time parses, so `_waitIsFallback`
+  //     is false and #70's correctUsageWait refuses to revisit it — the monitor sits on a
+  //     ~24h wait it cannot shorten. (Prose winning commits a SHORT wait, which is a
+  //     fallback and does get revisited.) Each shape below is one the veto used to claim. ---
+  for (const [label, shape] of [
+    ['a period-terminated render', (b) => `${b}.`],
+    ['a bulleted period-terminated render', (b) => `● ${b}.`],
+    ['a render with an inline upgrade hint', (b) => `${b} · /upgrade to increase your limits`],
+  ]) {
+    it(`derives the wait from ${label}, not the stale banner above it`, async () => {
+      const stale = bannerAt(-5 * 60_000);        // just passed → rolls ~24h
+      const live = shape(bannerAt(2 * 3600_000));
+      const t = mockTmux([stale, 'some ordinary output line', live].join('\n'));
+      const s = createMonitorState();
+      assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+      const secs = (s.waitUntil - Date.now()) / 1000;
+      assert.ok(secs < 3 * 3600, `expected ~2h from the live render, got ${Math.round(secs)}s`);
+      assert.equal(s._waitIsFallback, false);
+    });
+  }
+  it('derives the wait from the bulleted API-error render, not the stale banner above it', async () => {
+    // `/rate limit/i` cannot reach `rate_limit_error` and "API Error:" leads the line, so
+    // the ● was the whole verdict until the rescue learned the API's own vocabulary.
+    const t = mockTmux([bannerAt(-5 * 60_000), 'some ordinary output line',
+      '● API Error: 429 rate_limit_error, try again in 15 minutes'].join('\n'));
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    const secs = (s.waitUntil - Date.now()) / 1000;
+    assert.ok(secs < 3 * 3600, `expected ~15min from the live render, got ${Math.round(secs)}s`);
+  });
+
   it('never re-parses a wait that came from a real reset time', async () => {
     // Regression for the window/latch pair: reset-shaped prose ("try again in 2 minutes")
     // drifting into the pane during a correctly-derived multi-hour wait must not collapse

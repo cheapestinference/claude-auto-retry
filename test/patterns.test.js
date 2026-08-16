@@ -323,8 +323,11 @@ describe('findRateLimitMessage', () => {
   // --- #73: a line may MENTION a limit or reset time without BEING one. `try again in …`
   //     is plain English, so model output or a user's own message — which renders BELOW the
   //     banner it discusses — stole the bottom-up scan and turned a 5h wait into ~3min.
-  //     Eligibility is now per-line: the clause must LEAD the line, or the line must lead
-  //     with the limit itself. Freshness (bottom-up) is unchanged. ---
+  //     Eligibility is now per-line, stated as a veto: a reset-shaped line stays eligible
+  //     unless something marks it as conversation. Every one of those signals is subordinate
+  //     to whether the line NAMES a limit — except the prompt glyph, which is absolute —
+  //     because demoting a real render costs a stale, latched wait while stopping on prose
+  //     costs a short one that #70 revisits. Freshness (bottom-up) is unchanged. ---
   const PROSE  = '⏺ The API said to try again in 2 minutes before the limit window rolls';
   const TYPED  = '❯ it told me to try again in 2 minutes, is that right?';
   const BANNER = "You've hit your session limit · resets 5:20pm (Europe/London)";
@@ -341,11 +344,23 @@ describe('findRateLimitMessage', () => {
     // rule that lets prose qualify itself is exposed.
     assert.equal(findRateLimitMessage([BANNER, '', PROSE, TYPED].join('\n'), [], 12), BANNER);
   });
-  it('prose carrying BOTH a limit phrase and a retry hint cannot outrank the banner', () => {
-    // Self-vouching: this line satisfies the limit and reset vocabularies at once, so any
-    // rule keyed on vocabulary rather than position accepts it.
-    const selfVouching = "⏺ You've hit your usage limit, so try again in 2 minutes.";
-    assert.equal(findRateLimitMessage([BANNER, '', selfVouching].join('\n'), [], 12), BANNER);
+  it('BOUNDARY: prose that names a limit itself still outranks the banner (parity with master)', () => {
+    // NOT fixed, and deliberately so — see the cost argument in patterns.js. A line naming a
+    // limit is rescued from every prose signal, which is what stops the veto demoting real
+    // renders; the price is that a message paraphrasing the banner is indistinguishable from
+    // one per line. Both variants below already lose on master, so this is a scope limit of
+    // #73's fix, not a regression — and the error falls the recoverable way: the short wait
+    // is a fallback, so #70's correctUsageWait revisits it, where a stale banner would latch.
+    for (const selfVouching of ["⏺ You've hit your usage limit, so try again in 2 minutes.",
+      "⏺ You've hit your usage limit, try again in 2 minutes"]) {
+      assert.equal(findRateLimitMessage([BANNER, '', selfVouching].join('\n'), [], 12), selfVouching);
+    }
+  });
+  it('the same prose at the prompt IS vetoed — the input row is never a render', () => {
+    // The prompt glyph is the one absolute signal, so the user asking about their own limit
+    // cannot steal the parse however much limit vocabulary the question carries.
+    const typed = '❯ why do I keep hitting the usage limit? it said resets 3pm';
+    assert.equal(findRateLimitMessage([BANNER, '', typed].join('\n'), [], 12), BANNER);
   });
   it('prefers the multi-line render over prose below it (#73)', () => {
     const text = ["⚠ You've hit your limit", '· resets 3pm (UTC)', PROSE].join('\n');
@@ -399,12 +414,16 @@ describe('findRateLimitMessage', () => {
     assert.equal(findRateLimitMessage(text, [], 12), 'Claude usage limit reached. Resets at 2pm');
   });
   it('a stale banner never outranks an unrecognised render below it', () => {
-    // The freshness inversion an allowlist would introduce, and the reason the rule is a
-    // veto. Demoting every render this file doesn't know hands the monitor the stale time —
-    // and #70's latch, seeing a parsed result, marks it non-correctable.
-    const text = ["You've hit your limit · resets 11:30am (UTC)", 'output',
-      'API Error: rate_limit_error, try again in 15 minutes'].join('\n');
-    assert.equal(findRateLimitMessage(text, [], 12), 'API Error: rate_limit_error, try again in 15 minutes');
+    // The freshness inversion an allowlist would introduce. Demoting every render this file
+    // doesn't know hands the monitor the stale time — and #70's latch, seeing a parsed
+    // result, marks it non-correctable. BOTH glyph forms are asserted: the bulleted one is
+    // how real API errors render (toolEchoMask's comment documents "● API Error: …"), and
+    // testing only the bare form is what let the bullet veto demote the real shape unnoticed.
+    for (const live of ['API Error: rate_limit_error, try again in 15 minutes',
+      '● API Error: rate_limit_error, try again in 15 minutes']) {
+      const text = ["You've hit your limit · resets 11:30am (UTC)", 'output', live].join('\n');
+      assert.equal(findRateLimitMessage(text, [], 12), live);
+    }
   });
   it('a timezone-qualified render is not mistaken for prose', () => {
     // The veto's second signal counts what follows the reset clause; a bare timezone word
@@ -414,9 +433,39 @@ describe('findRateLimitMessage', () => {
   });
   it('a parenthesised timezone does not spend the tail budget', () => {
     // Qualifiers in brackets are furniture whatever their length — "(NZDT, UTC+13)" would
-    // otherwise consume the whole budget and veto a real render.
-    const banner = 'Rate limit hit. Resets at 11:40pm Auckland (NZDT, UTC+13)';
-    assert.equal(findRateLimitMessage([banner, '', PROSE].join('\n'), [], 12), banner);
+    // otherwise consume the whole budget and veto a real render. The BARE form is the one
+    // that exercises the budget: the limit-naming form is rescued before the tail is read.
+    for (const banner of ['· resets 11:40pm Auckland (NZDT, UTC+13)',
+      'Rate limit hit. Resets at 11:40pm Auckland (NZDT, UTC+13)']) {
+      assert.equal(findRateLimitMessage([banner, '', PROSE].join('\n'), [], 12), banner);
+      assert.equal(findRateLimitMessage([STALE, 'output', banner].join('\n'), [], 12), banner);
+    }
+  });
+  it('a bullet followed straight by the clause is a render continuation, not a sentence', () => {
+    // Load-bearing because this change ADDED ∙ to the glyph class: a render whose reset line
+    // is bulleted ("∙ resets 8:40pm (Europe/London)") names no limit, so without the
+    // clause-leading exemption the widened glyph would demote it under any stale banner —
+    // a regression introduced by the very fix for the ∙ gap. Mutation testing caught that
+    // removing the exemption changed nothing any test could see.
+    for (const live of ['∙ resets 3pm (UTC)', '⏺ resets 3pm (UTC)', '● resets 8:40pm (Europe/London)',
+      '● try again in 5 hours']) {
+      assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
+    }
+  });
+  it('a contraction after the clause spends the tail budget', () => {
+    // The tail counts WORDS, not whitespace runs: "I'll" is two, which is what takes this
+    // over budget. Splitting on whitespace instead would leave it eligible — the shape that
+    // distinguishes the word class from a plain \s+ split, and nothing else pinned it.
+    for (const prose of ["· resets 3pm, I'll wait", "  resets 3pm, it's fine"]) {
+      assert.equal(findRateLimitMessage([BANNER, '', prose].join('\n'), [], 12), BANNER);
+    }
+  });
+  it('a compound duration is not read as a sentence carrying on, clause-only', () => {
+    // Same reasoning: "· resets in 3 hours 15 minutes" carries no limit name, so the
+    // duration tail is what keeps it eligible rather than the rescue.
+    for (const live of ['· resets in 3 hours 15 minutes', '· try again in 4 hours and 12 minutes']) {
+      assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
+    }
   });
   it('WRAPPED prose whose continuation line begins with the clause cannot win', () => {
     // tmux capture-pane is unjoined, so a wrapped sentence arrives as its own line — and
@@ -446,15 +495,13 @@ describe('findRateLimitMessage', () => {
     const live = "● You've hit your session limit · resets 2:10am (Australia/Melbourne)";
     assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
   });
-  // The bullet exemption is an ALLOWLIST of limit phrasings, so it recognises only the
-  // wordings enumerated in BULLET_LEADS_WITH_CLAUSE. Every render below is one this file
-  // already treats as real — each phrase comes straight out of LIMIT_PATTERNS — but none
-  // of them leads with a phrase the exemption lists, so the bullet condemns them and the
-  // STALE banner above wins. That is the freshness inversion the veto is documented as
-  // never introducing ("Widening it into 'does this look like a banner I know' is what
-  // re-introduces the freshness inversion, one unrecognised render at a time"), reached
-  // by narrowing instead. The bullet is the ONLY discriminator: strip it and each line
-  // wins, which is what the second assertion pins.
+  // These are why the limit-name rescue asks LIMIT_NAME_PATTERNS rather than restating the
+  // phrasings: an exemption that enumerates its own wordings recognises only those, so every
+  // render below — each phrase straight out of LIMIT_PATTERNS — was condemned by its bullet
+  // and lost to the STALE banner above. Being an exemption rather than an allowlist does not
+  // make that safe on its own; the other signals do not fire on a bulleted render, so one the
+  // exemption misses is not "judged as before", it is demoted. The bullet is the ONLY
+  // discriminator here: strip it and each line wins, which is what the second assertion pins.
   for (const live of [
     '● Claude usage limit reached · resets 2pm',        // /limit reached/, /usage limit/
     '● Session limit reached · resets 9pm',             // /limit reached/
@@ -503,11 +550,14 @@ describe('findRateLimitMessage', () => {
   });
   it('a limit-naming render survives a tail longer than the budget', () => {
     // The tail budget is a prose signal, and prose is what it may veto. A render that NAMES
-    // a limit is a render however long its inline hint runs. The second of these is the shape
-    // #75 turns from chrome into content: every inline-hint banner has a >2-word tail, so the
-    // day both land, this veto would demote exactly the render #75 makes parseable.
+    // a limit is a render however long its inline hint runs. This is also the shape #75
+    // turns from chrome into content — every inline-hint banner carries a >2-word tail, so
+    // the day both land, the veto as written would demote exactly the render #75 makes
+    // parseable. The rescue keys on the limit name, not the tail, so it covers those too;
+    // the `/usage-credits` wording itself can't be asserted here because on this branch
+    // isChromeLine still classifies it as furniture, which is what #75 changes.
     for (const live of ["You've hit your session limit · resets 5:20pm · /upgrade to increase your limits",
-      "You've hit your limit · resets 5:20pm (UTC) · run /usage-credits to finish"]) {
+      "You've hit your limit · resets 5:20pm (UTC) · run /upgrade to finish what you're working on"]) {
       assert.equal(findRateLimitMessage([STALE, 'some output', live].join('\n'), [], 12), live);
     }
   });
@@ -540,7 +590,13 @@ describe('findRateLimitMessage', () => {
     assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
   });
   it('a separator does not count as one of the tail words', () => {
-    for (const live of ['5-hour limit reached · resets 3pm - see above',
+    // Deliberately BARE clause lines, with no limit named. A line that names a limit is
+    // rescued before the tail budget is ever consulted, so pinning this on "5-hour limit
+    // reached · resets 3pm - see above" would assert the rescue and leave the separator
+    // handling itself untested — mutation testing caught exactly that. The bare continuation
+    // line of a multi-line render is the shape that actually reaches the tail check.
+    for (const live of ['· resets 3pm - see above', '· resets 3pm / 10:30 UTC',
+      '5-hour limit reached · resets 3pm - see above',
       '5-hour limit reached · resets 3pm / 10:30 UTC']) {
       assert.equal(findRateLimitMessage([STALE, 'output', live].join('\n'), [], 12), live);
     }
