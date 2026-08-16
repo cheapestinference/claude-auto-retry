@@ -492,6 +492,21 @@ describe('processOneTick', () => {
     assert.equal(s._waitIsFallback, true);
   });
 
+  // --- A banner that names /usage-credits INLINE was classified as chrome, so the tail
+  //     dropped the only line carrying the reset time: the limit was still detected via the
+  //     live-region backstop, but the wait fell back to fallbackWaitHours instead of the
+  //     real reset — and the latch marks a fallback correctable, so the monitor re-derives
+  //     it on every poll for the whole window. ---
+  it('derives the real reset time from a banner naming /usage-credits inline', async () => {
+    const pane = [`${bannerAt(3 * 3600_000)} · run /usage-credits to finish`, '', '❯ '].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s._waitIsFallback, false);          // parsed, not the fallbackWaitHours default
+    const secs = (s.waitUntil - Date.now()) / 1000;
+    assert.ok(secs > 2.5 * 3600 && secs < 3.5 * 3600, `expected ~3h from the banner, got ${Math.round(secs)}s`);
+  });
+
   // --- Regression: a LIVE limit banner pushed far up the pane by UI chrome (a tall task
   //     widget + input box + footer) must still be detected. Observed live: a session-limit
   //     banner ~16 lines up behind a task list went unretried for ~54 min because the fixed

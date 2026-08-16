@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A banner that names `/usage-credits` inline is no longer treated as UI furniture.** The
+  chrome allowlist matched the hint anywhere on a line, but the companion row is not the
+  only place it renders — a session banner can carry it inline ("You've hit your session
+  limit · resets 5:20pm · run /usage-credits to finish"), and the spend-limit banner always
+  does. Those lines were stripped as chrome, so the tail dropped the only line naming the
+  limit: the spend banner needed a special case to be seen at all, and a session banner's
+  reset time was invisible to the parse, sending the monitor to the `fallbackWaitHours`
+  default instead of the real reset. The entry is now anchored to the hint *leading* its
+  row, which covers every banner that mentions it — and removes both the special case and
+  its forward reference to a constant declared 100 lines below.
+- **Spend-limit render shapes that were total misses (#71 follow-up).** The banner pattern
+  admitted only the `⎿`/`└` echo markers, so the `⚠`- and `·`-prefixed renders — markers
+  this file already expects on limit banners — were never matched; the `⚠` in emoji
+  presentation (`⚠️`, U+26A0 + U+FE0F) failed on the variation selector; the **boxed** form
+  (`│ ⚠ You've hit … │`, the render this suite already pins for session banners) was not
+  admitted at all, and unlike a session banner the spend render has no reset line to fall
+  back on; and the pattern required an ASCII apostrophe in "you've" while the qualifier
+  beside it already admitted `’`, so a render in typographic quotes was missed too. All of
+  them compounded with the chrome misclassification above: invisible rather than merely
+  unanchored. The apostrophe is now *required* in the other direction — "youve hit your
+  monthly spend limit" no longer walks the one detection path that needs no reset time.
+- **A wrapped or bulleted quotation of the spend banner no longer false-fires a wait.**
+  `^\s*` is not an anchor when model output wraps with a hanging indent: a continuation line
+  beginning "You've hit your org's monthly spend limit …" entered a 5-hour wait and typed
+  retries into an idle session. A render starts at column 0, behind a box border, behind a
+  flush-left `⚠`/`·` banner marker, or behind a `⎿`/`└` tool-echo marker (the only ones that
+  legitimately render indented, as children of the notice above them). An indented `⚠`/`·`/`•`
+  is a prose bullet — the shape a model quoting the banner actually produces — and no longer
+  counts as a render. (Trailing punctuation deliberately stays out of it — "You've hit your
+  monthly spend limit." is a real render with a full stop.) The column-0 rule is a rendering
+  assumption, so it has one escape hatch: when the **standalone** `/usage-credits` companion
+  row renders below the banner — evidence a quotation essentially never carries, since it
+  reproduces the banner line and not the separate row beneath it — the indented form is
+  accepted, keeping a real render printed one space too far right, or wrapped.
+
 ## [0.7.1] - 2026-08-14
 
 ### Fixed
