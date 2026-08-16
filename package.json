@@ -4,8 +4,8 @@
   "description": "Automatically retry Claude Code sessions on subscription rate limits and sustained API overload (529/500/503) with exponential backoff",
   "type": "module",
   "bin": {
-    "claude-auto-retry": "./bin/cli.js",
-    "claude-auto-retry-tmux-status": "./bin/tmux-status.sh"
+    "claude-auto-retry": "bin/cli.js",
+    "claude-auto-retry-tmux-status": "bin/tmux-status.sh"
   },
   "scripts": {
     "test": "node --test test/*.test.js"
@@ -24,7 +24,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/cheapestinference/claude-auto-retry"
+    "url": "git+https://github.com/cheapestinference/claude-auto-retry.git"
   },
   "files": [
     "bin/",
