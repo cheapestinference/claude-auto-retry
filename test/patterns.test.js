@@ -860,6 +860,25 @@ describe('a banner that names /usage-credits inline is content, not chrome', () 
       ['⏺ You can run /usage-credits when you hit your usage limit', '', '❯ '],
     ]) assert.equal(isRateLimited(pane.join('\n'), [], 12), false);
   });
+  it('outranks a STALE banner above it — the #74 composition', () => {
+    // The composition of #75 (which made this line content rather than chrome, and is now
+    // in master) with #73's per-line eligibility veto below. One of that veto's signals is
+    // a budget on how many words may follow the reset clause, and EVERY inline-hint banner
+    // busts it ("· run /usage-credits to finish" is four) — so the render #75 made
+    // parseable is exactly the shape the veto would demote. It only bites when something
+    // stale sits above the banner, which is why the single-line test above cannot see it,
+    // and demotion is the unrecoverable direction: the stale time PARSES, so
+    // `_waitIsFallback` is false and #70's correctUsageWait never revisits the ~24h wait
+    // it latches.
+    //
+    // The veto resolves it by asking "does the line name a limit" ahead of the tail budget.
+    // Verified against both heads of that work while it was still a separate branch: at
+    // d0a0e16 this pane returned the stale banner, at ab302d6 it returns the live line —
+    // so this test fails against the shape of the bug and passes against the fix.
+    const pane = ["You've hit your limit · resets 11:30am (UTC)", '● wrote some code',
+      inlineHint, '', '❯ '].join('\n');
+    assert.equal(findRateLimitMessage(pane, [], 12), inlineHint);
+  });
   it('still treats the companion ROW as chrome', () => {
     // Anchored, not abandoned: the hint leading its line is still furniture, indented or
     // behind an echo marker, or the tail budget goes on it instead of on the banner.
