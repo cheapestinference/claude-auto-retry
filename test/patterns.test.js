@@ -436,10 +436,66 @@ describe('org/monthly spend-limit banner (#71)', () => {
     // since a model quoting a banner bullets it. ⚠/· earn their place at column 0 (that is
     // how the TUI renders them, here and everywhere else in this file), but INDENTED they
     // are prose bullets, and admitting them there reopens the wrap hole. The tool-echo
-    // markers ⎿/└ are the only ones that legitimately render indented.
+    // markers ⎿/└ are the only ones that legitimately render indented. What the quotation
+    // never brings with it is the STANDALONE companion row — see the escape-hatch tests below.
     for (const bullet of ['·', '•', '-', '*']) {
       const pane = ['⏺ Two things could be happening:', `  ${bullet} ${SPEND_ORG}`, '', '❯ '].join('\n');
       assert.equal(isRateLimited(pane, [], 12), false, `bullet ${bullet} fired`);
+    }
+  });
+  it('detects the BOXED spend render', () => {
+    // The suite pins the boxed form for SESSION banners ("│ ⚠ You've hit your limit │"),
+    // which survive on the unanchored LIMIT+RESET pair. The spend banner has no reset line,
+    // so the shape pattern is its only path in and the border has to be part of the shape.
+    const boxed = ['╭──────────╮', `│ ⚠ ${SPEND_ORG} │`,
+      "│      /usage-credits to finish what you're working on. │",
+      '╰──────────╯', '', '❯ '].join('\n');
+    assert.equal(isRateLimited(boxed, [], 12), true);
+    assert.equal(isRateLimited(withCompanion(`│ ${SPEND_ORG} │`), [], 12), true);
+  });
+  it('detects the ⚠ marker in EMOJI presentation ("⚠️" = U+26A0 U+FE0F)', () => {
+    // The variation selector is neither whitespace nor part of the phrase, so an unhandled
+    // U+FE0F failed the whole pattern — a total miss, not a weaker match.
+    assert.equal(isRateLimited(withCompanion(`⚠️ ${SPEND_ORG}`), [], 12), true);
+    assert.equal(isRateLimited(withCompanion(`⚠️${SPEND_ORG}`), [], 12), true);
+  });
+  it('does NOT fire without the apostrophe ("youve hit your monthly spend limit")', () => {
+    // Every real render prints one. This is the only path into a wait that needs no reset
+    // time to corroborate it, so the cheap tightening is worth having.
+    const pane = withCompanion('youve hit your monthly spend limit');
+    assert.equal(isRateLimited(pane, [], 12), false);
+  });
+
+  // --- The standalone companion ROW as a substitute for column-0 shape. The flush-left rule
+  //     is a rendering assumption; when it turns out wrong the cost is a total miss. A model
+  //     quoting a banner reproduces the banner LINE — essentially never the separate
+  //     "/usage-credits to finish…" row beneath it — so that row is the liveness evidence
+  //     that lets the indent-tolerant pattern in. ---
+  it('detects a render printed one space right of column 0, given the companion row', () => {
+    assert.equal(isRateLimited(withCompanion(` ⚠ ${SPEND_ORG}`), [], 12), true);
+  });
+  it('detects an INDENTED markerless render, given the companion row', () => {
+    // Master detected this; the wrap veto took it out even when the genuine companion row
+    // rendered directly below. The row buys it back without reopening the quotation hole.
+    const pane = ['  ' + "You've hit your monthly spend limit.",
+      "     /usage-credits to finish what you're working on.", '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
+  it('KNOWN BOUNDARY: a two-row quotation reproducing the companion row too DOES fire', () => {
+    // The disclosed cost of the rule above. A quotation that reproduces the banner AND the
+    // standalone companion row beneath it, with nothing but chrome below, is indistinguishable
+    // from the render at the shape level — the live-region gate is what remains. Accepted:
+    // that shape is rare, and the wait it produces is the bounded, correctable fallback.
+    const pane = ['⏺ The team banner reads:', `  ${SPEND_ORG}`,
+      "     /usage-credits to finish what you're working on.", '', '❯ '].join('\n');
+    assert.equal(isRateLimited(pane, [], 12), true);
+  });
+  it('a wrapped quotation stays inert when only the INLINE hint is present', () => {
+    // The banner names /usage-credits mid-line, so the last companion match is the quoted
+    // line itself, not a standalone row — the escape hatch stays shut and the shape decides.
+    for (const quoted of [`  ${SPEND_ORG}`, `  · ${SPEND_ORG}`, `  ⚠ ${SPEND_ORG}`]) {
+      const pane = ['⏺ The team banner reads:', quoted, '', '❯ '].join('\n');
+      assert.equal(isRateLimited(pane, [], 12), false, `fired on: ${quoted}`);
     }
   });
 });

@@ -29,8 +29,16 @@ const USAGE_CREDITS = /\/usage-credits\b/i;
 // classified those banners as furniture: contentTail stripped them, so the only line
 // naming the limit — and, for a session banner, the only line carrying the reset time —
 // was invisible to every detector. The companion always renders on its own row (indented,
-// or behind the ⎿/└/· echo marker).
-const USAGE_CREDITS_HINT = /^\s*(?:[⎿└·]\s*)*\/usage-credits\b/i;
+// or behind ONE ⎿/└/· echo marker — no render stacks them), so this is the same literal as
+// the signal above with a leading anchor, composed from it rather than re-spelled.
+//
+// Leading indentation is admitted here and REFUSED for the same `·` in SPEND_LIMIT below.
+// The two constants answer different questions about opposite failure costs: this one asks
+// "is this row furniture?" about a row the TUI renders INDENTED in every observed pane, and
+// over-matching costs at most a stripped line that carries no limit signal of its own.
+// SPEND_LIMIT asks "is this row a live render?" about a line the TUI prints flush left, and
+// over-matching there commits a multi-hour wait with no reset time to sanity-check it.
+const USAGE_CREDITS_HINT = new RegExp(`^\\s*(?:[⎿└·]\\s*)?${USAGE_CREDITS.source}`, 'i');
 
 // Indicators that Claude is mid-flight and the pane is NOT in a terminal error state.
 // Two kinds: the streaming footer, and Claude Code's OWN internal-retry indicator.
@@ -171,36 +179,59 @@ const RESET_PATTERNS = [
 // spend limit …"). The remaining anchors are the /usage-credits companion in the live
 // region, and the wait produced downstream being the bounded, correctable fallback.
 //
-// Two things the shape has to tolerate, neither of which it did — and each a TOTAL miss,
+// Four things the shape has to tolerate, none of which it did — and each a TOTAL miss,
 // not a weaker match, because a banner naming /usage-credits inline that fails this pattern
 // is also the banner nothing else in the file recognises:
 //   - THE MARKER VARIES. ⚠ and · prefix limit renders elsewhere in this file (see the TUI
 //     sketch above); admitting only ⎿/└ made "⚠ You've hit your org's monthly spend limit …"
 //     invisible.
+//   - ⚠ ALSO ARRIVES IN EMOJI PRESENTATION. "⚠️" is U+26A0 + U+FE0F, and the variation
+//     selector is neither whitespace nor part of the phrase, so it failed the whole pattern.
+//   - THE BANNER CAN BE BOXED. "│ ⚠ You've hit your limit │" is the render this suite
+//     already pins for SESSION banners; those survive on the unanchored LIMIT+RESET pair,
+//     but the spend banner has no reset line, so this pattern is its only path in.
 //   - APOSTROPHES ARE TYPOGRAPHIC. The qualifier class already admits ’ for "org’s"; the
-//     "you've" ahead of it did not, so a render in curly quotes was missed as well.
+//     "you've" ahead of it did not, so a render in curly quotes was missed as well. The
+//     apostrophe itself is REQUIRED though — every real render prints one, and without it
+//     "youve hit your monthly spend limit" walks the one path into a wait that needs no
+//     reset time to corroborate it.
 //
 // And one it has to EXCLUDE: `^\s*` is not an anchor. Model output wraps with a hanging
 // indent, so a continuation line begins with whitespace and then whatever the sentence was
 // up to — quoting the banner ("⏺ The team banner reads:" / "  You've hit your org's monthly
 // spend limit · …") false-fired a 5h wait and then typed retries into an idle session. A
-// render starts at column 0 or behind an echo marker; indented with no marker is a wrap.
-// (A quotation that lands at column 0 still fires; the remaining anchors are the live-region
-// gate and the bounded, correctable fallback the wait lands on.) Trailing punctuation is
-// deliberately NOT a signal: "You've hit your monthly spend limit." — the individual variant
-// from the #71 report — is a real render with a full stop.
+// render starts at column 0, behind a box border, or behind an echo marker; indented with
+// none of those is a wrap. (A quotation that lands at column 0 still fires; the remaining
+// anchors are the live-region gate and the bounded, correctable fallback the wait lands on.)
+// Trailing punctuation is deliberately NOT a signal: "You've hit your monthly spend limit."
+// — the individual variant from the #71 report — is a real render with a full stop.
 //
-// WHICH MARKER MAY BE INDENTED IS THEREFORE PART OF THE SHAPE, and the two classes differ:
+// WHICH PREFIX MAY BE INDENTED IS THEREFORE PART OF THE SHAPE, and the classes differ:
 //   - ⎿/└ are TOOL-ECHO markers. They render as indented children of the notice above them
 //     ("● Agent \"…\" finished" / "  ⎿ You've hit …"), so they must be allowed leading space.
 //     Neither is a character prose reaches for, so that costs nothing.
-//   - ⚠/· are BANNER markers, and the TUI renders them flush left — every render in this
-//     file and its suite sits at column 0. Indented, they are prose BULLETS: a model quoting
-//     the banner bullets it far more often than it hangs it under a bare indent, so admitting
-//     them there reopens the very wrap hole the paragraph above closes. Column 0 only.
-// (A leading `•` is not admitted at all: no render in this file uses it, and it is the one
-// glyph that is purely a prose bullet.)
-const SPEND_LIMIT = /^(?:\s*[⎿└]\s*|[⚠·]\s*)?you['’]?ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/i;
+//   - │ is a BOX BORDER, and a box is indented or not as a whole — it carries its own
+//     column-0 evidence, so leading space costs nothing there either.
+//   - ⚠/· are BARE BANNER markers, and outside a box the TUI prints them flush left.
+//     Indented, they are prose BULLETS: a model quoting the banner bullets it far more often
+//     than it hangs it under a bare indent, so admitting them there reopens the very wrap
+//     hole the paragraph above closes.
+// (● / ⏺ stay out entirely: the assistant-message glyph, so "⏺ You've hit …" is likelier a
+// model quoting the banner than a render — the most dangerous prefix that could be added,
+// with no reset time to check it against. A leading • stays out for the mirror-image reason:
+// no render uses it, and it is purely a prose bullet.)
+const SPEND_LIMIT_BODY = /you['’]ve\s+(?:hit|exceeded|reached)\s+(?:your|the)\s+(?:[\w'’-]+\s+){0,3}spend limit/;
+const SPEND_LIMIT = new RegExp(
+  `^(?:\\s*[⎿└]\\s*|\\s*│\\s*(?:[⚠·]\\uFE0F?\\s*)?|[⚠·]\\uFE0F?\\s*)?${SPEND_LIMIT_BODY.source}`, 'i');
+// The column-0 rule above is a rendering assumption, and a one-space margin ahead of ⚠ — or
+// a genuine hanging wrap of a REAL banner — is a total miss when it turns out wrong. This is
+// the escape hatch: same banner words, no column-0 rule, and consulted ONLY when the pane's
+// companion is a STANDALONE row rather than a hint the banner names inline (see
+// isRateLimited). Quoting prose reproduces the banner LINE; it essentially never also
+// reproduces the separate "/usage-credits to finish…" row beneath it, so that row
+// substitutes for the shape evidence the indent gave up. Prose bullet glyphs (•, -, *) stay
+// out even here: no render prints them at any indent.
+const SPEND_LIMIT_INDENTED = new RegExp(`^\\s*(?:[⚠·]\\uFE0F?\\s*)?${SPEND_LIMIT_BODY.source}`, 'i');
 
 const WINDOW = 6;
 
@@ -298,11 +329,19 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
     // The SPEND_LIMIT alternative (#71) is the one exception to the reset-anchor rule:
     // that banner never prints a reset time, so the companion + live-region gates above
     // are its whole defense, and the pattern stays banner-shaped to compensate.
-    if (companionIdx !== -1
-        && all.slice(companionIdx + 1).every(isChromeLine)
-        && (hasNearbyMatch(all, companionIdx, RESET_PATTERNS, fullMask)
-          || hasNearbyMatch(all, companionIdx, [SPEND_LIMIT], fullMask))) {
-      return true;
+    if (companionIdx !== -1 && all.slice(companionIdx + 1).every(isChromeLine)) {
+      // …unless the companion we found is the STANDALONE row rather than a hint named
+      // inline by the banner itself. That row is a liveness signal a quotation essentially
+      // never carries, so it stands in for the banner's column-0 shape and the indent-
+      // tolerant pattern is allowed in — recovering a real render printed one space too far
+      // right, or wrapped. companionIdx is the LAST /usage-credits line, so "the companion
+      // is its own row" is exactly USAGE_CREDITS_HINT applied to it.
+      const spendShapes = USAGE_CREDITS_HINT.test(all[companionIdx])
+        ? [SPEND_LIMIT, SPEND_LIMIT_INDENTED] : [SPEND_LIMIT];
+      if (hasNearbyMatch(all, companionIdx, RESET_PATTERNS, fullMask)
+          || hasNearbyMatch(all, companionIdx, spendShapes, fullMask)) {
+        return true;
+      }
     }
   }
 
