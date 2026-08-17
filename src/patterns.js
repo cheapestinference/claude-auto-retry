@@ -700,6 +700,51 @@ export function detectSafeguard(text, patterns = []) {
   return safeguardMatch(text, patterns) !== null;
 }
 
+// --- Interrupted-stream detection (truncated turn) ---
+// Claude Code wraps the response body in a byte watchdog. When bytes stop arriving it
+// aborts the stream and finalizes whatever was already yielded, tagging the cause on an
+// `API Error:` line: a suspended machine, a dropped connection, a stalled stream, a server
+// error. The turn then ENDS at an idle prompt — Claude Code retries by itself only while
+// the response is still thinking-only, so by the time this render exists it has already
+// declined to retry. Nothing resumes the work until something is typed. That's the gap
+// this closes; see DEFAULT_STREAM_INTERRUPTED for the full render set.
+//
+// Anchor: "an API Error line nearby" — the rule the safeguard and overload families use —
+// is NOT enough here. Those phrases are jargon; these are ordinary English about a common
+// event ("your computer went to sleep"), so a session that merely EXPLAINS them quotes the
+// whole render, anchor included, mid-sentence. The discriminator is therefore the SHAPE of
+// the line (#73): a real render BEGINS with `API Error:`, behind at most Claude's message
+// glyph. Prose carries it mid-line; the user's own line carries ❯ instead of ⏺.
+const RENDER_HEAD = /^\s*(?:[⏺●]\s+)?API Error:/i;
+// A render head fills a terminal row, so the cause clause can wrap onto the next
+// (indented) row. Two lines covers the wrap without reaching into whatever follows.
+const RENDER_WRAP_LINES = 2;
+
+export function streamInterruptedMatch(text, patterns = []) {
+  if (!patterns || patterns.length === 0) return null;
+  // Same windowing and tool-echo discipline as the overload/safeguard matchers (#63): the
+  // render quoted inside a Bash result is scrollback, not a live truncated turn.
+  const { lines, mask } = tail(text);
+  if (!lines.join('').trim()) return null;
+  const regexes = toRegexes(patterns);
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i] || !RENDER_HEAD.test(lines[i])) continue;
+    const last = Math.min(i + RENDER_WRAP_LINES, lines.length - 1);
+    for (let j = i; j <= last; j++) {
+      // Past the head, only an indented continuation still belongs to this render.
+      if (mask[j] || (j > i && !/^\s/.test(lines[j]))) continue;
+      for (const r of regexes) {
+        if (r.test(lines[j])) return { pattern: r.source, line: lines[j].trim().slice(0, 200) };
+      }
+    }
+  }
+  return null;
+}
+
+export function detectStreamInterrupted(text, patterns = []) {
+  return streamInterruptedMatch(text, patterns) !== null;
+}
+
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
 // live working footer pushed up by a tall chrome stack below it (task widget + input box
 // + footer) would be invisible to a raw last-N tail while the chrome-aware detectors still

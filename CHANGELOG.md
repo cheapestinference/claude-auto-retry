@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A turn truncated by a suspended machine or a dropped connection is now resumed.**
+  Claude Code wraps the response body in a byte watchdog; when the bytes stop arriving it
+  aborts the stream and finalizes whatever had already been printed, naming the cause on an
+  `API Error:` line ("Your computer went to sleep mid-response. The response above may be
+  incomplete."). The turn is then over — the prompt returns idle and nothing resumes it, so
+  a session can sit on a half-finished answer indefinitely. Claude Code retries by itself
+  only while the response is still thinking-only; once real content has been yielded it
+  declines to retry, which is precisely when this render appears. Seeing it at an idle
+  prompt, the monitor now sends `continue`, bounded at `maxRetries` because a machine that
+  just woke may not have its network back yet. All seven renders the finalizer emits are
+  matched (suspend, dropped connection, stalled stream and mid-response server error, in
+  both their "mid-response" and "before a response was produced" forms) — they leave the
+  same wreckage and take the same remedy. Detection is anchored on the SHAPE of the line
+  rather than its vocabulary: a real render *begins* with `API Error:`, behind at most
+  Claude's message glyph, so a session merely explaining the error — which quotes the whole
+  render, anchor included, mid-sentence — cannot trigger a resume. Configured under a
+  `streamInterrupted` block.
+
 ## [0.7.3] - 2026-08-16
 
 ### Fixed
