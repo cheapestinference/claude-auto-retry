@@ -64,6 +64,41 @@ export const DEFAULT_SAFEGUARD = {
   retryMessage: 'continue',
 };
 
+// Interrupted-stream resume. A third failure family, distinct from usage limits (hours)
+// and overload (5xx, exponential): Claude Code's byte watchdog aborted a stream mid-turn
+// and finalized whatever had already been yielded. The turn is OVER — the prompt returns
+// idle and nothing resumes it — so the session sits untouched until something is typed.
+// Claude Code retries these by itself only while the response is still thinking-only; once
+// real content has been yielded it declines to retry, which is precisely when this renders.
+// A single "continue" picks the work back up. Bounded, because a machine that just woke may
+// not have its network back yet and the resumed turn can fail the same way.
+export const DEFAULT_STREAM_INTERRUPTED = {
+  enabled: true,
+  // Case-insensitive regexes matched against the pane tail, and only against a line that
+  // BEGINS with the `API Error:` render (see streamInterruptedMatch). These phrases are
+  // ordinary English about a common event, so the "anchor nearby" rule the safeguard and
+  // overload families use is not enough here — a session explaining them quotes the whole
+  // render, anchor included, mid-sentence.
+  // The full set the stream finalizer emits, by cause:
+  //   suspend      → "Your computer went to sleep {mid-response | before a response was produced}"
+  //   idle timeout → "The response stopped arriving" / "The response stalled before …"
+  //   connection   → "Connection lost {mid-response | before a response was produced}"
+  //   server error → "Server error mid-response"
+  // All seven leave the pane in the same truncated-turn state, so they share one remedy.
+  patterns: [
+    'went to sleep mid-response',
+    'went to sleep before a response was produced',
+    'response stopped arriving',
+    'response stalled before a response was produced',
+    'Connection lost mid-response',
+    'Connection lost before a response was produced',
+    'Server error mid-response',
+  ],
+  maxRetries: 2,          // small — if resuming keeps truncating, something else is wrong
+  retryDelaySeconds: 5,   // let the network settle after a wake before typing
+  retryMessage: 'continue',
+};
+
 export const DEFAULT_CONFIG = {
   maxRetries: 5,
   pollIntervalSeconds: 5,
@@ -73,6 +108,7 @@ export const DEFAULT_CONFIG = {
   customPatterns: [],
   overload: DEFAULT_OVERLOAD,
   safeguard: DEFAULT_SAFEGUARD,
+  streamInterrupted: DEFAULT_STREAM_INTERRUPTED,
 };
 
 const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
@@ -93,15 +129,8 @@ function validateOverload(raw) {
 
   o.enabled = typeof o.enabled === 'boolean' ? o.enabled : DEFAULT_OVERLOAD.enabled;
 
-  // Patterns are case-insensitive regexes (see detectOverload). Keep only non-empty
-  // strings that actually compile, so a typo'd pattern can't crash the monitor tick.
-  const pats = Array.isArray(o.patterns)
-    ? o.patterns.filter(p => {
-        if (typeof p !== 'string' || p.length === 0) return false;
-        try { new RegExp(p); return true; } catch { return false; }
-      })
-    : [];
-  o.patterns = pats.length > 0 ? pats : [...DEFAULT_OVERLOAD.patterns];
+  // Patterns are case-insensitive regexes (see detectOverload).
+  o.patterns = validPatterns(o.patterns, DEFAULT_OVERLOAD.patterns);
 
   const backoff = Array.isArray(o.backoffSeconds)
     ? o.backoffSeconds.filter(n => typeof n === 'number' && Number.isFinite(n) && n > 0)
@@ -123,22 +152,31 @@ function validateOverload(raw) {
   return o;
 }
 
-function validateSafeguard(raw) {
-  const s = { ...DEFAULT_SAFEGUARD, ...(raw && typeof raw === 'object' ? raw : {}) };
-  s.enabled = typeof s.enabled === 'boolean' ? s.enabled : DEFAULT_SAFEGUARD.enabled;
-  const pats = Array.isArray(s.patterns)
-    ? s.patterns.filter(p => {
+// Keep only non-empty strings that actually compile, so a typo'd user pattern can't crash
+// the monitor tick. Shared by every pattern-carrying block.
+function validPatterns(raw, defaults) {
+  const pats = Array.isArray(raw)
+    ? raw.filter(p => {
         if (typeof p !== 'string' || p.length === 0) return false;
         try { new RegExp(p); return true; } catch { return false; }
       })
     : [];
-  s.patterns = pats.length > 0 ? pats : [...DEFAULT_SAFEGUARD.patterns];
-  s.maxRetries = validNumber(s.maxRetries, 1, DEFAULT_SAFEGUARD.maxRetries);
-  s.retryDelaySeconds = validNumber(s.retryDelaySeconds, 1, DEFAULT_SAFEGUARD.retryDelaySeconds);
-  if (typeof s.retryMessage !== 'string' || !s.retryMessage) {
-    s.retryMessage = DEFAULT_SAFEGUARD.retryMessage;
+  return pats.length > 0 ? pats : [...defaults];
+}
+
+// Safeguard and streamInterrupted are the same SHAPE of block — a bounded, seconds-scale
+// retry family (patterns + cap + delay + message) — so one validator serves both. Overload
+// keeps its own: it carries a backoff schedule and relaunch knobs this shape has no room for.
+function validateBoundedRetry(raw, defaults) {
+  const b = { ...defaults, ...(raw && typeof raw === 'object' ? raw : {}) };
+  b.enabled = typeof b.enabled === 'boolean' ? b.enabled : defaults.enabled;
+  b.patterns = validPatterns(b.patterns, defaults.patterns);
+  b.maxRetries = validNumber(b.maxRetries, 1, defaults.maxRetries);
+  b.retryDelaySeconds = validNumber(b.retryDelaySeconds, 1, defaults.retryDelaySeconds);
+  if (typeof b.retryMessage !== 'string' || !b.retryMessage) {
+    b.retryMessage = defaults.retryMessage;
   }
-  return s;
+  return b;
 }
 
 function validate(cfg) {
@@ -163,7 +201,8 @@ function validate(cfg) {
     }
   }
   cfg.overload = validateOverload(cfg.overload);
-  cfg.safeguard = validateSafeguard(cfg.safeguard);
+  cfg.safeguard = validateBoundedRetry(cfg.safeguard, DEFAULT_SAFEGUARD);
+  cfg.streamInterrupted = validateBoundedRetry(cfg.streamInterrupted, DEFAULT_STREAM_INTERRUPTED);
   return cfg;
 }
 

@@ -5,8 +5,9 @@
 > until the printed reset time and sends "continue" automatically. Sustained API
 > overload (`API Error: 529 … overloaded_error`, 500/502/503/504) gets exponential
 > backoff with jitter; safeguard/AUP false positives ("safeguards flagged this
-> message") get a bounded immediate re-send. tmux-based, so it keeps working after
-> you disconnect.
+> message") get a bounded immediate re-send; and a stream truncated by a laptop
+> suspend or a dropped connection ("Your computer went to sleep mid-response") is
+> resumed. tmux-based, so it keeps working after you disconnect.
 
 Install: `npm i -g claude-auto-retry && claude-auto-retry install` — then use `claude`
 as usual.
@@ -17,7 +18,8 @@ Key facts:
   `You've hit your session limit · resets 2am (Europe/Zurich)`, `Claude usage limit
   reached`, `You're out of extra usage`, `API Error: 529 {"type":"overloaded_error"…}`,
   `API Error: Server is temporarily limiting requests (not your usage limit)`,
-  `<model>'s safeguards flagged this message`.
+  `<model>'s safeguards flagged this message`, `API Error: Your computer went to
+  sleep mid-response`.
 - Navigates the `/rate-limit-options` menu to "Stop and wait for limit to reset"
   across any menu layout; never confirms "Upgrade your plan".
 - Safe by design: verifies Claude is the foreground process before injecting keys,
