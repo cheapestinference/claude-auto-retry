@@ -93,6 +93,55 @@ describe('detectStreamInterrupted', () => {
     assert.equal(detectStreamInterrupted(pane, PATS), false);
   });
 
+  // A render's HEAD is never indented — it starts its line, at column 0 or behind Claude's
+  // glyph. An indented, glyph-less `API Error:` is the hanging-indent shape of a QUOTATION,
+  // the same wrap/quotation class #75 closed for SPEND_LIMIT. The FP fixtures above all carry
+  // the quote MID-line, which is why this class slipped past them.
+  it('does NOT fire on a hanging-indent quotation of the render', () => {
+    assert.equal(detectStreamInterrupted([
+      '\u23fa The error I saw before the crash was:',
+      '  API Error: Your computer went to sleep mid-response. The response above may be',
+      '  incomplete.',
+      '\u276f ',
+    ].join('\n'), PATS), false);
+  });
+
+  it('does NOT fire on a hanging-indent quotation below the user\'s own line', () => {
+    assert.equal(detectStreamInterrupted([
+      '\u276f what does this mean?',
+      '  API Error: Connection lost mid-response. The response above may be incomplete.',
+      '\u276f ',
+    ].join('\n'), PATS), false);
+  });
+
+  // Print mode renders the head flush left with NO glyph, so the rule above splits on the
+  // glyph rather than banning indentation outright: glyphed heads may indent, bare ones may not.
+  it('still matches a bare column-0 head (print mode)', () =>
+    assert.equal(detectStreamInterrupted(
+      'API Error: Your computer went to sleep mid-response. The response above may be incomplete.', PATS), true));
+
+  // The wrap window must END at the first non-indented line rather than skip past it: here the
+  // phrase belongs to the NEXT block's continuation, and the head two rows up is a 529 render.
+  it('does NOT walk the wrap window across a block boundary', () => {
+    assert.equal(detectStreamInterrupted([
+      '\u23fa API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}',
+      '\u23fa I was explaining that your',
+      '  computer went to sleep mid-response and that truncates the turn.',
+    ].join('\n'), PATS), false);
+  });
+
+  it('KNOWN BOUNDARY: a quotation reproducing the glyph at column 0 DOES fire', () => {
+    // The disclosed cost of the shape rule. A quotation that reproduces Claude's own message
+    // glyph flush left is per-line indistinguishable from the render — the same boundary class
+    // as #74's limit-naming prose. Accepted: the shape is rare, and what it triggers is a
+    // bounded `continue` that clears itself, not a multi-hour wait.
+    assert.equal(detectStreamInterrupted([
+      '\u23fa Here is what it printed:',
+      '\u23fa API Error: Your computer went to sleep mid-response.',
+      '\u276f ',
+    ].join('\n'), PATS), true);
+  });
+
   it('does NOT fire on the render left far up in scrollback (tail-anchored)', () => {
     const pane = ['⏺ API Error: Your computer went to sleep mid-response.',
       ...Array(15).fill('⏺ unrelated work'), '❯ '].join('\n');

@@ -23,8 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same wreckage and take the same remedy. Detection is anchored on the SHAPE of the line
   rather than its vocabulary: a real render *begins* with `API Error:`, behind at most
   Claude's message glyph, so a session merely explaining the error — which quotes the whole
-  render, anchor included, mid-sentence — cannot trigger a resume. Configured under a
-  `streamInterrupted` block.
+  render, anchor included, mid-sentence — cannot trigger a resume. The glyph and the
+  indentation are one rule: a glyphed head may sit anywhere, a bare head must start at
+  column 0, because an indented glyph-less head is the hanging-indent shape of a quotation
+  rather than a render. Configured under a `streamInterrupted` block.
 
 ## [0.7.3] - 2026-08-16
 

@@ -715,7 +715,14 @@ export function detectSafeguard(text, patterns = []) {
 // whole render, anchor included, mid-sentence. The discriminator is therefore the SHAPE of
 // the line (#73): a real render BEGINS with `API Error:`, behind at most Claude's message
 // glyph. Prose carries it mid-line; the user's own line carries ❯ instead of ⏺.
-const RENDER_HEAD = /^\s*(?:[⏺●]\s+)?API Error:/i;
+//
+// The glyph and the indentation are ONE rule, not two independent ones: a glyphed head may
+// sit anywhere (the TUI indents blocks), but a BARE head must start at column 0. Allowing
+// arbitrary indentation on a glyph-less head admits the hanging-indent shape of a quotation
+// — "⏺ The error I saw was:" / "  API Error: Your computer went to sleep…" — which is the
+// same wrap/quotation class #75 closed for SPEND_LIMIT. A real head is never indented: it
+// STARTS its line, and a narrow pane wraps the head's tail downward, never the head itself.
+const RENDER_HEAD = /^(?:\s*[⏺●]\s+)?API Error:/i;
 // A render head fills a terminal row, so the cause clause can wrap onto the next
 // (indented) row. Two lines covers the wrap without reaching into whatever follows.
 const RENDER_WRAP_LINES = 2;
@@ -731,8 +738,11 @@ export function streamInterruptedMatch(text, patterns = []) {
     if (mask[i] || !RENDER_HEAD.test(lines[i])) continue;
     const last = Math.min(i + RENDER_WRAP_LINES, lines.length - 1);
     for (let j = i; j <= last; j++) {
-      // Past the head, only an indented continuation still belongs to this render.
-      if (mask[j] || (j > i && !/^\s/.test(lines[j]))) continue;
+      // Past the head, the render continues only while the lines stay indented. The first
+      // flush-left line STARTS THE NEXT BLOCK, so it ends the window — skipping past it let
+      // the scan reach a later block's continuation and attribute its phrase to this head.
+      if (j > i && !/^\s/.test(lines[j])) break;
+      if (mask[j]) continue;
       for (const r of regexes) {
         if (r.test(lines[j])) return { pattern: r.source, line: lines[j].trim().slice(0, 200) };
       }
