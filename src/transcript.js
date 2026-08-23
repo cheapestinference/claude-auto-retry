@@ -26,10 +26,9 @@ export function transcriptPathFor(cwd, sessionId, configDir = DEFAULT_CONFIG_DIR
 // Returns the raw text of the LAST isApiErrorMessage record in the transcript, or null.
 // Matches on the flag substring rather than parsing the full JSON shape, so a renamed or
 // restructured field elsewhere in the record can't break this — only the flag name itself.
-export async function readLatestUsageLimitLine(cwd, sessionId, configDir = DEFAULT_CONFIG_DIR) {
-  if (!cwd || !sessionId) return null;
+async function readLatestUsageLimitLineFrom(path) {
   try {
-    const text = await readFile(transcriptPathFor(cwd, sessionId, configDir), 'utf-8');
+    const text = await readFile(path, 'utf-8');
     const lines = text.split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       if (/"isApiErrorMessage"\s*:\s*true/.test(lines[i])) return lines[i];
@@ -38,4 +37,17 @@ export async function readLatestUsageLimitLine(cwd, sessionId, configDir = DEFAU
   } catch {
     return null;
   }
+}
+
+// marker is the StopFailure event ({ cwd, session_id, transcript_path }). transcript_path
+// is the standard hook envelope field (see DESIGN-NOTES.md) and is preferred outright: it
+// is Claude Code's own resolved path for the session that raised the marker, so it can't
+// diverge the way a cwd-slug reconstruction can (cwd changing mid-session, or a
+// CLAUDE_CONFIG_DIR mismatch between claude's env and the monitor's). cwd/session_id is
+// kept only as a fallback for older Claude Code builds whose envelope omits the field.
+export async function readLatestUsageLimitLine(marker, configDir = DEFAULT_CONFIG_DIR) {
+  const path = marker?.transcript_path
+    || (marker?.cwd && marker?.session_id ? transcriptPathFor(marker.cwd, marker.session_id, configDir) : null);
+  if (!path) return null;
+  return readLatestUsageLimitLineFrom(path);
 }

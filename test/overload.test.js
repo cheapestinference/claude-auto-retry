@@ -580,17 +580,22 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
       const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
       assert.equal(r, 'waiting');
       assert.equal(s.status, 'waiting');
-      assert.equal(t._cleared, true); // marker consumed
+      assert.equal(t._cleared, true); // marker consumed — a message DID resolve
+      assert.equal(s.viaUsageEvent, true);  // see monitor.test.js for the wait-lifecycle coverage
       assert.match(s.lastRateLimitMessage, /resets 2:10am/);
     });
 
-    it('degrades to a no-op when the transcript cannot resolve a message either', async () => {
+    it('degrades to a no-op WITHOUT consuming the marker when the transcript cannot resolve a message either', async () => {
+      // Regression (PR #56 review): the transcript record can flush a beat after the hook
+      // fires. Consuming the marker on an unresolved read would drop the retry permanently
+      // if the record hadn't landed yet — leave it in place so later ticks get another shot,
+      // bounded by the marker's own eventMaxAge staleness rather than by clearing here.
       const t = mockTmux('idle prompt', 'node', true, rateLimitEv, async () => null);
       const s = createMonitorState();
       const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
       assert.equal(r, 'usage-limit-unresolved');
       assert.equal(s.status, 'monitoring'); // untouched — scraper stays the safety net
-      assert.equal(t._cleared, true);       // still consumed so it can't re-fire
+      assert.equal(t._cleared, false);      // NOT consumed — left for a later tick to retry
       assert.equal(t._sent.length, 0);
     });
 
