@@ -159,10 +159,19 @@ export async function acquireLock(lockPath = LOCK_FILE) {
       if (mine !== myId) continue;                          // lost the breaker → retry from the top
       // Re-verify the lock is still stale (a prior breaker may have already replaced it with
       // a live one), then remove it and create ours.
-      let cur = '';
+      let cur = null;
       try { cur = (await readFile(lockPath, 'utf-8')).trim(); } catch {}
       if (cur && await holderIsLive(cur)) return noop;      // became live → back off
-      await unlink(lockPath).catch(() => {});               // remove the stale lock (sole breaker)
+      // Remove only the stale lock we actually READ — never unlink a path we found absent.
+      // The fast path is deliberately not serialized by the breaker, so in the gap between
+      // finding the lock gone (a holder released and exited between our staleness verdict
+      // and here) and an unconditional unlink, a fast-path acquirer can create a fresh LIVE
+      // lock — which the unlink then deletes, and both runs hold at once. Observed under
+      // single-core contention (~0.2% of contended rounds; the cross-process suite test is
+      // the statistical canary). While the file HOLDS the stale id nothing can replace it
+      // (the fast path needs the path absent, other breakers are serialized), so an
+      // identity-checked unlink of exactly that id is race-free.
+      if (cur !== null) await releaseLock(lockPath, cur);   // identity-checked stale removal
       if (await linkCreate(lockPath, join(dir, `.acqb.${uniq}.${attempt}`), myId)) {
         return { ok: true, release: () => releaseLock(lockPath, myId) };
       }
@@ -213,12 +222,25 @@ export function isClaudeProc(p) {
   return basename(argv0) === CLAUDE_COMM;
 }
 
-// The executed script of a `node [flags] <script> …` invocation (skip node + its flags).
+// Node flags that take a SEPARATE-token value (`node -r ./pre.js script.js`). Skipping only
+// the flag would mistake its value for the executed script — missing a preload-instrumented
+// claude (`node -r x /path/claude`) and false-matching an unrelated one whose value path
+// ends in "claude" (`node -r /opt/claude server.js`). The `--flag=value` form carries its
+// value in one token, so it isn't listed here.
+const NODE_VALUE_FLAGS = new Set(['-r', '--require', '--import', '--loader', '-e', '--eval']);
+// Index of the executed script in a `node [flags] <script> …` token list (skip node, its
+// flags, and any separate-token flag values).
+function nodeScriptIndex(toks) {
+  let i = 1;                                       // toks[0] = "node"
+  while (i < toks.length && toks[i].startsWith('-')) {
+    i += (NODE_VALUE_FLAGS.has(toks[i]) && !toks[i].includes('=')) ? 2 : 1;
+  }
+  return i;
+}
+// The executed script of a `node [flags] <script> …` invocation.
 function nodeScript(args) {
   const toks = (args || '').trim().split(/\s+/);
-  let i = 1;                                       // toks[0] = "node"
-  while (i < toks.length && toks[i].startsWith('-')) i++;
-  return toks[i] || '';
+  return toks[nodeScriptIndex(toks)] || '';
 }
 const baseName = (p) => p.split('/').pop();
 
@@ -247,9 +269,23 @@ function isMonitorProc(p) {
 function claudeArgs(p) {
   if (p.comm === CLAUDE_COMM) return p.args;
   const toks = (p.args || '').trim().split(/\s+/);
-  let i = 1;
-  while (i < toks.length && toks[i].startsWith('-')) i++;   // past node flags
-  return ['claude', ...toks.slice(i + 1)].join(' ');        // fake command token + real args
+  return ['claude', ...toks.slice(nodeScriptIndex(toks) + 1)].join(' '); // fake cmd token + real args
+}
+// For an agent wrapper that names claude as a subcommand (`node …/happier claude -p`), the
+// claude args begin AFTER the "claude" token — so isPrintMode sees the -p that follows it,
+// which claudeArgs (stopping at the wrapper's first positional) would miss. Empty if no
+// claude token is present (then the caller falls back to claudeArgs / errs toward arming).
+function wrapperClaudeArgs(args) {
+  const toks = (args || '').trim().split(/\s+/);
+  const i = toks.findIndex(t => baseName(t) === CLAUDE_COMM);
+  return i === -1 ? '' : ['claude', ...toks.slice(i + 1)].join(' ');
+}
+// Verify a launcher's child is actually claude before arming it — don't blindly trust the
+// "launcher only ever wraps claude" invariant. It counts as claude if it is claude itself
+// (comm/argv0), the node-launched CLI, or an agent wrapper that names claude as a token.
+function looksLikeClaude(p) {
+  if (isClaudeProc(p) || isNodeClaudeCli(p)) return true;
+  return (p.args || '').trim().split(/\s+/).some(t => baseName(t) === CLAUDE_COMM);
 }
 // Print mode: `claude -p` / `claude --print` produces piped/scripted output, never an
 // interactive TUI. The wrapper never arms a monitor there; reconcile must skip it too, or
@@ -274,10 +310,16 @@ function isPrintMode(args) {
 
 // tmux: "<pane_id> <pane_pid>" per line → [{ pane, panePid }]
 export function parsePanes(out) {
-  return out.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
-    const [pane, panePid] = l.split(/\s+/);
-    return { pane, panePid: Number(panePid) };
-  }).filter(p => p.pane && Number.isFinite(p.panePid));
+  return out.split('\n').filter(l => l.trim()).map(l => {
+    // Third field (optional): #{socket_path}. It comes LAST because it may contain
+    // spaces — captured VERBATIM (no re-split/re-join, which collapsed consecutive
+    // spaces and broke the status-key match against the reader's #{socket_path}).
+    const m = l.replace(/\r$/, '').match(/^\s*(\S+)\s+(\S+)(?: (.*))?$/);
+    if (!m) return null;
+    const p = { pane: m[1], panePid: Number(m[2]) };
+    if (m[3] !== undefined) p.socket = m[3];
+    return p;
+  }).filter(p => p && p.pane && Number.isFinite(p.panePid));
 }
 
 // ps "-eo pid=,ppid=,stat=,comm=,args=" → [{ pid, ppid, stat, comm, args }]. args is the
@@ -368,7 +410,11 @@ export function sessionTargetsByPane(processes, byPid, panePidToPane) {
     const pane = paneForPid(p.pid, byPid, panePidToPane);
     if (!pane || byPane.has(pane)) continue;               // a direct candidate already owns it
     const child = processes.find(c => c.ppid === p.pid && !isMonitorProc(c));
-    if (child && !isPrintMode(claudeArgs(child))) push(pane, child);
+    if (!child || !looksLikeClaude(child)) continue;       // verify claude-shaped, don't just trust
+    // Print mode through the wrapper: check the args after the "claude" subcommand token
+    // (a wrapper positional precedes the -p, which claudeArgs alone would stop short of).
+    if (isPrintMode(wrapperClaudeArgs(child.args) || claudeArgs(child))) continue;
+    push(pane, child);
   }
   return byPane;
 }
@@ -388,7 +434,15 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
   // monitor alive, so if we keyed on pid we'd arm a SECOND monitor for the new foreground
   // claude in that pane and both would send keys. One monitor per pane suffices — a
   // monitor whose target pid has exited already shuts itself down (isAlive check).
-  const coveredPanes = new Set([...running.keys()].map(k => k.split(' ')[0]));
+  // But the monitor pgrep is GLOBAL while pane ids are only unique per tmux server: a
+  // monitor watching "%1" of `tmux -L work` must not mask THIS server's "%1" forever.
+  // A running entry only covers the pane if its monitored claude pid actually maps to
+  // that pane in this server's pane tree (a dead pid doesn't either — that monitor is
+  // about to shut itself down, and a fresh claude there deserves coverage now).
+  const coveredPanes = new Set([...running.keys()].map(k => {
+    const [pane, pid] = k.split(' ');
+    return paneForPid(Number(pid), byPid, panePidToPane) === pane ? pane : null;
+  }).filter(Boolean));
 
   // Every interactive claude session, mapped to its pane (comm 'claude', a macOS
   // full-path/argv0 claude, a node-launched claude CLI, or an agent our launcher wraps),
@@ -425,7 +479,7 @@ export function planReconcile({ panes, processes, running, selfPane = null, excl
 
 async function gather() {
   const [{ stdout: panesOut }, { stdout: psOut }] = await Promise.all([
-    execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid}']),
+    execFile('tmux', ['list-panes', '-a', '-F', '#{pane_id} #{pane_pid} #{socket_path}']),
     execFile('ps', ['-eo', 'pid=,ppid=,stat=,comm=,args=']),
   ]);
   let pgrepErr = null, monOut = '';
@@ -438,12 +492,17 @@ async function gather() {
   };
 }
 
-function armMonitor(pane, pid) {
+function armMonitor(pane, pid, socket = null) {
   // spawn (not fork): fork() opens an IPC channel that keeps this CLI's event loop
   // alive even after unref(), so the command would hang. spawn detached + unref lets
   // the monitor outlive us while `reconcile` exits cleanly.
+  // Under the timer there is no $TMUX in our env, so a spawned monitor would write its
+  // status file under the 'default' socket key while the tmux status-bar reader looks
+  // up by #{socket_path} — pass the enumerated server's socket explicitly instead
+  // (status-file.js prefers CLAUDE_AUTO_RETRY_SOCKET over $TMUX).
   const child = spawn(process.execPath, [MONITOR_PATH, pane, String(pid)], {
     detached: true, stdio: 'ignore',
+    env: socket ? { ...process.env, CLAUDE_AUTO_RETRY_SOCKET: socket } : process.env,
   });
   child.unref();
   return child.pid;
@@ -465,8 +524,9 @@ export async function reconcile({ selfPane = process.env.TMUX_PANE || null, dryR
     const plan = planReconcile({ panes, processes, running, selfPane, exclude });
     const armed = [];
     if (!dryRun) {
+      const socket = panes.find(p => p.socket)?.socket || null;
       for (const { pane, pid } of plan.arm) {
-        const monitorPid = armMonitor(pane, pid);
+        const monitorPid = armMonitor(pane, pid, socket);
         armed.push({ pane, pid, monitorPid });
       }
     }

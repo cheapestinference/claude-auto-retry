@@ -10,9 +10,11 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
+> **📢 Status (Aug 2026):** The Claude **Desktop app** now does this natively — an *"☑ Auto-continue when limits reset"* checkbox ([confirmed in the wild](https://github.com/anthropics/claude-code/issues/35744#issuecomment-5278232593)). The **CLI still doesn't have it** — that's the gap this tool covers today. Track [anthropics/claude-code#35744](https://github.com/anthropics/claude-code/issues/35744) for the native CLI version; until it lands, `npm i -g claude-auto-retry` is the way.
+
 ---
 
-> 💡 **Why wait out the limit at all?** This tool auto-resumes Claude Code the moment you're rate-limited — but if you run overnight jobs or always-on agents, there's a way to stop hitting the wall in the first place. **[See how it's done →](https://cheapestinference.com/blog/claude-code-usage-limit-auto-retry/)**
+> 💡 **Why wait out the limit at all?** This tool auto-resumes Claude Code the moment you're rate-limited — but if you run overnight jobs or always-on agents, there's a way to stop hitting the wall in the first place. **[See how it's done →](https://cheapestinference.com/blog/claude-code-usage-limit-auto-retry/?utm_source=claude-auto-retry)**
 
 ## The Problem
 
@@ -187,6 +189,29 @@ export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER="caffeinate -i"
 
 Generic (not macOS-specific — e.g. `nice`, `chrt …` work too). Unset or blank spawns
 `claude` directly, unchanged.
+
+### Session lifetime
+
+When `claude` exits **cleanly** inside the auto-created tmux session, the session now
+ends with it — tmux reaps it, nothing lingers. When the launcher exits **non-zero**
+(a crash), the pane falls through to your login shell so the scrollback survives for
+inspection. Two opt-outs:
+
+```sh
+# Always keep a shell in the pane after claude exits (the pre-0.7 behavior)
+export CLAUDE_AUTO_RETRY_KEEP_SHELL=1
+
+# Never create a tmux session (e.g. you're inside Zellij/screen and don't want nesting).
+# Note: the monitor needs a tmux pane to watch, so this disables auto-retry for the run.
+export CLAUDE_AUTO_RETRY_NO_TMUX=1
+```
+
+### Environment forwarding
+
+Your full shell environment reaches `claude` inside the tmux session via a `0600`
+snapshot file under `~/.claude-auto-retry/tmp/` that only the launcher reads (and
+deletes immediately). Nothing about your environment — names or values — ever appears
+on a `tmux` command line, so secrets can't surface in `/proc/<pid>/cmdline`.
 
 ## Overload backoff
 

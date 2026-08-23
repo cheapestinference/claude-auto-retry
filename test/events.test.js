@@ -40,9 +40,17 @@ describe('isUsageLimitError', () => {
 });
 
 describe('StopFailure event markers', () => {
-  let dir;
-  before(async () => { dir = await mkdtemp(join(tmpdir(), 'car-ev-')); });
-  after(async () => { await rm(dir, { recursive: true, force: true }); });
+  let dir, savedTmux, savedSock;
+  before(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'car-ev-'));
+    savedTmux = process.env.TMUX; savedSock = process.env.CLAUDE_AUTO_RETRY_SOCKET;
+    delete process.env.TMUX; delete process.env.CLAUDE_AUTO_RETRY_SOCKET;
+  });
+  after(async () => {
+    await rm(dir, { recursive: true, force: true });
+    if (savedTmux !== undefined) process.env.TMUX = savedTmux;
+    if (savedSock !== undefined) process.env.CLAUDE_AUTO_RETRY_SOCKET = savedSock;
+  });
 
   it('round-trips a pane-keyed marker', async () => {
     await writeStopFailureEvent('%2', { error: 'overloaded', session_id: 'abc' }, dir);
@@ -65,10 +73,36 @@ describe('StopFailure event markers', () => {
     assert.equal(ev.cwd, null);
   });
 
-  it('sanitizes the pane id into the filename', async () => {
+  it('sanitizes the pane id into the filename, prefixed by a socket key', async () => {
     await writeStopFailureEvent('%7', { error: 'server_error' }, dir);
     const files = await readdir(dir);
-    assert.ok(files.includes('_7.json'), files.join(','));
+    // No TMUX/CLAUDE_AUTO_RETRY_SOCKET in this suite (see before hook) → 'default'.
+    assert.ok(files.includes('default__7.json'), files.join(','));
+  });
+
+  // --- Pane ids are only unique per tmux server (same collision status files had): a
+  //     marker from `tmux -L work`'s %2 must not be consumed by the monitor watching the
+  //     default server's %2 — it would act on another session's failure and the real
+  //     owner would miss its event. Markers are socket-keyed like status files. ---
+  it('a marker written under one socket is invisible to a reader on another', async () => {
+    process.env.TMUX = '/tmp/tmux-1000/work,1,0';
+    try {
+      await writeStopFailureEvent('%2', { error: 'overloaded' }, dir);
+      process.env.TMUX = '/tmp/tmux-1000/personal,2,0';
+      assert.equal(await readStopFailureEvent('%2', 60_000, dir), null);
+      process.env.TMUX = '/tmp/tmux-1000/work,1,0';
+      assert.ok(await readStopFailureEvent('%2', 60_000, dir), 'owner still reads it');
+      await clearStopFailureEvent('%2', dir);
+    } finally { delete process.env.TMUX; }
+  });
+
+  it('falls back to a legacy bare-pane marker (hook older than the reader)', async () => {
+    await writeFile(join(dir, '_8.json'), JSON.stringify({ pane: '%8', error: 'overloaded', ts: Date.now() }));
+    const ev = await readStopFailureEvent('%8', 60_000, dir);
+    assert.equal(ev?.error, 'overloaded');
+    await clearStopFailureEvent('%8', dir);
+    const files = await readdir(dir);
+    assert.ok(!files.includes('_8.json'), 'clear() must consume the legacy marker too');
   });
 
   it('returns null for an absent marker', async () => {

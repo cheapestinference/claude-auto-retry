@@ -42,12 +42,12 @@ export function parseResetTime(text) {
 // parks the session ~24h even though the limit has effectively cleared (observed live:
 // "resets 10am" detected at 10:03 → 86273s wait). rollPastReset retries promptly instead
 // (diff→0, so the wait is just the margin); only a reset MORE than the grace window in the
-// past plausibly means the next occurrence is tomorrow.
+// past plausibly means the next occurrence is tomorrow — and "tomorrow" must be computed
+// date-anchored (getTargetTimestamp with dayOffset 1), NOT as a flat +24h of milliseconds:
+// across a DST fall-back transition tomorrow's wall-clock time is 25h away, so +24h woke
+// the monitor an hour EARLY with the banner still live (burning maxRetries into a limited
+// session, then giving up before the real reset); spring-forward over-waited an hour.
 const RESET_GRACE_MS = 60 * 60 * 1000; // 1 hour
-function rollPastReset(diffMs) {
-  if (diffMs >= 0) return diffMs;
-  return diffMs > -RESET_GRACE_MS ? 0 : diffMs + 86400_000;
-}
 
 export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, now = new Date()) {
   if (!parsed) return (fallbackHours * 3600 + marginSeconds) * 1000;
@@ -67,43 +67,73 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     return (fallbackHours * 3600 + marginSeconds) * 1000;
   }
 
-  // DST-safe approach: binary search for the correct UTC timestamp
-  // that corresponds to the given hour:minute in the target timezone.
-  function getTargetTimestamp(h, m) {
+  // DST-safe approach: binary search for the correct UTC timestamp that corresponds to
+  // the given hour:minute in the target timezone, on today's date there (dayOffset 0) or
+  // a following day (dayOffset 1 = the roll-to-tomorrow path — anchored to the actual
+  // calendar day so a 23h/25h DST day converges to the right instant).
+  function getTargetTimestamp(h, m, dayOffset = 0) {
     // Get today's date in the target timezone
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
       hour12: false,
     }).formatToParts(now);
 
-    const y = parseInt(parts.find(p => p.type === 'year').value);
-    const mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
-    const d = parseInt(parts.find(p => p.type === 'day').value);
+    let y = parseInt(parts.find(p => p.type === 'year').value);
+    let mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
+    let d = parseInt(parts.find(p => p.type === 'day').value);
+    if (dayOffset) {
+      // Normalize month/year rollover through Date.UTC (calendar-day arithmetic only).
+      const norm = new Date(Date.UTC(y, mo, d + dayOffset));
+      y = norm.getUTCFullYear(); mo = norm.getUTCMonth(); d = norm.getUTCDate();
+    }
 
-    // Construct target date string and parse as UTC as initial guess
+    // Construct target date string and parse in HOST-local time as the initial guess
+    // (a UTC anchor put the guess up to a full offset away; host-local is usually close).
     const targetStr = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`;
-    const naiveUtc = new Date(targetStr + 'Z');
+    const guess = new Date(targetStr);
 
-    // Iterative correction: format the guess in the target TZ,
-    // compare with desired h:m, adjust, repeat up to 3 times for DST convergence
-    let candidate = naiveUtc.getTime();
+    // Iterative correction: render the guess in the target TZ and move by the FULL
+    // wall-clock delta — date included — between desired (today@h:m in tz) and rendered.
+    // Anchoring to the date avoids any ±12h minimum-magnitude heuristic, which picked
+    // the wrong day whenever the guess landed >12h away in wall-clock terms (banner tz
+    // beyond UTC±12 like Pacific/Auckland in summer, or a host/banner offset split >12h)
+    // — the off-by-a-day bug. Up to 3 passes for DST convergence.
+    // hourCycle h23 (not hour12:false): ICU's h24 quirk can render midnight as "24:xx"
+    // paired with the previous day's date, which would skew the date-anchored delta.
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    });
+    // The candidate's wall-clock rendering in tz, as a comparable UTC-ms scalar.
+    const rendered = (ts) => {
+      const fp = fmt.formatToParts(new Date(ts));
+      const get = t => parseInt(fp.find(p => p.type === t).value);
+      return Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'));
+    };
+    const targetWall = Date.UTC(y, mo, d, h, m);
+
+    let candidate = guess.getTime();
+    let prev = candidate;
     for (let i = 0; i < 3; i++) {
-      const check = new Date(candidate);
-      const fp = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz, hour: 'numeric', minute: 'numeric', hour12: false,
-      }).formatToParts(check);
-      const ch = parseInt(fp.find(p => p.type === 'hour').value) % 24;
-      const cm = parseInt(fp.find(p => p.type === 'minute').value);
-
-      // Normalize to [-720, +720] minutes so we take the minimum-magnitude
-      // correction. Otherwise, in a UTC+10 tz looking for 23:40, the naive UTC
-      // guess formats as 09:40 next day local, and a raw +14h adjustment lands
-      // on tomorrow's occurrence instead of today's (the off-by-a-day bug).
-      let diffMin = (h - ch) * 60 + (m - cm);
-      diffMin = ((diffMin % 1440) + 1440) % 1440;
-      if (diffMin > 720) diffMin -= 1440;
+      const diffMin = (targetWall - rendered(candidate)) / 60_000;
       if (diffMin === 0) break;
+      prev = candidate;
       candidate += diffMin * 60_000;
+    }
+
+    // DST transition-day resolution — deterministic and host-independent (the loop's
+    // outcome otherwise depends on which side the HOST-local initial guess approached
+    // from). Both resolve to the LATE side: waking an hour late is safe, waking early
+    // finds the banner still live and burns maxRetries.
+    if (rendered(candidate) !== targetWall) {
+      // Nonexistent wall time (spring-forward gap): the loop oscillates between the
+      // instants just before and just after the jump — take the later one (the first
+      // real instant at/after the intended time).
+      candidate = Math.max(candidate, prev);
+    } else if (rendered(candidate + 3600_000) === targetWall) {
+      // Repeated wall time (fall-back): converged on the earlier occurrence — move to
+      // the later one.
+      candidate += 3600_000;
     }
 
     return candidate;
@@ -121,16 +151,24 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     else if (d2 > 0) target = d2;
     else {
       // Both interpretations are past. Grace-check the MOST RECENT one (is it just-passed?);
-      // but if we roll to tomorrow, roll to the EARLIEST occurrence (t1 < t2 always, so
-      // Math.min), not the later pm one — otherwise we wait ~12h longer than necessary.
+      // but if we roll to tomorrow, roll to the EARLIEST occurrence, not the later pm one —
+      // otherwise we wait ~12h longer than necessary. Recompute tomorrow's instant
+      // date-anchored (dayOffset 1) rather than adding flat 24h, which is ±1h across DST.
       const recent = Math.max(d1, d2);
-      target = recent > -RESET_GRACE_MS ? 0 : Math.min(d1, d2) + 86400_000;
+      const earlyHour = d1 <= d2 ? parsed.hour : (parsed.hour + 12) % 24;
+      target = recent > -RESET_GRACE_MS ? 0
+        : getTargetTimestamp(earlyHour, parsed.minute, 1) - now.getTime();
     }
 
     return Math.max(0, target) + marginSeconds * 1000;
   }
 
-  const diff = rollPastReset(getTargetTimestamp(parsed.hour, parsed.minute) - now.getTime());
+  // Roll a stale (past-grace) reset to TOMORROW's occurrence, date-anchored (see the
+  // RESET_GRACE_MS comment for both the grace rationale and why not a flat +24h).
+  const today = getTargetTimestamp(parsed.hour, parsed.minute) - now.getTime();
+  const diff = today >= 0 ? today
+    : today > -RESET_GRACE_MS ? 0
+    : getTargetTimestamp(parsed.hour, parsed.minute, 1) - now.getTime();
 
   return diff + marginSeconds * 1000;
 }

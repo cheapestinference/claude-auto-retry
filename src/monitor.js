@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -13,10 +13,19 @@ const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
 // (a conversation about limits) or a banner the session already scrolled past is not the
 // current state and must not drive a retry. Matches the overload path's tail discipline.
 const RATE_LIMIT_TAIL_LINES = 12;
+// A StopFailure marker arriving more than this after our last event-path retry send is a
+// NEW overload incident (the retry turn succeeded in between), not an escalation of the
+// old one. Sized above Claude Code's own internal attempt-N/10 backoff (which can hold a
+// genuinely-failing turn open for several minutes before the hook fires).
+const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
 
 export function createMonitorState() {
   return {
     status: 'monitoring', waitUntil: 0, attempts: 0, lastRateLimitMessage: null,
+    // True while `waitUntil` came from a screen with NO parseable reset time (the
+    // fallbackWaitHours default) and is therefore still open to correction. See
+    // correctUsageWait.
+    _waitIsFallback: false,
     // Overload-retry sub-state, kept distinct from the usage-reset fields above.
     overloadAttempts: 0, overloadTotalWaitMs: 0, overloadWaitUntil: 0,
     // viaEvent marks the current backoff window as event-triggered (edge: one send per
@@ -74,14 +83,67 @@ async function checkForeground(tmuxAdapter, pane, config) {
   return { ok: false, fg, isShell };
 }
 
-function enterUsageWait(state, stripped, config) {
-  const message = findRateLimitMessage(stripped, config.customPatterns);
-  state.lastRateLimitMessage = message;
+// Reset text on screen → the absolute instant to wake up at. One source of truth for the
+// three callers that need it: first detection, the /rate-limit-options menu path, and the
+// mid-wait correction below. `parsed` is surfaced so callers can tell a real reset time
+// from the fallbackWaitHours default that calculateWaitMs returns for an unreadable screen.
+// Reads the SAME chrome-aware window the isRateLimited gate reads — an unbounded scan lets
+// reset-shaped text anywhere in the capture outrank the live banner (see the tailLines note
+// on findRateLimitMessage).
+function usageWaitUntil(stripped, config) {
+  const message = findRateLimitMessage(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
   const parsed = message ? parseResetTime(message) : null;
-  state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  const until = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
+  return { message, parsed, until };
+}
+
+// `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
+// the menu path, where a re-rendered /rate-limit-options menu means the session hit the
+// limit again rather than continuing the old episode.
+function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
+  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  state.lastRateLimitMessage = message;
+  state.waitUntil = until;
   state.status = 'waiting';
+  // Latch whether this wait is the fallback default rather than a real reset time. Only a
+  // fallback stays open to correction (correctUsageWait), so a wait derived from a genuine
+  // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
+  // of the ~600 dead re-derivations a 5h wait would otherwise run.
+  state._waitIsFallback = !parsed;
   state._gaveUp = false;
+  if (fresh) state.attempts = 0;
   return 'waiting';
+}
+
+// Re-derive the wake-up from the LIVE banner while already waiting, and pull it earlier
+// when the standing wait is too long. Returns the banner text on a correction, else null.
+//
+// A wait computed from a screen that carried no parseable reset time lands on the
+// fallbackWaitHours default — potentially hours past the real reset. The
+// /rate-limit-options menu is the common source: it renders the options but not always the
+// reset line, while the banner Claude Code prints right after confirming DOES carry the
+// time. The waiting branch returned early on every tick and never looked at the pane again,
+// so that banner was ignored for the entire fallback. See the CHANGELOG entry for the
+// observed incident.
+//
+// Bounds, in order of how much they carry:
+//   - ONLY A FALLBACK WAIT is correctable (_waitIsFallback). Gating on the raw `attempts`
+//     counter instead both under- and over-shot: it blocked the menu-after-send flow (a
+//     menu re-rendered once attempts > 0 committed a fallback that could never be
+//     corrected — the very bug being fixed, surviving on that path) and left every
+//     correctly-derived wait exposed to re-parsing for its whole duration.
+//   - SHORTEN ONLY, by a margin (EPSILON). Never let the pane push a wake-up out.
+//   - Success clears the latch: the wait now comes from a real reset time, so it stops
+//     being a candidate and the correction logs exactly once.
+const WAIT_CORRECTION_EPSILON_MS = 1000;
+function correctUsageWait(state, stripped, config) {
+  if (!state._waitIsFallback) return null;
+  if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) return null;
+  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  if (!parsed || until > state.waitUntil - WAIT_CORRECTION_EPSILON_MS) return null;
+  state.waitUntil = until;
+  state._waitIsFallback = false;
+  return message;
 }
 
 function enterOverload(state, overload, rand) {
@@ -143,33 +205,51 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       await new Promise(r => setTimeout(r, 80));
     }
     await tmuxAdapter.sendKey(pane, 'Enter');
-    // Parse the reset time straight from the menu text, so the wait does not depend
-    // on the limit banner still being visible afterward.
-    const message = findRateLimitMessage(stripped, config.customPatterns);
-    state.lastRateLimitMessage = message;
-    const parsed = message ? parseResetTime(message) : null;
-    state.waitUntil = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
-    state.status = 'waiting';
+    // Parse the reset time straight from the menu text, so the wait does not depend on the
+    // limit banner still being visible afterward. The menu does not always RENDER a reset
+    // line, though — that lands on the fallbackWaitHours default, which correctUsageWait
+    // then pulls back in once Claude Code prints the real banner post-confirm.
+    //
+    // fresh: a menu we just confirmed means the session hit the limit again, so this is a
+    // new retry episode — carrying the old attempt count over left the correction blocked
+    // and, once maxRetries had been reached, published a healthy-looking countdown that
+    // gave up again on expiry without ever sending.
+    enterUsageWait(state, stripped, config, { fresh: true });
     state._menuCooldownUntil = Date.now() + cooldown;
     return 'menu-confirmed';
   }
 
   if (state.status === 'waiting') {
-    // Keep counting down UNLESS the session has resumed working. A working pane means
+    // Keep counting down UNLESS the session has resumed working. A resumed pane means
     // the user manually continued (often to unstick a wrong/stale wait) — falling through
-    // to the isWorking gate below returns us to monitoring, so a SECOND, genuine limit that
+    // to the gate below returns us to monitoring, so a SECOND, genuine limit that
     // follows is detected instead of being masked until the old timer expires (issue #39).
-    if (Date.now() < state.waitUntil && !isWorking(stripped)) return 'waiting';
+    // resumedAfterLimit, not plain isWorking: `Retrying in …`/`attempt N/M` also match
+    // transcript text (a flaky deploy log ABOVE a live banner), and treating that as
+    // "continued" churned waiting↔user-continued forever without ever sending the retry.
+    // Resumed = working signal rendered BELOW the last banner line.
+    // Before honouring the countdown, re-read the banner: the standing wait may have been
+    // derived from a screen that never showed the reset time (see correctUsageWait).
+    // lastRateLimitMessage is set ONLY on the branch that logs it — a correction that falls
+    // through to 'retried'/'user-continued' would otherwise leave the message set for the
+    // next plain 'waiting' tick to log as a spurious fresh detection.
+    const correctedMessage = correctUsageWait(state, stripped, config);
+    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+      if (!correctedMessage) return 'waiting';
+      state.lastRateLimitMessage = correctedMessage;
+      return 'wait-corrected';
+    }
     if (!isAlive()) return 'exit';
 
     // Stop driving the session if the limit cleared OR Claude has already resumed and
-    // is working again. Without the isWorking gate the usage path re-sends the retry
+    // is working again. Without the resumed gate the usage path re-sends the retry
     // message every poll (up to maxRetries) while the limit banner lingers in the
     // captured scrollback after a successful resume — spamming an actively-working
     // session (and a banner re-printed by another process keeps it "rate-limited" the
-    // whole time). isWorking ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || isWorking(stripped)) {
+    // whole time). Resumed ⇒ the session continued; never inject into it.
+    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
+      state._waitIsFallback = false;
       return 'user-continued';
     }
 
@@ -181,6 +261,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       // perpetually-resetting countdown for a monitor that has stopped acting.
       state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
       state._gaveUp = true;
+      state._waitIsFallback = false;   // give-up backoff, deliberately unrelated to the reset time
       return 'max-retries';
     }
 
@@ -204,6 +285,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // (e.g. pane destroyed) still consumes a retry and avoids tight-loop errors.
     state.attempts++;
     state.waitUntil = Date.now() + 30_000;
+    state._waitIsFallback = false;   // send cooldown, deliberately unrelated to the reset time
     await tmuxAdapter.sendKeys(pane, config.retryMessage);
     return 'retried';
   }
@@ -234,6 +316,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
 
       state.overloadAttempts++;          // next failure backs off further
+      state._lastEventRetryAt = Date.now();   // incident-gap anchor (see the marker consume)
       state.viaEvent = false;
       state.status = 'monitoring';
       // Remember the banner we just retried via the event path so the always-on scraper
@@ -378,6 +461,26 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     return enterUsageWait(state, stripped, config);
   }
 
+  // Recovery closes an event-path overload incident. That path returns to monitoring
+  // right after its send (edge-triggered), so a later working pane with backoff history
+  // still on the state is the only recovery signal it ever gets — without this reset the
+  // counters leak across fully-recovered incidents: escalated backoffs for unrelated
+  // failures days apart, and eventually every fresh marker consumed as overload-gave-up
+  // at the total-wait cap, permanently. Mirrors the scraper path's 'overload-cleared'.
+  // Two carve-outs (both real regressions caught in review): (1) an in-flight internal
+  // retry ("Retrying in 5s · attempt 3/10") satisfies isWorking but means the turn is
+  // STILL FAILING — resetting on it re-zeroes the budget every cycle of a sustained
+  // outage and the give-up cap never trips; (2) the same-banner memo must survive the
+  // reset — the banner this memo suppresses can still be on screen, and clearing it lets
+  // the scraper re-fire and inject into the recovered session. The memo has its own
+  // lifecycle (cleared below once the banner leaves the tail).
+  if ((state.overloadAttempts > 0 || state.overloadTotalWaitMs > 0)
+      && isWorking(stripped) && !isInternalRetry(stripped)) {
+    const handledBanner = state._eventHandledBanner;
+    resetOverload(state);
+    state._eventHandledBanner = handledBanner;
+  }
+
   // Event-driven overload (authoritative and faster; see DESIGN-NOTES §1). A StopFailure
   // marker for this pane means the turn ended in a retryable API error — no scraping, no
   // ambiguity. It runs first, but does NOT replace the scraper below: the event path only
@@ -411,6 +514,15 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       }
       await tmuxAdapter.clearEvent();               // consume
       if (isWorking(stripped)) { resetOverload(state); return 'overload-cleared'; } // self-recovered
+      // Incident boundary: a genuinely failing retry turn re-fails within minutes (even
+      // through Claude's internal attempt N/10 backoff), so a marker arriving long after
+      // our last event-path send means that retry SUCCEEDED and this is a new incident —
+      // fresh backoff budget. The working-tick reset above can miss short responses
+      // entirely at a 30s poll; this gap check is the reliable close, and it also
+      // un-wedges a capped (gave-up) state weeks later without ever observing work.
+      if (state._lastEventRetryAt && Date.now() - state._lastEventRetryAt > OVERLOAD_INCIDENT_GAP_MS) {
+        resetOverload(state);
+      }
       const capMs = overload.maxTotalWaitMinutes * 60_000;
       if (state.overloadTotalWaitMs >= capMs) { state._gaveUp = true; return 'overload-gave-up'; }
       const w = nextOverloadWaitMs(state.overloadAttempts, overload, rand);
@@ -530,15 +642,23 @@ export async function startMonitor(pane, pid) {
         pollIntervalSeconds: config.pollIntervalSeconds,
         gaveUp: !!state._gaveUp,
       }).catch(() => {});
-      if (result === 'waiting' && state.lastRateLimitMessage) {
+      // The three results that announce a new wake-up time share one shape: seconds until
+      // waitUntil, then consume the one-shot lastRateLimitMessage. Set-with-clear is an
+      // invariant — a message left behind logs as a spurious detection on a later tick.
+      const logWait = (line) => {
         const secs = Math.round((state.waitUntil - Date.now()) / 1000);
-        await logger.info(`Rate limit detected: "${state.lastRateLimitMessage}". Waiting ${secs}s...`);
+        const msg = state.lastRateLimitMessage;
         state.lastRateLimitMessage = null;
+        return logger.info(line(secs, msg));
+      };
+      if (result === 'waiting' && state.lastRateLimitMessage) {
+        await logWait((secs, msg) => `Rate limit detected: "${msg}". Waiting ${secs}s...`);
       }
       if (result === 'menu-confirmed') {
-        const secs = Math.round((state.waitUntil - Date.now()) / 1000);
-        await logger.info(`Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
-        state.lastRateLimitMessage = null;
+        await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
+      }
+      if (result === 'wait-corrected') {
+        await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${secs}s.`);
       }
       if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
       if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
