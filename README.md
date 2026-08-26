@@ -84,6 +84,7 @@ When you disconnect (SSH drops, close terminal, laptop sleeps), **tmux keeps run
 - **Overload backoff** — detects sustained API overload (`429/500/502/503/504/529`) and retries on a configurable exponential backoff with jitter and a cumulative-wait cap, distinct from the usage-reset path ([details](#overload-backoff))
 - **Safeguard retry** — auto-continues past an AUP-safeguard false-positive (often transient), capped at a few tries so a sticky flag can't loop ([details](#safeguard-retry))
 - **Interrupted-stream resume** — picks the work back up when a laptop suspend or a dropped connection truncates a response mid-turn and leaves the session parked at an idle prompt ([details](#interrupted-stream-resume))
+- **Near-limit wrap-up nudge** — when Claude Code winds the turn down at ~95% of the 5-hour window ("Approaching your 5-hour usage limit — Claude will wrap up the current step") and parks the session at an idle prompt with no limit banner, sends one `continue` so the work runs on to the real limit, where the usage wait takes over ([details](#near-limit-wrap-up-nudge))
 - **tmux status bar indicator** — see at a glance whether a pane is being monitored, waiting on a reset, backing off from overload, or has given up ([details](#tmux-status-bar-indicator))
 - **`--print` mode support** — buffers output, retries cleanly for piped/scripted usage
 - **Configurable** — retry count, wait margin, custom patterns, retry message
@@ -149,6 +150,16 @@ API Error: Server error mid-response. The response above may be incomplete.
 …and the three "before a response was produced. Try again." variants (suspend, stall,
 connection). All seven come from the same stream finalizer and leave the same wreckage: a
 truncated turn at an idle prompt.
+
+### Near-limit wrap-up — one nudge, then the usage wait
+
+```
+⏺ Approaching your 5-hour usage limit — Claude will wrap up the current step.
+```
+
+Not an error: Claude Code prints this at ~95% of the window and tells the model to
+checkpoint. The model finishes the step, lists what's left and ends the turn — no banner,
+idle prompt, nothing resumes it. One `continue` picks the work back up.
 
 Custom patterns can be added via config for future message format changes.
 
@@ -432,6 +443,47 @@ Configured under a `streamInterrupted` block (defaults shown):
 
 Usage limits take precedence, and like the safeguard path this only acts when Claude is
 idle and the foreground process is `claude`/`node`.
+
+## Near-limit wrap-up nudge
+
+At roughly 95% of the 5-hour window, Claude Code injects a checkpoint instruction into the
+model's context — *finish the current step, then list up to three short bullets of the
+most impactful remaining work, don't start subagents or long-running work* — and prints:
+
+```
+⏺ Approaching your 5-hour usage limit — Claude will wrap up the current step.
+```
+
+The model does exactly that and **ends the turn**. There is no limit banner (the limit has
+not been hit), the prompt returns idle, and nothing resumes the session — so an overnight
+run winds down at 95% and stays parked long after the window has reset. This is a
+server-side Claude Code behavior with no user-facing switch (it is feature-flagged, not a
+setting), so the tool handles the render instead.
+
+Seeing the notice at an idle prompt, the tool sends one `continue`. The session then either
+finishes its work or runs into the real limit, where the [usage wait](#how-it-works) takes
+over as usual. Unlike the retry families above this is not a bounded machine: the nudge
+renders as a user row under the notice, and a notice with a user row below it — yours or
+ours — belongs to a turn that has already been answered, so it is never nudged twice. The
+`maxRetries` cap only bounds the pathological case where the nudge never renders.
+
+Detection is anchored on the **shape** of the line, like the interrupted-stream render: the
+notice *begins* its line, behind at most Claude's message glyph, so prose quoting it and
+your own typed copy don't trip it.
+
+Configured under a `nearLimitWrapUp` block (defaults shown):
+
+```json
+{
+  "nearLimitWrapUp": {
+    "enabled": true,
+    "maxRetries": 3,
+    "retryMessage": "continue"
+  }
+}
+```
+
+Set `"enabled": false` if you *want* the session to stop at the checkpoint.
 
 ## tmux status bar indicator
 

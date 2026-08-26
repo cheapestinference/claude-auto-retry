@@ -22,6 +22,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset already in the past means the limit cleared — retry now rather than a year later.
 
 ### Added
+- **A session Claude Code winds down near the 5-hour limit is nudged back to work (#78).**
+  At ~95% of the window Claude Code injects a checkpoint instruction into the model's
+  context and prints "⏺ Approaching your 5-hour usage limit — Claude will wrap up the
+  current step." The model finishes the step, lists what's left and ends the turn: no
+  limit banner, an idle prompt, nothing to resume it — an overnight run parked at 95% until
+  long after the window reset. It is a feature-flagged Claude Code behavior with no
+  user-facing switch, so the render is handled instead: at the idle prompt the monitor
+  sends one `continue`, and the session either finishes or reaches the real limit, where
+  the usage wait takes over. Not another bounded-retry machine — the nudge renders as a
+  user row under the notice, and a notice with a user row below it (the user's or ours)
+  has already been answered, so it is never nudged twice; `maxRetries` only bounds the
+  case where the nudge never renders. Shape-anchored like the interrupted-stream head:
+  the notice begins its line behind at most a message glyph, so a quotation or a typed
+  copy cannot trigger it. Configured under `nearLimitWrapUp`; `"enabled": false` keeps
+  the checkpoint stop.
 - **A turn truncated by a suspended machine or a dropped connection is now resumed.**
   Claude Code wraps the response body in a byte watchdog; when the bytes stop arriving it
   aborts the stream and finalizes whatever had already been printed, naming the cause on an

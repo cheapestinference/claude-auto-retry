@@ -762,6 +762,36 @@ export function detectStreamInterrupted(text, patterns = []) {
   return streamInterruptedMatch(text, patterns) !== null;
 }
 
+// --- Near-limit wrap-up notice (#78) ---
+// "⏺ Approaching your 5-hour usage limit — Claude will wrap up the current step." At ~95%
+// of the window Claude Code prints this and injects a checkpoint instruction; the model
+// finishes the step, lists what's left and ends the turn at an idle prompt with NO limit
+// banner. Unlike every other render this file matches, the notice is NOT the last content
+// line — the model's wrap-up output follows it — so the window is wider than the banner
+// tail, and "still live" is decided by what sits BELOW the notice rather than by where it
+// sits: a user row (❯/> plus text) below it means the turn it introduced has already been
+// answered — by the user, or by our own nudge, which renders exactly that way. Bottom-up,
+// the first user row met above any notice ends the search. That row is the dedup.
+//
+// Shape-anchored like the #77 render head: the notice BEGINS its line, behind at most a
+// message glyph — a glyphed head may be indented (the TUI indents blocks), a bare head must
+// start at column 0 — so prose quoting it mid-line and a user-typed copy never match.
+const WRAP_UP_TAIL_LINES = 40;
+const WRAP_UP_HEAD = new RegExp(`^(?:\\s*${MESSAGE_GLYPH}\\s+)?Approaching your [\\w-]+(?: usage)? limit\\s+[—–-]+\\s+Claude will wrap up`, 'i');
+const USER_ROW = /^\s*[❯>]\s+\S/;
+export function nearLimitWrapUpMatch(text) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = contentTailRange(all, WRAP_UP_TAIL_LINES);
+  const lines = all.slice(start, end);
+  const mask = toolEchoMask(all).slice(start, end);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (mask[i]) continue;
+    if (USER_ROW.test(lines[i])) return null;
+    if (WRAP_UP_HEAD.test(lines[i])) return lines[i].trim();
+  }
+  return null;
+}
+
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
 // live working footer pushed up by a tall chrome stack below it (task widget + input box
 // + footer) would be invisible to a raw last-N tail while the chrome-aware detectors still

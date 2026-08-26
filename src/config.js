@@ -99,6 +99,21 @@ export const DEFAULT_STREAM_INTERRUPTED = {
   retryMessage: 'continue',
 };
 
+// Near-limit wrap-up (#78). At ~95% of the 5-hour window Claude Code injects a checkpoint
+// instruction into the model's context and prints "⏺ Approaching your 5-hour usage limit —
+// Claude will wrap up the current step." The model finishes the step, lists what's left and
+// ENDS THE TURN: no limit banner, an idle prompt, and nothing resumes the session — the
+// window resets hours later with the session still parked. One nudge picks the work back
+// up; the session then either finishes or hits the real limit, which the usage-wait
+// handles. Not a bounded-retry machine like the families above: the nudge renders as a
+// user row under the notice, which is the dedup — one nudge per notice, by construction.
+// maxRetries only bounds the pathological case where the nudge never renders.
+export const DEFAULT_NEAR_LIMIT_WRAP_UP = {
+  enabled: true,
+  maxRetries: 3,
+  retryMessage: 'continue',
+};
+
 export const DEFAULT_CONFIG = {
   maxRetries: 5,
   pollIntervalSeconds: 5,
@@ -109,6 +124,7 @@ export const DEFAULT_CONFIG = {
   overload: DEFAULT_OVERLOAD,
   safeguard: DEFAULT_SAFEGUARD,
   streamInterrupted: DEFAULT_STREAM_INTERRUPTED,
+  nearLimitWrapUp: DEFAULT_NEAR_LIMIT_WRAP_UP,
 };
 
 const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
@@ -179,6 +195,16 @@ function validateBoundedRetry(raw, defaults) {
   return b;
 }
 
+// The wrap-up nudge has no patterns (the render is fixed and shape-anchored) and no delay
+// (it fires at the idle prompt), so the bounded-retry validator above does not fit.
+function validateNudge(raw, defaults) {
+  const b = { ...defaults, ...(raw && typeof raw === 'object' ? raw : {}) };
+  b.enabled = typeof b.enabled === 'boolean' ? b.enabled : defaults.enabled;
+  b.maxRetries = validNumber(b.maxRetries, 1, defaults.maxRetries);
+  if (typeof b.retryMessage !== 'string' || !b.retryMessage) b.retryMessage = defaults.retryMessage;
+  return b;
+}
+
 function validate(cfg) {
   cfg.maxRetries = validNumber(cfg.maxRetries, 1, DEFAULT_CONFIG.maxRetries);
   cfg.pollIntervalSeconds = validNumber(cfg.pollIntervalSeconds, 1, DEFAULT_CONFIG.pollIntervalSeconds);
@@ -203,6 +229,7 @@ function validate(cfg) {
   cfg.overload = validateOverload(cfg.overload);
   cfg.safeguard = validateBoundedRetry(cfg.safeguard, DEFAULT_SAFEGUARD);
   cfg.streamInterrupted = validateBoundedRetry(cfg.streamInterrupted, DEFAULT_STREAM_INTERRUPTED);
+  cfg.nearLimitWrapUp = validateNudge(cfg.nearLimitWrapUp, DEFAULT_NEAR_LIMIT_WRAP_UP);
   return cfg;
 }
 

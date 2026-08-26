@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -34,6 +34,9 @@ export function createMonitorState() {
     safeguardAttempts: 0, safeguardWaitUntil: 0,
     // Interrupted-stream resume sub-state (suspend/connection truncation; same shape).
     interruptedAttempts: 0, interruptedWaitUntil: 0,
+    // Near-limit wrap-up nudge (#78): a hold after each send so the pane can re-render the
+    // nudge as a user row (the dedup), and a count of sends against the SAME notice.
+    _wrapUpHoldUntil: 0, _wrapUpNudges: 0,
   };
 }
 
@@ -630,6 +633,39 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     }
   }
 
+  // Near-limit wrap-up (#78): one nudge at the idle prompt. No wait state — the nudge
+  // renders as a user row under the notice and the matcher then refuses the notice, so the
+  // next tick simply finds nothing. The hold covers the render race after a send; the
+  // count bounds the pathological case where the nudge never renders (keys dropped, a
+  // modal in the way) so the same notice can't be nudged forever.
+  const wrapUp = config.nearLimitWrapUp;
+  if (wrapUp && wrapUp.enabled && !isWorking(stripped)) {
+    const notice = nearLimitWrapUpMatch(stripped);
+    if (!notice) {
+      state._wrapUpNudges = 0;
+    } else if (Date.now() < state._wrapUpHoldUntil) {
+      return 'wrap-up-holding';
+    } else if (state._wrapUpNudges >= wrapUp.maxRetries) {
+      state._wrapUpHoldUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      if (state._wrapUpGaveUp) return 'wrap-up-holding';
+      state._wrapUpGaveUp = true;
+      return 'wrap-up-gave-up';
+    } else {
+      const fg = await checkForeground(tmuxAdapter, pane, config);
+      if (!fg.ok) {
+        state._lastForeground = fg.fg;
+        state._wrapUpHoldUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        return 'skipped-not-claude';
+      }
+      await tmuxAdapter.sendKeys(pane, wrapUp.retryMessage);
+      state._wrapUpNotice = notice;
+      state._wrapUpNudges += 1;
+      state._wrapUpGaveUp = false;
+      state._wrapUpHoldUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'wrap-up-nudged';
+    }
+  }
+
   return 'monitoring';
 }
 
@@ -754,6 +790,8 @@ export async function startMonitor(pane, pid) {
       }
       if (result === 'interrupted-retried') await logger.info(`Resume sent after interrupted stream (attempt ${state.interruptedAttempts}/${config.streamInterrupted.maxRetries}).`);
       if (result === 'interrupted-cleared') await logger.info('Interrupted turn resumed. Back to normal monitoring.');
+      if (result === 'wrap-up-nudged') await logger.info(`Near-limit wrap-up notice at an idle prompt ("${state._wrapUpNotice}") — sent "${config.nearLimitWrapUp.retryMessage}" to pick the work back up (${state._wrapUpNudges}/${config.nearLimitWrapUp.maxRetries}).`);
+      if (result === 'wrap-up-gave-up') await logger.warn(`Wrap-up notice still unanswered after ${config.nearLimitWrapUp.maxRetries} nudges — the nudge never rendered. Holding until it clears.`);
       if (result === 'interrupted-gave-up') await logger.warn(`Stream still truncated after ${config.streamInterrupted.maxRetries} resume attempts. Giving up — the connection may still be down after the wake. Will not retry until it clears.`);
     } catch (err) {
       consecutiveErrors++;
