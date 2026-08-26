@@ -1,14 +1,22 @@
-const RESET_TIME_REGEX = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?/i;
+// Optional calendar date ahead of the clock — weekly limits render "resets Aug 21 at 3pm
+// (Australia/Brisbane)". Month names are matched by their first three letters so both
+// "Aug" and "August" resolve; the day may carry an ordinal suffix or a trailing comma.
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const RESET_TIME_REGEX = /resets?\s+(?:on\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?/i;
 const RELATIVE_TIME_REGEX = /(?:try again|wait|resets?\s+in)[:\s]\s*(?:for\s+)?(?:in\s+)?(\d+)\s*(hours?|minutes?|mins?|h|m)\b/i;
 
 export function parseResetTime(text) {
   // Try absolute time first: "resets at 3pm (UTC)"
   const absMatch = text.match(RESET_TIME_REGEX);
   if (absMatch) {
-    let hour = parseInt(absMatch[1], 10);
-    const minute = absMatch[2] ? parseInt(absMatch[2], 10) : 0;
-    const ampm = absMatch[3]?.toLowerCase() || null;
-    const timezone = absMatch[4] || null;
+    // A word before the day that isn't a month ("resets tomorrow 3pm") must not be read as
+    // one: the optional date group only binds when the token names a month.
+    const monthIdx = absMatch[1] ? MONTHS.indexOf(absMatch[1].toLowerCase()) : -1;
+    if (absMatch[1] && monthIdx === -1) return null;
+    let hour = parseInt(absMatch[3], 10);
+    const minute = absMatch[4] ? parseInt(absMatch[4], 10) : 0;
+    const ampm = absMatch[5]?.toLowerCase() || null;
+    const timezone = absMatch[6] || null;
 
     if (ampm === 'pm' && hour !== 12) hour += 12;
     if (ampm === 'am' && hour === 12) hour = 0;
@@ -18,6 +26,11 @@ export function parseResetTime(text) {
     if (hour > 23 || hour < 0 || minute > 59) return null;
 
     const ambiguous = !ampm && hour >= 1 && hour <= 12;
+    if (monthIdx !== -1) {
+      const day = parseInt(absMatch[2], 10);
+      if (day < 1 || day > 31) return null;
+      return { hour, minute, timezone, ambiguous, month: monthIdx, day };
+    }
     return { hour, minute, timezone, ambiguous };
   }
 
@@ -71,16 +84,22 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
   // the given hour:minute in the target timezone, on today's date there (dayOffset 0) or
   // a following day (dayOffset 1 = the roll-to-tomorrow path — anchored to the actual
   // calendar day so a 23h/25h DST day converges to the right instant).
-  function getTargetTimestamp(h, m, dayOffset = 0) {
-    // Get today's date in the target timezone
+  // Today's calendar date in the target timezone.
+  function todayInTz() {
     const parts = new Intl.DateTimeFormat('en-US', {
       timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
       hour12: false,
     }).formatToParts(now);
-
-    let y = parseInt(parts.find(p => p.type === 'year').value);
-    let mo = parseInt(parts.find(p => p.type === 'month').value) - 1;
-    let d = parseInt(parts.find(p => p.type === 'day').value);
+    return {
+      y: parseInt(parts.find(p => p.type === 'year').value),
+      mo: parseInt(parts.find(p => p.type === 'month').value) - 1,
+      d: parseInt(parts.find(p => p.type === 'day').value),
+    };
+  }
+  // `date` ({y, mo, d}) anchors the target to an explicit calendar day (a dated weekly
+  // reset); otherwise today in tz, plus dayOffset (the roll-to-tomorrow path).
+  function getTargetTimestamp(h, m, dayOffset = 0, date = null) {
+    let { y, mo, d } = date || todayInTz();
     if (dayOffset) {
       // Normalize month/year rollover through Date.UTC (calendar-day arithmetic only).
       const norm = new Date(Date.UTC(y, mo, d + dayOffset));
@@ -137,6 +156,26 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     }
 
     return candidate;
+  }
+
+  // A calendar-dated reset (weekly limit) is authoritative: anchor to that day, never to
+  // "today or tomorrow". The year is inferred — the banner's date is the nearest one at or
+  // after yesterday in tz, so a "Jan 2" seen on Dec 30 is next year's. Past means the limit
+  // already cleared: retry now (margin only), never roll a whole year forward.
+  if (parsed.month !== undefined && parsed.day !== undefined) {
+    const today = todayInTz();
+    const sameYear = Date.UTC(today.y, parsed.month, parsed.day);
+    const yesterday = Date.UTC(today.y, today.mo, today.d - 1);
+    const y = sameYear >= yesterday ? today.y : today.y + 1;
+    const date = { y, mo: parsed.month, d: parsed.day };
+    const at = (h) => getTargetTimestamp(h, parsed.minute, 0, date) - now.getTime();
+    let target = at(parsed.hour);
+    if (parsed.ambiguous) {
+      const alt = at((parsed.hour + 12) % 24);
+      const future = [target, alt].filter((x) => x > 0);
+      target = future.length ? Math.min(...future) : Math.max(target, alt);
+    }
+    return Math.max(0, target) + marginSeconds * 1000;
   }
 
   if (parsed.ambiguous) {

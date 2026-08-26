@@ -1042,3 +1042,20 @@ describe('stripAnsi (OSC sequences)', () => {
     assert.ok(isRateLimited(input));
   });
 });
+
+// --- Date-bearing weekly reset ("resets Aug 21 at 3pm (Australia/Brisbane)", a real
+//     record surfaced by PR #56's fixture). RESET_PATTERNS required a digit right after
+//     "resets", so the weekly banner was neither detected nor parsed. ---
+describe('weekly limit with a calendar-dated reset', () => {
+  const WEEKLY = "You've hit your weekly limit · resets Aug 21 at 3pm (Australia/Brisbane)";
+  it('isRateLimited detects the dated weekly banner', () => {
+    assert.equal(isRateLimited([WEEKLY, '', '❯ '].join('\n'), [], 12), true);
+  });
+  it('findRateLimitMessage returns the dated banner (the clause ends at the time, so the tz tail is not a run-on)', () => {
+    assert.equal(findRateLimitMessage([WEEKLY, '', '❯ '].join('\n'), [], 12), WEEKLY);
+  });
+  it('still prefers the dated banner over reset-shaped prose rendered below it', () => {
+    const pane = [WEEKLY, '', '⏺ The API said to try again in 2 minutes before the window rolls.', '❯ '].join('\n');
+    assert.equal(findRateLimitMessage(pane, [], 12), WEEKLY);
+  });
+});

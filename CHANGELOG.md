@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
+  render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
+  (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
+  the reset detector and the parser only knew clock-only forms ("resets 3pm", "resets at
+  3:00 PM", "resets in 3 hours"), which require a digit right after "resets". The scraper
+  therefore saw no reset line next to the limit and never detected the banner at all, and
+  a message reaching the parser by another route fell to the 5-hour fallback — after which
+  the monitor woke into a limit with days left on it and burned its retries. The dated form
+  is now a reset clause (ending at the time, so the run-on veto measures the same tail as
+  the clock-only form), and the wait anchors to that calendar day in the banner's timezone:
+  no today/tomorrow roll, year inferred across a December→January boundary, and a dated
+  reset already in the past means the limit cleared — retry now rather than a year later.
+
 ### Added
 - **A turn truncated by a suspended machine or a dropped connection is now resumed.**
   Claude Code wraps the response body in a byte watchdog; when the bytes stop arriving it

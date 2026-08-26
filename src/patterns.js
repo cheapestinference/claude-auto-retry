@@ -176,8 +176,15 @@ const RETRY_HINT_PATTERNS = [
 ];
 const LIMIT_PATTERNS = [...LIMIT_NAME_PATTERNS, ...RETRY_HINT_PATTERNS];
 
+// Month names for the date-bearing form below; shared with time-parser.js's clause regex.
+const MONTH = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?';
 const RESET_PATTERNS = [
   /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/i,   // "resets 3pm" / "resets at 3:00 PM"
+  // Weekly limits render a CALENDAR DATE: "resets Aug 21 at 3pm (Australia/Brisbane)" (a
+  // real record, PR #56's fixture). The clock-only form above needs a digit right after
+  // "resets", so this render was neither detected nor parsed. The clause ends at the time,
+  // exactly like the clock-only form, so the run-on veto (#73) measures the same tail.
+  new RegExp(`resets?\\s+(?:on\\s+)?${MONTH}\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+(?:at\\s+)?\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?`, 'i'),
   /resets?\s+in[:\s]\s*\d/i,                                   // "resets in: 3 hours"
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
 ];
