@@ -636,6 +636,7 @@ pruned, since staleness can't be detected). Prefer the PID form; you can also ha
 | macOS | `brew` | Fully supported |
 | Arch Linux | `pacman` | Fully supported |
 | Alpine | `apk` | Fully supported |
+| Windows | — | **Not supported natively** — the tool drives a tmux pane, which Windows does not have. Use WSL2 (Ubuntu), where it works as on Linux. A native backend via a tmux-compatible multiplexer is being discussed in [#79](https://github.com/cheapestinference/claude-auto-retry/issues/79). |
 
 ### Requirements
 
