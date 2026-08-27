@@ -30,6 +30,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   time" warning is latched to once per marker instead of once per poll tick, so a marker
   that stays unresolved for its whole staleness window no longer produces dozens of
   identical log lines.
+- **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
+  render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
+  (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
+  the reset detector and the parser only knew clock-only forms ("resets 3pm", "resets at
+  3:00 PM", "resets in 3 hours"), which require a digit right after "resets". The scraper
+  therefore saw no reset line next to the limit and never detected the banner at all, and
+  a message reaching the parser by another route fell to the 5-hour fallback — after which
+  the monitor woke into a limit with days left on it and burned its retries. The dated form
+  is now a reset clause (ending at the time, so the run-on veto measures the same tail as
+  the clock-only form), and the wait anchors to that calendar day in the banner's timezone:
+  no today/tomorrow roll, year inferred across a December→January boundary, and a dated
+  reset already in the past means the limit cleared — retry now rather than a year later.
+
+### Added
+- **A session Claude Code winds down near the 5-hour limit is nudged back to work (#78).**
+  At ~95% of the window Claude Code injects a checkpoint instruction into the model's
+  context and prints "⏺ Approaching your 5-hour usage limit — Claude will wrap up the
+  current step." The model finishes the step, lists what's left and ends the turn: no
+  limit banner, an idle prompt, nothing to resume it — an overnight run parked at 95% until
+  long after the window reset. It is a feature-flagged Claude Code behavior with no
+  user-facing switch, so the render is handled instead: at the idle prompt the monitor
+  sends one `continue`, and the session either finishes or reaches the real limit, where
+  the usage wait takes over. Not another bounded-retry machine — the nudge renders as a
+  user row under the notice, and a notice with a user row below it (the user's or ours)
+  has already been answered, so it is never nudged twice; `maxRetries` only bounds the
+  case where the nudge never renders. Shape-anchored like the interrupted-stream head:
+  the notice begins its line behind at most a message glyph, so a quotation or a typed
+  copy cannot trigger it. Configured under `nearLimitWrapUp`; `"enabled": false` keeps
+  the checkpoint stop.
+- **A turn truncated by a suspended machine or a dropped connection is now resumed.**
+  Claude Code wraps the response body in a byte watchdog; when the bytes stop arriving it
+  aborts the stream and finalizes whatever had already been printed, naming the cause on an
+  `API Error:` line ("Your computer went to sleep mid-response. The response above may be
+  incomplete."). The turn is then over — the prompt returns idle and nothing resumes it, so
+  a session can sit on a half-finished answer indefinitely. Claude Code retries by itself
+  only while the response is still thinking-only; once real content has been yielded it
+  declines to retry, which is precisely when this render appears. Seeing it at an idle
+  prompt, the monitor now sends `continue`, bounded at `maxRetries` because a machine that
+  just woke may not have its network back yet. All seven renders the finalizer emits are
+  matched (suspend, dropped connection, stalled stream and mid-response server error, in
+  both their "mid-response" and "before a response was produced" forms) — they leave the
+  same wreckage and take the same remedy. Detection is anchored on the SHAPE of the line
+  rather than its vocabulary: a real render *begins* with `API Error:`, behind at most
+  Claude's message glyph, so a session merely explaining the error — which quotes the whole
+  render, anchor included, mid-sentence — cannot trigger a resume. The glyph and the
+  indentation are one rule: a glyphed head may sit anywhere, a bare head must start at
+  column 0, because an indented glyph-less head is the hanging-indent shape of a quotation
+  rather than a render. Configured under a `streamInterrupted` block.
 
 ## [0.7.3] - 2026-08-16
 

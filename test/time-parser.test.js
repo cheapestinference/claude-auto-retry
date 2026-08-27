@@ -193,3 +193,42 @@ describe('calculateWaitMs', () => {
     assert.ok(hours > 21 && hours < 23, `expected ~22h (tomorrow), got ${hours.toFixed(2)}h`);
   });
 });
+
+// --- Date-bearing resets. Weekly limits render the reset with a calendar date —
+//     "You've hit your weekly limit · resets Aug 21 at 3pm (Australia/Brisbane)" (a real
+//     Claude Code record, PR #56's fixture) — and the parser only knew clock-only forms, so
+//     the banner fell to the 5h fallback: after 5h the monitor woke into a limit with days
+//     left on it and burned its retries. The date is authoritative: no today/tomorrow roll.
+describe('date-bearing resets (weekly limit)', () => {
+  it('parses "resets Aug 21 at 3pm (Australia/Brisbane)" with the calendar date', () => {
+    const r = parseResetTime("You've hit your weekly limit · resets Aug 21 at 3pm (Australia/Brisbane)");
+    assert.equal(r.hour, 15); assert.equal(r.minute, 0);
+    assert.equal(r.timezone, 'Australia/Brisbane');
+    assert.equal(r.month, 7); assert.equal(r.day, 21);        // month is 0-based (Aug)
+  });
+  it('parses the long month name and a comma-separated time', () => {
+    const r = parseResetTime('resets August 21, 3:30pm (UTC)');
+    assert.equal(r.hour, 15); assert.equal(r.minute, 30);
+    assert.equal(r.month, 7); assert.equal(r.day, 21);
+  });
+  it('clock-only forms still carry no date', () => {
+    const r = parseResetTime('resets 3pm (UTC)');
+    assert.equal(r.month, undefined); assert.equal(r.day, undefined);
+  });
+  it('waits until the dated instant — days, not the same-day/tomorrow roll', () => {
+    // Brisbane is UTC+10, no DST: Aug 21 15:00 Brisbane == Aug 21 05:00Z.
+    const now = new Date('2026-08-18T00:00:00Z');
+    const wait = calculateWaitMs({ hour: 15, minute: 0, timezone: 'Australia/Brisbane', month: 7, day: 21 }, 0, 5, now);
+    assert.equal(wait, (3 * 24 + 5) * 3600_000);
+  });
+  it('a dated reset already in the past means the limit cleared — retry now, never roll forward', () => {
+    const now = new Date('2026-08-22T00:00:00Z');                 // a day after Aug 21 15:00 Brisbane
+    const wait = calculateWaitMs({ hour: 15, minute: 0, timezone: 'Australia/Brisbane', month: 7, day: 21 }, 60, 5, now);
+    assert.equal(wait, 60_000);
+  });
+  it('infers the year across a December→January boundary', () => {
+    const now = new Date('2026-12-30T00:00:00Z');
+    const wait = calculateWaitMs({ hour: 9, minute: 0, timezone: 'UTC', month: 0, day: 2 }, 0, 5, now);
+    assert.equal(wait, (3 * 24 + 9) * 3600_000);                  // Jan 2 2027 09:00Z
+  });
+});

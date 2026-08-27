@@ -176,8 +176,15 @@ const RETRY_HINT_PATTERNS = [
 ];
 const LIMIT_PATTERNS = [...LIMIT_NAME_PATTERNS, ...RETRY_HINT_PATTERNS];
 
+// Month names for the date-bearing form below; shared with time-parser.js's clause regex.
+const MONTH = '(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\\.?';
 const RESET_PATTERNS = [
   /resets?\s+(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?/i,   // "resets 3pm" / "resets at 3:00 PM"
+  // Weekly limits render a CALENDAR DATE: "resets Aug 21 at 3pm (Australia/Brisbane)" (a
+  // real record, PR #56's fixture). The clock-only form above needs a digit right after
+  // "resets", so this render was neither detected nor parsed. The clause ends at the time,
+  // exactly like the clock-only form, so the run-on veto (#73) measures the same tail.
+  new RegExp(`resets?\\s+(?:on\\s+)?${MONTH}\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+(?:at\\s+)?\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?`, 'i'),
   /resets?\s+in[:\s]\s*\d/i,                                   // "resets in: 3 hours"
   /try again in \d+\s*(?:hours?|minutes?|h|m)/i,               // "try again in 5 hours"
 ];
@@ -698,6 +705,91 @@ export function safeguardMatch(text, patterns = []) {
 
 export function detectSafeguard(text, patterns = []) {
   return safeguardMatch(text, patterns) !== null;
+}
+
+// --- Interrupted-stream detection (truncated turn) ---
+// Claude Code wraps the response body in a byte watchdog. When bytes stop arriving it
+// aborts the stream and finalizes whatever was already yielded, tagging the cause on an
+// `API Error:` line: a suspended machine, a dropped connection, a stalled stream, a server
+// error. The turn then ENDS at an idle prompt — Claude Code retries by itself only while
+// the response is still thinking-only, so by the time this render exists it has already
+// declined to retry. Nothing resumes the work until something is typed. That's the gap
+// this closes; see DEFAULT_STREAM_INTERRUPTED for the full render set.
+//
+// Anchor: "an API Error line nearby" — the rule the safeguard and overload families use —
+// is NOT enough here. Those phrases are jargon; these are ordinary English about a common
+// event ("your computer went to sleep"), so a session that merely EXPLAINS them quotes the
+// whole render, anchor included, mid-sentence. The discriminator is therefore the SHAPE of
+// the line (#73): a real render BEGINS with `API Error:`, behind at most Claude's message
+// glyph. Prose carries it mid-line; the user's own line carries ❯ instead of ⏺.
+//
+// The glyph and the indentation are ONE rule, not two independent ones: a glyphed head may
+// sit anywhere (the TUI indents blocks), but a BARE head must start at column 0. Allowing
+// arbitrary indentation on a glyph-less head admits the hanging-indent shape of a quotation
+// — "⏺ The error I saw was:" / "  API Error: Your computer went to sleep…" — which is the
+// same wrap/quotation class #75 closed for SPEND_LIMIT. A real head is never indented: it
+// STARTS its line, and a narrow pane wraps the head's tail downward, never the head itself.
+const RENDER_HEAD = /^(?:\s*[⏺●]\s+)?API Error:/i;
+// A render head fills a terminal row, so the cause clause can wrap onto the next
+// (indented) row. Two lines covers the wrap without reaching into whatever follows.
+const RENDER_WRAP_LINES = 2;
+
+export function streamInterruptedMatch(text, patterns = []) {
+  if (!patterns || patterns.length === 0) return null;
+  // Same windowing and tool-echo discipline as the overload/safeguard matchers (#63): the
+  // render quoted inside a Bash result is scrollback, not a live truncated turn.
+  const { lines, mask } = tail(text);
+  if (!lines.join('').trim()) return null;
+  const regexes = toRegexes(patterns);
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i] || !RENDER_HEAD.test(lines[i])) continue;
+    const last = Math.min(i + RENDER_WRAP_LINES, lines.length - 1);
+    for (let j = i; j <= last; j++) {
+      // Past the head, the render continues only while the lines stay indented. The first
+      // flush-left line STARTS THE NEXT BLOCK, so it ends the window — skipping past it let
+      // the scan reach a later block's continuation and attribute its phrase to this head.
+      if (j > i && !/^\s/.test(lines[j])) break;
+      if (mask[j]) continue;
+      for (const r of regexes) {
+        if (r.test(lines[j])) return { pattern: r.source, line: lines[j].trim().slice(0, 200) };
+      }
+    }
+  }
+  return null;
+}
+
+export function detectStreamInterrupted(text, patterns = []) {
+  return streamInterruptedMatch(text, patterns) !== null;
+}
+
+// --- Near-limit wrap-up notice (#78) ---
+// "⏺ Approaching your 5-hour usage limit — Claude will wrap up the current step." At ~95%
+// of the window Claude Code prints this and injects a checkpoint instruction; the model
+// finishes the step, lists what's left and ends the turn at an idle prompt with NO limit
+// banner. Unlike every other render this file matches, the notice is NOT the last content
+// line — the model's wrap-up output follows it — so the window is wider than the banner
+// tail, and "still live" is decided by what sits BELOW the notice rather than by where it
+// sits: a user row (❯/> plus text) below it means the turn it introduced has already been
+// answered — by the user, or by our own nudge, which renders exactly that way. Bottom-up,
+// the first user row met above any notice ends the search. That row is the dedup.
+//
+// Shape-anchored like the #77 render head: the notice BEGINS its line, behind at most a
+// message glyph — a glyphed head may be indented (the TUI indents blocks), a bare head must
+// start at column 0 — so prose quoting it mid-line and a user-typed copy never match.
+const WRAP_UP_TAIL_LINES = 40;
+const WRAP_UP_HEAD = new RegExp(`^(?:\\s*${MESSAGE_GLYPH}\\s+)?Approaching your [\\w-]+(?: usage)? limit\\s+[—–-]+\\s+Claude will wrap up`, 'i');
+const USER_ROW = /^\s*[❯>]\s+\S/;
+export function nearLimitWrapUpMatch(text) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = contentTailRange(all, WRAP_UP_TAIL_LINES);
+  const lines = all.slice(start, end);
+  const mask = toolEchoMask(all).slice(start, end);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (mask[i]) continue;
+    if (USER_ROW.test(lines[i])) return null;
+    if (WRAP_UP_HEAD.test(lines[i])) return lines[i].trim();
+  }
+  return null;
 }
 
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A

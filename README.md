@@ -83,6 +83,8 @@ When you disconnect (SSH drops, close terminal, laptop sleeps), **tmux keeps run
 - **Self-healing coverage** — `reconcile` re-arms monitors for any live `claude` session that lost one; an optional timer (`systemd --user` on Linux, launchd on macOS) runs it automatically ([details](#keeping-monitors-alive))
 - **Overload backoff** — detects sustained API overload (`429/500/502/503/504/529`) and retries on a configurable exponential backoff with jitter and a cumulative-wait cap, distinct from the usage-reset path ([details](#overload-backoff))
 - **Safeguard retry** — auto-continues past an AUP-safeguard false-positive (often transient), capped at a few tries so a sticky flag can't loop ([details](#safeguard-retry))
+- **Interrupted-stream resume** — picks the work back up when a laptop suspend or a dropped connection truncates a response mid-turn and leaves the session parked at an idle prompt ([details](#interrupted-stream-resume))
+- **Near-limit wrap-up nudge** — when Claude Code winds the turn down at ~95% of the 5-hour window ("Approaching your 5-hour usage limit — Claude will wrap up the current step") and parks the session at an idle prompt with no limit banner, sends one `continue` so the work runs on to the real limit, where the usage wait takes over ([details](#near-limit-wrap-up-nudge))
 - **tmux status bar indicator** — see at a glance whether a pane is being monitored, waiting on a reset, backing off from overload, or has given up ([details](#tmux-status-bar-indicator))
 - **`--print` mode support** — buffers output, retries cleanly for piped/scripted usage
 - **Configurable** — retry count, wait margin, custom patterns, retry message
@@ -135,6 +137,29 @@ the layout is unreadable.
 API Error: <model>'s safeguards flagged this message (https://www.anthropic.com/legal/aup).
 They may flag safe, normal content as well. … Claude Code can't respond to this request with <model>.
 ```
+
+### Interrupted streams — one resume, then stop
+
+```
+API Error: Your computer went to sleep mid-response. The response above may be incomplete.
+API Error: Connection lost mid-response. The response above may be incomplete.
+API Error: The response stopped arriving. The response above may be incomplete.
+API Error: Server error mid-response. The response above may be incomplete.
+```
+
+…and the three "before a response was produced. Try again." variants (suspend, stall,
+connection). All seven come from the same stream finalizer and leave the same wreckage: a
+truncated turn at an idle prompt.
+
+### Near-limit wrap-up — one nudge, then the usage wait
+
+```
+⏺ Approaching your 5-hour usage limit — Claude will wrap up the current step.
+```
+
+Not an error: Claude Code prints this at ~95% of the window and tells the model to
+checkpoint. The model finishes the step, lists what's left and ends the turn — no banner,
+idle prompt, nothing resumes it. One `continue` picks the work back up.
 
 Custom patterns can be added via config for future message format changes.
 
@@ -367,6 +392,102 @@ Configured under a `safeguard` block (defaults shown):
 
 Usage limits always take precedence; the safeguard path only acts when Claude is idle
 (no `esc to interrupt` footer) and the foreground process is `claude`/`node`.
+
+## Interrupted-stream resume
+
+Close your laptop lid while Claude is mid-answer and the work does not survive. Claude
+Code wraps the response body in a byte watchdog; when the bytes stop arriving it aborts
+the stream and finalizes whatever had already been printed, naming the cause:
+
+```
+⏺ API Error: Your computer went to sleep mid-response. The response above may be
+  incomplete.
+```
+
+The turn is then **over**. The prompt returns idle and nothing resumes it, so the session
+sits there — potentially for hours — with a half-finished answer on screen. Claude Code
+retries by itself only while the response is still *thinking-only*; once real content has
+been yielded it declines to retry, which is exactly when this render appears. That is the
+gap this closes: seeing it at an idle prompt, the tool sends `continue`, bounded at
+`maxRetries` because a machine that just woke may not have its network back yet.
+
+The same finalizer emits the render for a dropped connection, a stalled stream and a
+mid-response server error. All are the same truncated-turn state with the same remedy, so
+all are matched — sleeping is just the cause we can name.
+
+Detection is anchored on the **shape** of the line, not its vocabulary: a real render
+*begins* with `API Error:`, behind at most Claude's message glyph. The "an `API Error`
+line nearby" rule the overload and safeguard paths use is deliberately not enough here —
+these sentences are ordinary English, so a session merely *explaining* them quotes the
+whole render, anchor included, mid-sentence. Prose carries it mid-line and your own typed
+line carries `❯`, so neither trips it.
+
+Configured under a `streamInterrupted` block (defaults shown):
+
+```json
+{
+  "streamInterrupted": {
+    "enabled": true,
+    "patterns": ["went to sleep mid-response", "Connection lost mid-response", "…"],
+    "maxRetries": 2,
+    "retryDelaySeconds": 5,
+    "retryMessage": "continue"
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Turn the interrupted-stream path on/off |
+| `patterns` | (all 7 renders) | Case-insensitive regexes, matched only against a line that *begins* with the `API Error:` render |
+| `maxRetries` | `2` | Resume attempts before giving up loudly |
+| `retryDelaySeconds` | `5` | Wait before resuming — lets the network settle after a wake |
+| `retryMessage` | `"continue"` | Message sent to pick the work back up |
+
+Usage limits take precedence, and like the safeguard path this only acts when Claude is
+idle and the foreground process is `claude`/`node`.
+
+## Near-limit wrap-up nudge
+
+At roughly 95% of the 5-hour window, Claude Code injects a checkpoint instruction into the
+model's context — *finish the current step, then list up to three short bullets of the
+most impactful remaining work, don't start subagents or long-running work* — and prints:
+
+```
+⏺ Approaching your 5-hour usage limit — Claude will wrap up the current step.
+```
+
+The model does exactly that and **ends the turn**. There is no limit banner (the limit has
+not been hit), the prompt returns idle, and nothing resumes the session — so an overnight
+run winds down at 95% and stays parked long after the window has reset. This is a
+server-side Claude Code behavior with no user-facing switch (it is feature-flagged, not a
+setting), so the tool handles the render instead.
+
+Seeing the notice at an idle prompt, the tool sends one `continue`. The session then either
+finishes its work or runs into the real limit, where the [usage wait](#how-it-works) takes
+over as usual. Unlike the retry families above this is not a bounded machine: the nudge
+renders as a user row under the notice, and a notice with a user row below it — yours or
+ours — belongs to a turn that has already been answered, so it is never nudged twice. The
+`maxRetries` cap only bounds the pathological case where the nudge never renders.
+
+Detection is anchored on the **shape** of the line, like the interrupted-stream render: the
+notice *begins* its line, behind at most Claude's message glyph, so prose quoting it and
+your own typed copy don't trip it.
+
+Configured under a `nearLimitWrapUp` block (defaults shown):
+
+```json
+{
+  "nearLimitWrapUp": {
+    "enabled": true,
+    "maxRetries": 3,
+    "retryMessage": "continue"
+  }
+}
+```
+
+Set `"enabled": false` if you *want* the session to stop at the checkpoint.
+
 ## tmux status bar indicator
 
 The monitor writes a small JSON snapshot per pane on every poll tick, so you can tell
@@ -518,6 +639,7 @@ pruned, since staleness can't be detected). Prefer the PID form; you can also ha
 | macOS | `brew` | Fully supported |
 | Arch Linux | `pacman` | Fully supported |
 | Alpine | `apk` | Fully supported |
+| Windows | — | **Not supported natively** — the tool drives a tmux pane, which Windows does not have. Use WSL2 (Ubuntu), where it works as on Linux. A native backend via a tmux-compatible multiplexer is being discussed in [#79](https://github.com/cheapestinference/claude-auto-retry/issues/79). |
 
 ### Requirements
 

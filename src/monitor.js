@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -38,6 +38,11 @@ export function createMonitorState() {
     viaUsageEvent: false,
     // Safeguard/AUP false-positive retry sub-state (bounded, seconds-scale).
     safeguardAttempts: 0, safeguardWaitUntil: 0,
+    // Interrupted-stream resume sub-state (suspend/connection truncation; same shape).
+    interruptedAttempts: 0, interruptedWaitUntil: 0,
+    // Near-limit wrap-up nudge (#78): a hold after each send so the pane can re-render the
+    // nudge as a user row (the dedup), and a count of sends against the SAME notice.
+    _wrapUpHoldUntil: 0, _wrapUpNudges: 0,
   };
 }
 
@@ -72,6 +77,13 @@ function resetSafeguard(state) {
   state.safeguardAttempts = 0;
   state.safeguardWaitUntil = 0;
   state._safeguardGaveUp = false;
+  state._gaveUp = false;
+}
+
+function resetInterrupted(state) {
+  state.interruptedAttempts = 0;
+  state.interruptedWaitUntil = 0;
+  state._interruptedGaveUp = false;
   state._gaveUp = false;
 }
 
@@ -472,6 +484,57 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     return 'safeguard-retried';
   }
 
+  // Interrupted stream: the same bounded machine as the safeguard branch above, on a
+  // different render. Deliberately parallel rather than merged — the same way overload and
+  // safeguard are parallel — so each family's result labels stay greppable from the log and
+  // status-file code that matches them literally. If a fourth family appears, extract the
+  // machine and give each family a descriptor carrying its labels.
+  if (state.status === 'interrupted') {
+    if (Date.now() < state.interruptedWaitUntil) return 'interrupted-waiting';
+    if (!isAlive()) return 'exit';
+    const interrupted = config.streamInterrupted;
+
+    // A usage limit or Claude resuming takes precedence / means recovery.
+    if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+      resetInterrupted(state); return enterUsageWait(state, stripped, config);
+    }
+    // In flight (our resume, or the user typing) — defer WITHOUT consuming or resetting
+    // the counter, exactly as the safeguard/overload branches do.
+    if (isWorking(stripped)) {
+      state.interruptedWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'interrupted-working';
+    }
+
+    // Error gone → the turn resumed (or the user cleared it).
+    if (!detectStreamInterrupted(stripped, interrupted.patterns)) {
+      resetInterrupted(state); state.status = 'monitoring'; return 'interrupted-cleared';
+    }
+
+    // Still truncated after our sends: a wake with no network back yet, or something we
+    // can't fix by typing. Give up loudly ONCE, then hold quietly on a long cooldown.
+    if (state.interruptedAttempts >= interrupted.maxRetries) {
+      state.interruptedWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      if (state._interruptedGaveUp) return 'interrupted-holding';
+      state._interruptedGaveUp = true;
+      return 'interrupted-gave-up';
+    }
+
+    // Foreground safety: only send when claude/node is foreground.
+    const fg = await checkForeground(tmuxAdapter, pane, config);
+    if (!fg.ok) {
+      state._lastForeground = fg.fg;
+      state.interruptedWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'skipped-not-claude';
+    }
+
+    // Increment + schedule BEFORE send so a send failure still consumes the slot.
+    state.interruptedAttempts++;
+    state.interruptedWaitUntil = Date.now() + (interrupted.retryDelaySeconds * 1000);
+    await tmuxAdapter.sendKeys(pane, interrupted.retryMessage);
+    return 'interrupted-retried';
+  }
+
   // --- monitoring ---
   // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale). No
   // !isWorking gate here: it would widen every WORKING_PATTERN from "skip one injection" to
@@ -602,6 +665,54 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     }
   }
 
+  // Interrupted stream (suspend / dropped connection / stalled stream). Last of the three
+  // seconds-scale families: its render is the least specific, so the more precisely
+  // anchored ones get first refusal on an ambiguous pane. Idle-only, like safeguard.
+  const interrupted = config.streamInterrupted;
+  if (interrupted && interrupted.enabled && !isWorking(stripped)) {
+    const match = streamInterruptedMatch(stripped, interrupted.patterns);
+    if (match) {
+      resetInterrupted(state);
+      state.status = 'interrupted';
+      state.interruptedWaitUntil = Date.now() + (interrupted.retryDelaySeconds * 1000);
+      state._interruptedMatch = match;
+      return 'interrupted-detected';
+    }
+  }
+
+  // Near-limit wrap-up (#78): one nudge at the idle prompt. No wait state — the nudge
+  // renders as a user row under the notice and the matcher then refuses the notice, so the
+  // next tick simply finds nothing. The hold covers the render race after a send; the
+  // count bounds the pathological case where the nudge never renders (keys dropped, a
+  // modal in the way) so the same notice can't be nudged forever.
+  const wrapUp = config.nearLimitWrapUp;
+  if (wrapUp && wrapUp.enabled && !isWorking(stripped)) {
+    const notice = nearLimitWrapUpMatch(stripped);
+    if (!notice) {
+      state._wrapUpNudges = 0;
+    } else if (Date.now() < state._wrapUpHoldUntil) {
+      return 'wrap-up-holding';
+    } else if (state._wrapUpNudges >= wrapUp.maxRetries) {
+      state._wrapUpHoldUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      if (state._wrapUpGaveUp) return 'wrap-up-holding';
+      state._wrapUpGaveUp = true;
+      return 'wrap-up-gave-up';
+    } else {
+      const fg = await checkForeground(tmuxAdapter, pane, config);
+      if (!fg.ok) {
+        state._lastForeground = fg.fg;
+        state._wrapUpHoldUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+        return 'skipped-not-claude';
+      }
+      await tmuxAdapter.sendKeys(pane, wrapUp.retryMessage);
+      state._wrapUpNotice = notice;
+      state._wrapUpNudges += 1;
+      state._wrapUpGaveUp = false;
+      state._wrapUpHoldUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'wrap-up-nudged';
+    }
+  }
+
   return 'monitoring';
 }
 
@@ -677,9 +788,11 @@ export async function startMonitor(pane, pid) {
         waitUntil: Math.floor(state.waitUntil / 1000),
         overloadWaitUntil: Math.floor(state.overloadWaitUntil / 1000),
         safeguardWaitUntil: Math.floor(state.safeguardWaitUntil / 1000),
+        interruptedWaitUntil: Math.floor(state.interruptedWaitUntil / 1000),
         attempts: state.attempts,
         overloadAttempts: state.overloadAttempts,
         safeguardAttempts: state.safeguardAttempts,
+        interruptedAttempts: state.interruptedAttempts,
         pollIntervalSeconds: config.pollIntervalSeconds,
         gaveUp: !!state._gaveUp,
       }).catch(() => {});
@@ -733,6 +846,15 @@ export async function startMonitor(pane, pid) {
       if (result === 'safeguard-retried') await logger.info(`Safeguard retry sent (attempt ${state.safeguardAttempts}/${config.safeguard.maxRetries}).`);
       if (result === 'safeguard-cleared') await logger.info('Safeguard flag cleared. Resuming normal monitoring.');
       if (result === 'safeguard-gave-up') await logger.warn(`Safeguard flag persisted after ${config.safeguard.maxRetries} retries. Giving up — the flag is likely sticky for this content/model; try /model to switch models or rephrase. Will not retry until it clears.`);
+      if (result === 'interrupted-detected') {
+        const m = state._interruptedMatch;
+        await logger.warn(`Interrupted stream detected${m ? ` [matched /${m.pattern}/ in: "${m.line}"]` : ''} — the turn was truncated and left at an idle prompt. Will resume up to ${config.streamInterrupted.maxRetries}x every ${config.streamInterrupted.retryDelaySeconds}s.`);
+      }
+      if (result === 'interrupted-retried') await logger.info(`Resume sent after interrupted stream (attempt ${state.interruptedAttempts}/${config.streamInterrupted.maxRetries}).`);
+      if (result === 'interrupted-cleared') await logger.info('Interrupted turn resumed. Back to normal monitoring.');
+      if (result === 'wrap-up-nudged') await logger.info(`Near-limit wrap-up notice at an idle prompt ("${state._wrapUpNotice}") — sent "${config.nearLimitWrapUp.retryMessage}" to pick the work back up (${state._wrapUpNudges}/${config.nearLimitWrapUp.maxRetries}).`);
+      if (result === 'wrap-up-gave-up') await logger.warn(`Wrap-up notice still unanswered after ${config.nearLimitWrapUp.maxRetries} nudges — the nudge never rendered. Holding until it clears.`);
+      if (result === 'interrupted-gave-up') await logger.warn(`Stream still truncated after ${config.streamInterrupted.maxRetries} resume attempts. Giving up — the connection may still be down after the wake. Will not retry until it clears.`);
     } catch (err) {
       consecutiveErrors++;
       await logger.error(`Monitor tick error: ${err.message}`).catch(() => {});
