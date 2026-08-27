@@ -16,14 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude Code builds — and enters the existing hours-scale usage-wait. Previously
   `rate_limit` markers were written and immediately discarded, leaving detection entirely
   dependent on the scraper's tail window — a race that could strand a session with no
-  interactive limit banner for hours (#50). Two follow-ups from review: (1) the wait now
+  interactive limit banner for hours (#50). Follow-ups from review: (1) the wait now
   tracks that it came from a transcript-resolved marker (`viaUsageEvent`) and, while that's
   set, an absent banner in the tail is no longer read as "resolved" — previously the retry
   at expiry was skipped entirely (`!isRateLimited` short-circuited straight to
   user-continued), and stale working-shaped scrollback (an unrelated old deploy log) could
   tear the wait down mid-countdown; (2) an unresolved marker is no longer consumed before a
   transcript record has had a chance to flush — it's left in place for a later tick,
-  bounded by the marker's own staleness window rather than cleared on the first miss.
+  bounded by the marker's own staleness window rather than cleared on the first miss;
+  (3) `transcript_path` is now actually persisted onto the marker — it was being written to
+  the pane-keyed event file, dropping the very field the cwd-vs-launch-dir fix depends on,
+  so that fallback was dead code in production until now; (4) the "couldn't resolve a reset
+  time" warning is latched to once per marker instead of once per poll tick, so a marker
+  that stays unresolved for its whole staleness window no longer produces dozens of
+  identical log lines.
 
 ## [0.7.3] - 2026-08-16
 

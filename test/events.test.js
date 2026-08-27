@@ -2,10 +2,14 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   isRetryableError, isUsageLimitError, writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
 } from '../src/events.js';
+import { readLatestUsageLimitLine } from '../src/transcript.js';
+
+const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
 describe('isRetryableError', () => {
   it('accepts the transient-overload classes', () => {
@@ -65,6 +69,36 @@ describe('StopFailure event markers', () => {
     await writeStopFailureEvent('%6', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj' }, dir);
     const ev = await readStopFailureEvent('%6', 60_000, dir);
     assert.equal(ev.cwd, '/home/u/proj');
+  });
+
+  it('round-trips transcript_path from the hook envelope (the field readLatestUsageLimitLine prefers over cwd/session_id reconstruction)', async () => {
+    await writeStopFailureEvent('%10', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj', transcript_path: '/home/u/.claude/projects/-home-u-proj/abc.jsonl' }, dir);
+    const ev = await readStopFailureEvent('%10', 60_000, dir);
+    assert.equal(ev.transcript_path, '/home/u/.claude/projects/-home-u-proj/abc.jsonl');
+  });
+
+  it('defaults transcript_path to null when absent', async () => {
+    await writeStopFailureEvent('%11', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj' }, dir);
+    const ev = await readStopFailureEvent('%11', 60_000, dir);
+    assert.equal(ev.transcript_path, null);
+  });
+
+  // End-to-end regression (Aug 26 review): a marker built by hand with transcript_path set
+  // (as transcript.test.js does) proves nothing about the real pipeline — writeStopFailureEvent
+  // was silently dropping the hook payload's transcript_path, so the cwd-vs-launch-dir fix
+  // never reached production. This drives the full write -> read -> resolve chain with a
+  // deliberately wrong cwd/session_id, so only transcript_path can make it resolve.
+  it('carries transcript_path through the full write -> read -> resolve chain even when cwd/session_id are wrong', async () => {
+    const fixture = join(FIXTURES_DIR, 'transcript-rate-limit-record.jsonl');
+    await writeStopFailureEvent('%12', {
+      error: 'rate_limit',
+      session_id: 'wrong-session',
+      cwd: '/nonexistent/wrong-dir',
+      transcript_path: fixture,
+    }, dir);
+    const ev = await readStopFailureEvent('%12', 60_000, dir);
+    const line = await readLatestUsageLimitLine(ev);
+    assert.match(line, /resets Aug 21 at 3pm/);
   });
 
   it('defaults cwd to null when absent', async () => {

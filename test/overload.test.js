@@ -596,6 +596,9 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
       assert.equal(r, 'usage-limit-unresolved');
       assert.equal(s.status, 'monitoring'); // untouched — scraper stays the safety net
       assert.equal(t._cleared, false);      // NOT consumed — left for a later tick to retry
+      // Identifies the marker for the loop's log-latch (startMonitor logs this once per
+      // marker, not once per poll tick — see monitor.js).
+      assert.equal(s._unresolvedMarkerTs, rateLimitEv.ts);
       assert.equal(t._sent.length, 0);
     });
 

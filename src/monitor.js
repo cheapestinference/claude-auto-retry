@@ -530,6 +530,9 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
         // Left in place, the next tick(s) get another shot at it — bounded by the marker's
         // own eventMaxAgeMs staleness check in readStopFailureEvent, not by clearing here.
         state._ignoredEventError = ev.error;
+        // Identifies which marker this unresolved read belongs to, so the loop's logger can
+        // latch its warning (log once per marker, not once per poll tick — see startMonitor).
+        state._unresolvedMarkerTs = ev.ts ?? null;
         return 'usage-limit-unresolved';
       }
       // Consume-side guard: trust no writer. The hook entry in settings.json freezes the
@@ -644,6 +647,13 @@ export async function startMonitor(pane, pid) {
   };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
+  // Latches the 'usage-limit-unresolved' warning to once per marker instead of once per poll
+  // tick: with a 5s poll and the 120s default eventMaxAgeSeconds, an unresolved marker would
+  // otherwise log ~24 identical lines before it's either resolved or aged out. Lives outside
+  // `loop` (not re-declared per call) since `loop` is reused across ticks via recursive
+  // setTimeout below, not re-created.
+  let lastLoggedUnresolvedMarkerTs = null;
+
   const loop = async () => {
     try {
       const result = await processOneTick(state, tmuxAdapter, pane, config, isAlive);
@@ -697,7 +707,10 @@ export async function startMonitor(pane, pid) {
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
       if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable, non-usage-limit error="${state._ignoredEventError}".`);
-      if (result === 'usage-limit-unresolved') await logger.warn('Received a rate_limit StopFailure marker but could not resolve a reset time from the pane or transcript. Leaving it to the scraper.');
+      if (result === 'usage-limit-unresolved' && state._unresolvedMarkerTs !== lastLoggedUnresolvedMarkerTs) {
+        lastLoggedUnresolvedMarkerTs = state._unresolvedMarkerTs;
+        await logger.warn('Received a rate_limit StopFailure marker but could not resolve a reset time from the pane or transcript. Leaving it to the scraper.');
+      }
       if (result === 'overload-detected') {
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
         const m = state._overloadMatch;

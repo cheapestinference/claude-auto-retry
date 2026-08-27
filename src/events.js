@@ -69,6 +69,11 @@ export async function writeStopFailureEvent(paneKey, payload, dir = EVENTS_DIR) 
     pane: String(paneKey), error,
     session_id: payload?.session_id ?? null,
     cwd: payload?.cwd ?? null,
+    // The hook envelope's own resolved transcript path — preferred by transcript.js over
+    // reconstructing cwd/session_id, since a session's cwd can drift from its launch dir
+    // (see src/transcript.js). Was dropped here entirely until the Aug 26 review caught it,
+    // which made that preference dead code in production.
+    transcript_path: payload?.transcript_path ?? null,
     ts: Date.now(),
   });
   await writeFile(tmp, body);
