@@ -2,10 +2,14 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
-  isRetryableError, writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
+  isRetryableError, isUsageLimitError, writeStopFailureEvent, readStopFailureEvent, clearStopFailureEvent,
 } from '../src/events.js';
+import { readLatestUsageLimitLine } from '../src/transcript.js';
+
+const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
 
 describe('isRetryableError', () => {
   it('accepts the transient-overload classes', () => {
@@ -22,6 +26,19 @@ describe('isRetryableError', () => {
   it('rejects permanent / unknown classes', () => {
     for (const e of ['authentication_failed', 'billing_error', 'invalid_request', '', undefined, null, 42]) {
       assert.equal(isRetryableError(e), false, String(e));
+    }
+  });
+});
+
+describe('isUsageLimitError', () => {
+  it('accepts rate_limit (case-insensitive)', () => {
+    for (const e of ['rate_limit', 'RATE_LIMIT']) {
+      assert.equal(isUsageLimitError(e), true, e);
+    }
+  });
+  it('rejects the overload classes and permanent/unknown classes', () => {
+    for (const e of ['overloaded', 'server_error', 'authentication_failed', '', undefined, null, 42]) {
+      assert.equal(isUsageLimitError(e), false, String(e));
     }
   });
 });
@@ -46,6 +63,48 @@ describe('StopFailure event markers', () => {
     assert.equal(ev.pane, '%2');
     assert.equal(ev.session_id, 'abc');
     assert.equal(typeof ev.ts, 'number');
+  });
+
+  it('round-trips the cwd from the hook envelope (needed to resolve the transcript for a rate_limit marker)', async () => {
+    await writeStopFailureEvent('%6', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj' }, dir);
+    const ev = await readStopFailureEvent('%6', 60_000, dir);
+    assert.equal(ev.cwd, '/home/u/proj');
+  });
+
+  it('round-trips transcript_path from the hook envelope (the field readLatestUsageLimitLine prefers over cwd/session_id reconstruction)', async () => {
+    await writeStopFailureEvent('%10', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj', transcript_path: '/home/u/.claude/projects/-home-u-proj/abc.jsonl' }, dir);
+    const ev = await readStopFailureEvent('%10', 60_000, dir);
+    assert.equal(ev.transcript_path, '/home/u/.claude/projects/-home-u-proj/abc.jsonl');
+  });
+
+  it('defaults transcript_path to null when absent', async () => {
+    await writeStopFailureEvent('%11', { error: 'rate_limit', session_id: 'abc', cwd: '/home/u/proj' }, dir);
+    const ev = await readStopFailureEvent('%11', 60_000, dir);
+    assert.equal(ev.transcript_path, null);
+  });
+
+  // End-to-end regression (Aug 26 review): a marker built by hand with transcript_path set
+  // (as transcript.test.js does) proves nothing about the real pipeline — writeStopFailureEvent
+  // was silently dropping the hook payload's transcript_path, so the cwd-vs-launch-dir fix
+  // never reached production. This drives the full write -> read -> resolve chain with a
+  // deliberately wrong cwd/session_id, so only transcript_path can make it resolve.
+  it('carries transcript_path through the full write -> read -> resolve chain even when cwd/session_id are wrong', async () => {
+    const fixture = join(FIXTURES_DIR, 'transcript-rate-limit-record.jsonl');
+    await writeStopFailureEvent('%12', {
+      error: 'rate_limit',
+      session_id: 'wrong-session',
+      cwd: '/nonexistent/wrong-dir',
+      transcript_path: fixture,
+    }, dir);
+    const ev = await readStopFailureEvent('%12', 60_000, dir);
+    const line = await readLatestUsageLimitLine(ev);
+    assert.match(line, /resets Aug 21 at 3pm/);
+  });
+
+  it('defaults cwd to null when absent', async () => {
+    await writeStopFailureEvent('%8', { error: 'overloaded' }, dir);
+    const ev = await readStopFailureEvent('%8', 60_000, dir);
+    assert.equal(ev.cwd, null);
   });
 
   it('sanitizes the pane id into the filename, prefixed by a socket key', async () => {

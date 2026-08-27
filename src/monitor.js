@@ -3,8 +3,9 @@ import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
 import { createLogger } from './logger.js';
-import { readStopFailureEvent, clearStopFailureEvent, isRetryableError } from './events.js';
+import { readStopFailureEvent, clearStopFailureEvent, isRetryableError, isUsageLimitError } from './events.js';
 import { writeStatus, clearStatus, sweepStaleStatus } from './status-file.js';
+import { readLatestUsageLimitLine } from './transcript.js';
 
 const DEFAULT_FOREGROUND_COMMANDS = ['node', 'claude', 'npx', 'tsx', 'bun', 'deno'];
 const SHELL_COMMANDS = ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh'];
@@ -30,6 +31,11 @@ export function createMonitorState() {
     // viaEvent marks the current backoff window as event-triggered (edge: one send per
     // failure). The scraper stays active alongside the event path — see the tick logic.
     viaEvent: false,
+    // viaUsageEvent marks a usage-wait entered off a transcript-resolved rate_limit marker
+    // rather than a live banner scrape. See enterUsageWait and the 'waiting' branch: while
+    // set, the absence of a banner in the tail must not read as "resolved" (that absence is
+    // the entire reason the transcript fallback exists).
+    viaUsageEvent: false,
     // Safeguard/AUP false-positive retry sub-state (bounded, seconds-scale).
     safeguardAttempts: 0, safeguardWaitUntil: 0,
     // Interrupted-stream resume sub-state (suspend/connection truncation; same shape).
@@ -111,7 +117,7 @@ function usageWaitUntil(stripped, config) {
 // `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
 // the menu path, where a re-rendered /rate-limit-options menu means the session hit the
 // limit again rather than continuing the old episode.
-function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
+function enterUsageWait(state, stripped, config, { fresh = false, viaUsageEvent = false } = {}) {
   const { message, parsed, until } = usageWaitUntil(stripped, config);
   state.lastRateLimitMessage = message;
   state.waitUntil = until;
@@ -122,6 +128,7 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
   // of the ~600 dead re-derivations a 5h wait would otherwise run.
   state._waitIsFallback = !parsed;
   state._gaveUp = false;
+  state.viaUsageEvent = viaUsageEvent;
   if (fresh) state.attempts = 0;
   return 'waiting';
 }
@@ -245,7 +252,22 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // through to 'retried'/'user-continued' would otherwise leave the message set for the
     // next plain 'waiting' tick to log as a spurious fresh detection.
     const correctedMessage = correctUsageWait(state, stripped, config);
-    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+    // viaUsageEvent: this wait was entered off a transcript-resolved marker, meaning the
+    // scrape found no banner at marker time — the whole reason the fallback exists (#50).
+    // While set, an absent banner in the tail is the EXPECTED steady state, not evidence of
+    // resolution: resumedAfterLimit's no-banner path degrades to plain isWorking(), which
+    // matches any working-shaped scrollback (e.g. a stale "Retrying in 5s · attempt 3/10"
+    // from an unrelated old deploy log) and would tear the wait down before it ever sent a
+    // retry, or — worse — the `!bannerInTail` check below would call it "resolved" the very
+    // first tick without ever reaching sendKeys. Once a real banner DOES render (a later
+    // submission re-hits the limit, or the scraper simply catches up), normal resumed
+    // detection off it applies exactly as before.
+    const bannerInTail = isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
+    const resumed = (state.viaUsageEvent && !bannerInTail)
+      ? false
+      : resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES);
+
+    if (Date.now() < state.waitUntil && !resumed) {
       if (!correctedMessage) return 'waiting';
       state.lastRateLimitMessage = correctedMessage;
       return 'wait-corrected';
@@ -257,10 +279,13 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // message every poll (up to maxRetries) while the limit banner lingers in the
     // captured scrollback after a successful resume — spamming an actively-working
     // session (and a banner re-printed by another process keeps it "rate-limited" the
-    // whole time). Resumed ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+    // whole time). Resumed ⇒ the session continued; never inject into it. A missing banner
+    // only counts as "cleared" when this wait was NOT entered via the event path — see the
+    // viaUsageEvent note above for why that check is unsafe here.
+    const exitWait = bannerInTail ? resumed : (!state.viaUsageEvent || resumed);
+    if (exitWait) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
-      state._waitIsFallback = false;
+      state._waitIsFallback = false; state.viaUsageEvent = false;
       return 'user-continued';
     }
 
@@ -551,6 +576,28 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   if (overload && overload.enabled && tmuxAdapter.readEvent) {
     const ev = await tmuxAdapter.readEvent();
     if (ev) {
+      // rate_limit is the session/usage limit (hours-scale), never the overload backoff
+      // above. The live pane scrape a few lines up already gets first shot at the banner
+      // (it ran on this same capture, "at marker time"); reaching here means it missed —
+      // fall back to the transcript the marker's session_id points at. Best-effort: if
+      // the transcript can't resolve a message either, leave state untouched and let the
+      // scraper keep trying on later ticks (see resolveUsageLimitLine's own guarding).
+      if (isUsageLimitError(ev.error)) {
+        const line = tmuxAdapter.resolveUsageLimitLine ? await tmuxAdapter.resolveUsageLimitLine(ev) : null;
+        if (line) {
+          await tmuxAdapter.clearEvent();
+          return enterUsageWait(state, line, config, { viaUsageEvent: true });
+        }
+        // Don't consume the marker on an unresolved read: the transcript record can flush
+        // a beat after the hook fires, so this tick missing it doesn't mean it never will.
+        // Left in place, the next tick(s) get another shot at it — bounded by the marker's
+        // own eventMaxAgeMs staleness check in readStopFailureEvent, not by clearing here.
+        state._ignoredEventError = ev.error;
+        // Identifies which marker this unresolved read belongs to, so the loop's logger can
+        // latch its warning (log once per marker, not once per poll tick — see startMonitor).
+        state._unresolvedMarkerTs = ev.ts ?? null;
+        return 'usage-limit-unresolved';
+      }
       // Consume-side guard: trust no writer. The hook entry in settings.json freezes the
       // cli.js path + matcher at install time, so an OLDER hook binary (whose matcher and
       // RETRYABLE set still include rate_limit) can keep writing markers after an upgrade.
@@ -704,8 +751,19 @@ export async function startMonitor(pane, pid) {
     // so this is a direct read — no session-id resolution needed.
     readEvent: () => readStopFailureEvent(pane, eventMaxAgeMs),
     clearEvent: () => clearStopFailureEvent(pane),
+    // rate_limit marker fallback: resolve the reset-time message from the transcript the
+    // marker points at — transcript_path preferred, cwd/session_id as fallback (see
+    // src/transcript.js).
+    resolveUsageLimitLine: (ev) => readLatestUsageLimitLine(ev),
   };
   const isAlive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+  // Latches the 'usage-limit-unresolved' warning to once per marker instead of once per poll
+  // tick: with a 5s poll and the 120s default eventMaxAgeSeconds, an unresolved marker would
+  // otherwise log ~24 identical lines before it's either resolved or aged out. Lives outside
+  // `loop` (not re-declared per call) since `loop` is reused across ticks via recursive
+  // setTimeout below, not re-created.
+  let lastLoggedUnresolvedMarkerTs = null;
 
   const loop = async () => {
     try {
@@ -761,7 +819,11 @@ export async function startMonitor(pane, pid) {
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');
       if (result === 'max-retries') await logger.warn(`Max retries (${config.maxRetries}) reached. Monitor still active but will not send further retries until rate limit clears.`);
       if (result === 'skipped-not-claude') await logger.warn(`Foreground is "${state._lastForeground}", not Claude. Skipping send-keys. (Add to foregroundCommands in ~/.claude-auto-retry.json if this is wrong)`);
-      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable error="${state._ignoredEventError}". If this is "rate_limit", an outdated hook is installed — re-run "claude-auto-retry install-hook".`);
+      if (result === 'event-ignored') await logger.warn(`Ignored StopFailure marker with non-retryable, non-usage-limit error="${state._ignoredEventError}".`);
+      if (result === 'usage-limit-unresolved' && state._unresolvedMarkerTs !== lastLoggedUnresolvedMarkerTs) {
+        lastLoggedUnresolvedMarkerTs = state._unresolvedMarkerTs;
+        await logger.warn('Received a rate_limit StopFailure marker but could not resolve a reset time from the pane or transcript. Leaving it to the scraper.');
+      }
       if (result === 'overload-detected') {
         const secs = Math.round((state.overloadWaitUntil - Date.now()) / 1000);
         const m = state._overloadMatch;

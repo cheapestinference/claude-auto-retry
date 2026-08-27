@@ -8,6 +8,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Event-driven usage-limit detection.** A `rate_limit` StopFailure marker is now
+  consumed by the monitor: if the live pane scrape at marker time already caught the
+  banner, nothing changes; otherwise it falls back to the reset-time message in the
+  session's transcript — resolved via the marker's `transcript_path` (the standard hook
+  envelope field), with `cwd`/`session_id` reconstruction only as a fallback for older
+  Claude Code builds — and enters the existing hours-scale usage-wait. Previously
+  `rate_limit` markers were written and immediately discarded, leaving detection entirely
+  dependent on the scraper's tail window — a race that could strand a session with no
+  interactive limit banner for hours (#50). Follow-ups from review: (1) the wait now
+  tracks that it came from a transcript-resolved marker (`viaUsageEvent`) and, while that's
+  set, an absent banner in the tail is no longer read as "resolved" — previously the retry
+  at expiry was skipped entirely (`!isRateLimited` short-circuited straight to
+  user-continued), and stale working-shaped scrollback (an unrelated old deploy log) could
+  tear the wait down mid-countdown; (2) an unresolved marker is no longer consumed before a
+  transcript record has had a chance to flush — it's left in place for a later tick,
+  bounded by the marker's own staleness window rather than cleared on the first miss;
+  (3) `transcript_path` is now actually persisted onto the marker — it was being written to
+  the pane-keyed event file, dropping the very field the cwd-vs-launch-dir fix depends on,
+  so that fallback was dead code in production until now; (4) the "couldn't resolve a reset
+  time" warning is latched to once per marker instead of once per poll tick, so a marker
+  that stays unresolved for its whole staleness window no longer produces dozens of
+  identical log lines.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both

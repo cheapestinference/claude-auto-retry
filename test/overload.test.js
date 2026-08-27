@@ -9,7 +9,7 @@ import {
 
 const PATS = DEFAULT_OVERLOAD.patterns;
 
-function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = true, event = null) {
+function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = true, event = null, resolveUsageLimitLine = async () => null) {
   const t = {
     _sent: [], _event: event, _cleared: false,
     capturePane: async () => paneContent,
@@ -18,6 +18,7 @@ function mockTmux(paneContent = '', paneCommand = 'node', claudeForeground = tru
     isClaudeForeground: async () => claudeForeground,
     readEvent: async () => t._event,
     clearEvent: async () => { t._event = null; t._cleared = true; },
+    resolveUsageLimitLine,
   };
   return t;
 }
@@ -546,12 +547,13 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
     assert.equal(s.overloadAttempts, 1);     // give-up budget not reset
   });
 
-  it('consumes-and-ignores a non-retryable marker (e.g. rate_limit from an outdated hook)', async () => {
+  it('consumes-and-ignores a non-retryable, non-usage-limit marker (e.g. billing_error)', async () => {
     // Regression: settings.json freezes the hook's cli.js path + matcher at install time,
-    // so an old hook binary can still write rate_limit markers after an upgrade. The
-    // daemon must not enter overload backoff off it — just consume it so it can't re-fire
-    // (the scraper still gets its normal shot on the next tick).
-    for (const bad of ['rate_limit', 'billing_error', 'invalid_request']) {
+    // so an old hook binary can still write markers for classes this version no longer
+    // acts on. The daemon must not enter overload backoff off it — just consume it so it
+    // can't re-fire (the scraper still gets its normal shot on the next tick). rate_limit
+    // is deliberately excluded from this list — it now has its own route, tested below.
+    for (const bad of ['billing_error', 'invalid_request']) {
       const t = mockTmux('idle prompt', 'node', true, { error: bad, ts: Date.now() });
       const s = createMonitorState();
       const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
@@ -560,6 +562,53 @@ describe('processOneTick — StopFailure event path (authoritative)', () => {
       assert.equal(t._cleared, true, bad);     // consumed so it can't re-fire
       assert.equal(t._sent.length, 0, bad);
     }
+  });
+
+  // --- rate_limit marker: routed to the usage-wait path, not the overload backoff. The
+  //     live pane scrape (top of the monitoring tick, above) already gets first shot at
+  //     the banner; these markers arrive when that scrape has already missed it. ---
+  describe('rate_limit marker (usage-limit event route)', () => {
+    const rateLimitEv = { error: 'rate_limit', session_id: 'sess-1', cwd: '/home/u/proj', ts: Date.now() };
+
+    it('falls back to the transcript when the live pane shows no banner', async () => {
+      const resolveUsageLimitLine = async (ev) => {
+        assert.equal(ev.session_id, 'sess-1');
+        return "You've hit your session limit · resets 2:10am (Australia/Melbourne)";
+      };
+      const t = mockTmux('idle prompt, no banner here', 'node', true, rateLimitEv, resolveUsageLimitLine);
+      const s = createMonitorState();
+      const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
+      assert.equal(r, 'waiting');
+      assert.equal(s.status, 'waiting');
+      assert.equal(t._cleared, true); // marker consumed — a message DID resolve
+      assert.equal(s.viaUsageEvent, true);  // see monitor.test.js for the wait-lifecycle coverage
+      assert.match(s.lastRateLimitMessage, /resets 2:10am/);
+    });
+
+    it('degrades to a no-op WITHOUT consuming the marker when the transcript cannot resolve a message either', async () => {
+      // Regression (PR #56 review): the transcript record can flush a beat after the hook
+      // fires. Consuming the marker on an unresolved read would drop the retry permanently
+      // if the record hadn't landed yet — leave it in place so later ticks get another shot,
+      // bounded by the marker's own eventMaxAge staleness rather than by clearing here.
+      const t = mockTmux('idle prompt', 'node', true, rateLimitEv, async () => null);
+      const s = createMonitorState();
+      const r = await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
+      assert.equal(r, 'usage-limit-unresolved');
+      assert.equal(s.status, 'monitoring'); // untouched — scraper stays the safety net
+      assert.equal(t._cleared, false);      // NOT consumed — left for a later tick to retry
+      // Identifies the marker for the loop's log-latch (startMonitor logs this once per
+      // marker, not once per poll tick — see monitor.js).
+      assert.equal(s._unresolvedMarkerTs, rateLimitEv.ts);
+      assert.equal(t._sent.length, 0);
+    });
+
+    it('never enters the overload backoff for a rate_limit marker', async () => {
+      const t = mockTmux('idle prompt', 'node', true, rateLimitEv, async () => 'resets 2:10am (UTC)');
+      const s = createMonitorState();
+      await processOneTick(s, t, '%0', cfg(), () => true, NO_JITTER);
+      assert.notEqual(s.status, 'overload');
+      assert.equal(s.viaEvent, false);
+    });
   });
 
   // --- Regression: the overload scraper must stay a live safety net AFTER the hook has

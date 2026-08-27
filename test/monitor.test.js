@@ -477,6 +477,45 @@ describe('processOneTick', () => {
     assert.equal(t._sent.length, 0);
   });
 
+  // --- viaUsageEvent (PR #56 review): a wait entered off a transcript-resolved rate_limit
+  //     marker never had a banner rendered at marker time — that's the whole reason the
+  //     transcript fallback exists (#50). The banner staying absent for the rest of the
+  //     wait is the EXPECTED case, not evidence of resolution, so it must not be read as
+  //     "user continued" the way a genuinely bannerless recovery would be. ---
+  it('viaUsageEvent + no banner at expiry: sends the retry instead of giving up as user-continued', async () => {
+    const t = mockTmux('idle prompt, no banner ever rendered here\n❯ ');
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.viaUsageEvent = true;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(t._sent.length, 1);
+    assert.equal(s.status, 'waiting');   // still counting down to the next send, not exited
+  });
+  it('viaUsageEvent + stale working-shaped scrollback (no banner) does not tear the wait down mid-countdown', async () => {
+    // Unrelated old deploy log sitting in scrollback, not a live retry — resumedAfterLimit's
+    // no-banner fallback degrades to plain isWorking(), which this text WOULD match if the
+    // viaUsageEvent guard were not in place.
+    const t = mockTmux('  ⎿  deploying… Retrying in 5s (attempt 3/10)...\n❯ ');
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + 60_000; s.viaUsageEvent = true;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(t._sent.length, 0);
+    assert.equal(s.status, 'waiting');
+  });
+  it('viaUsageEvent clears once a real banner renders and is confirmed resumed', async () => {
+    const pane = [
+      "You've hit your session limit · resets 3pm (UTC)",
+      '● Continuing with the refactor…',
+      '✻ Thinking… (esc to interrupt)',
+    ].join('\n');
+    const t = mockTmux(pane);
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.viaUsageEvent = true;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    assert.equal(t._sent.length, 0);
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s.viaUsageEvent, false);
+  });
+
   // Counter-repro: a genuinely limited, IDLE session whose scrollback contains a finished
   // agent's "Backgrounded agent" transcript line MUST still be retried — the transcript
   // notice is not working state.
