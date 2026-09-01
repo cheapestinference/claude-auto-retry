@@ -8,6 +8,9 @@ import {
   resolveLaunchCommand, buildTmuxInnerCmd, buildNewSessionArgs,
   writeEnvSnapshot, writeEnvSnapshotSafe, applyEnvSnapshot, consumeEnvSnapshot, sweepStaleEnvSnapshots,
   chooseLaunchMode, isTransientTmuxServerError, retryTransientServerError,
+  extractSessionName, normalizeSessionName, defaultSessionName,
+  buildAttachSessionArgs, buildFirstWindowTarget, isDuplicateSessionError,
+  sessionNameIgnoredWarning, duplicateSessionMessage,
 } from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
@@ -305,5 +308,160 @@ describe('chooseLaunchMode (#69 escape hatch)', () => {
   });
   it('CLAUDE_AUTO_RETRY_NO_TMUX=1 skips session creation (Zellij/screen users opting out)', () => {
     assert.equal(chooseLaunchMode([], { CLAUDE_AUTO_RETRY_NO_TMUX: '1' }), 'interactive');
+  });
+});
+
+// --- Naming the auto-created session (--tmux-session) ---
+// The session name was hardcoded to `claude-retry-<pid>-<ms>`, which is unique but
+// unfindable: `tmux ls` gives you a wall of timestamps and nothing says which checkout
+// each one is. A name can now be given per launch (`--tmux-session api`) or per shell
+// (CLAUDE_AUTO_RETRY_SESSION_NAME), and the flag is consumed by the launcher — it must
+// never reach `claude`, which would reject it as an unknown option.
+describe('session naming: extractSessionName', () => {
+  it('leaves argv untouched and yields no name when neither flag nor env is set', () => {
+    assert.deepEqual(extractSessionName(['-c', 'hello'], {}),
+      { name: null, changed: false, fromFlag: false, rest: ['-c', 'hello'] });
+  });
+
+  it('takes the space-separated form and strips both tokens from the claude argv', () => {
+    assert.deepEqual(extractSessionName(['--model', 'opus', '--tmux-session', 'api', '-c'], {}),
+      { name: 'api', changed: false, fromFlag: true, rest: ['--model', 'opus', '-c'] });
+  });
+
+  it('takes the --tmux-session=name form', () => {
+    assert.deepEqual(extractSessionName(['--tmux-session=api', '-c'], {}),
+      { name: 'api', changed: false, fromFlag: true, rest: ['-c'] });
+  });
+
+  it('falls back to CLAUDE_AUTO_RETRY_SESSION_NAME', () => {
+    assert.deepEqual(extractSessionName([], { CLAUDE_AUTO_RETRY_SESSION_NAME: 'api' }),
+      { name: 'api', changed: false, fromFlag: false, rest: [] });
+  });
+
+  it('lets the flag override the env var', () => {
+    const r = extractSessionName(['--tmux-session', 'flag'], { CLAUDE_AUTO_RETRY_SESSION_NAME: 'env' });
+    assert.equal(r.name, 'flag');
+    assert.equal(r.fromFlag, true);
+  });
+
+  it('treats a blank env var as unset', () => {
+    assert.equal(extractSessionName([], { CLAUDE_AUTO_RETRY_SESSION_NAME: '   ' }).name, null);
+  });
+
+  it('lets the last flag win when given twice', () => {
+    assert.deepEqual(extractSessionName(['--tmux-session', 'a', '--tmux-session=b'], {}),
+      { name: 'b', changed: false, fromFlag: true, rest: [] });
+  });
+
+  it('rejects a trailing flag with no value instead of eating the next claude arg', () => {
+    assert.throws(() => extractSessionName(['-c', '--tmux-session'], {}), /requires a value/);
+  });
+
+  it('rejects an empty value', () => {
+    assert.throws(() => extractSessionName(['--tmux-session='], {}), /empty/i);
+    assert.throws(() => extractSessionName(['--tmux-session', '  '], {}), /empty/i);
+  });
+
+  // tmux rewrites '.' and ':' — its target separators — to '_' when creating a session
+  // (verified on 3.5a). Normalizing up front keeps the name we hold equal to the name
+  // tmux actually made, so the later `-t` targets resolve.
+  it('normalizes the target separators tmux would rewrite, and says so', () => {
+    assert.deepEqual(extractSessionName(['--tmux-session', 'work.api:2'], {}),
+      { name: 'work_api_2', changed: true, fromFlag: true, rest: [] });
+  });
+});
+
+describe('session naming: normalizeSessionName', () => {
+  it('passes an ordinary name through unchanged', () => {
+    assert.deepEqual(normalizeSessionName('api-worker'), { name: 'api-worker', changed: false });
+  });
+
+  it('trims surrounding whitespace without flagging a change', () => {
+    assert.deepEqual(normalizeSessionName('  api  '), { name: 'api', changed: false });
+  });
+
+  it('replaces every "." and ":" with "_"', () => {
+    assert.deepEqual(normalizeSessionName('a.b:c'), { name: 'a_b_c', changed: true });
+  });
+
+  it('rejects a whitespace-only name', () => {
+    assert.throws(() => normalizeSessionName('\t '), /empty/i);
+  });
+
+  it('rejects control characters, which produce an unattachable session', () => {
+    assert.throws(() => normalizeSessionName('a\nb'), /control character/i);
+  });
+});
+
+describe('session naming: defaults and tmux targeting', () => {
+  it('keeps the unique pid+timestamp name when the user names nothing', () => {
+    assert.equal(defaultSessionName(4321, 1700000000000), 'claude-retry-4321-1700000000000');
+  });
+
+  // A user-chosen name can be a prefix of another session's ("api" vs "api-worker"), and
+  // tmux's default target matching is by prefix — it would attach to the wrong session.
+  // '=' forces an exact-name match.
+  it('attaches by exact name, not tmux prefix matching', () => {
+    assert.deepEqual(buildAttachSessionArgs('api'), ['attach-session', '-t', '=api']);
+  });
+
+  it('targets the first window by exact session name', () => {
+    assert.deepEqual(buildFirstWindowTarget('api'), '=api:0');
+  });
+});
+
+describe('session naming: duplicate-name failure', () => {
+  it('recognizes tmux\'s duplicate-session refusal', () => {
+    assert.ok(isDuplicateSessionError({ stderr: 'duplicate session: api\n' }));
+    assert.ok(isDuplicateSessionError(new Error('Command failed: tmux new-session\nduplicate session: api\n')));
+  });
+
+  it('does not mistake other failures for a duplicate name', () => {
+    assert.ok(!isDuplicateSessionError({ stderr: 'server exited unexpectedly' }));
+    assert.ok(!isDuplicateSessionError(new Error('spawnSync tmux ENOENT')));
+  });
+
+  // A name collision is permanent — retrying it three times just delays the same error.
+  it('is not treated as a transient server error', () => {
+    assert.ok(!isTransientTmuxServerError({ stderr: 'duplicate session: api' }));
+  });
+});
+
+describe('session naming: when no session is created', () => {
+  it('warns that an explicit --tmux-session is doing nothing', () => {
+    assert.match(sessionNameIgnoredWarning('interactive', true), /--tmux-session/);
+    assert.match(sessionNameIgnoredWarning('print', true), /--tmux-session/);
+  });
+
+  it('stays silent when a session is actually being created', () => {
+    assert.equal(sessionNameIgnoredWarning('tmux-session', true), null);
+  });
+
+  // The env var is set once per shell and rides along on every launch, including the
+  // ones inside an existing session — warning there would be noise on every prompt.
+  it('stays silent for the env var, which is ambient rather than per-launch', () => {
+    assert.equal(sessionNameIgnoredWarning('interactive', false), null);
+  });
+});
+
+describe('session naming: the flag never reaches claude', () => {
+  // The pane re-invokes this launcher with the surviving argv, which then execs claude.
+  // If --tmux-session leaked through, claude would abort on an unknown option — so the
+  // stripping and the inner command have to hold together, not just individually.
+  it('is absent from the command the tmux pane runs', () => {
+    const { rest } = extractSessionName(['--tmux-session', 'api', '--model', 'opus'], {});
+    const cmd = buildTmuxInnerCmd('/path/launcher.js', rest, {});
+    assert.ok(!cmd.includes('--tmux-session'), cmd);
+    assert.ok(!cmd.includes('api'), cmd);
+    assert.ok(cmd.includes("'--model' 'opus'"), cmd);
+  });
+});
+
+describe('session naming: duplicate-name message', () => {
+  it('names the collision and gives a runnable way out of it', () => {
+    const msg = duplicateSessionMessage('api');
+    assert.match(msg, /already exists/);
+    assert.match(msg, /tmux attach -t '=api'/);          // exact-match target, copy-pasteable
+    assert.match(msg, /--tmux-session api-2/);           // and how to launch a second one
   });
 });
