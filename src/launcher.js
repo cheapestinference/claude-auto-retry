@@ -286,6 +286,103 @@ async function launchPrintMode(args) {
   }
 }
 
+// --- Naming the auto-created tmux session ---
+// A generated `claude-retry-<pid>-<ms>` name is unique but opaque: after a few launches
+// `tmux ls` is a wall of timestamps with nothing to say which checkout each one belongs
+// to, so re-attaching means guessing. `--tmux-session <name>` names one launch;
+// CLAUDE_AUTO_RETRY_SESSION_NAME names every launch from a shell (direnv, per-project).
+// The flag is CONSUMED by the launcher — it is ours, not claude's, and claude would
+// reject it as an unknown option.
+export const SESSION_NAME_FLAG = '--tmux-session';
+export const SESSION_NAME_ENV = 'CLAUDE_AUTO_RETRY_SESSION_NAME';
+
+export function defaultSessionName(pid = process.pid, now = Date.now()) {
+  return `claude-retry-${pid}-${now}`;
+}
+
+// tmux reserves '.' and ':' as target separators and silently rewrites them to '_' as it
+// creates the session (verified on 3.5a). Normalize up front so the name we hold IS the
+// name tmux made — otherwise every later `-t <name>` misses the session we just created.
+// Control characters are rejected rather than rewritten: tmux accepts them, but the
+// resulting session name can't be typed back at `tmux attach -t`.
+export function normalizeSessionName(raw) {
+  const trimmed = String(raw).trim();
+  if (!trimmed) throw new Error('tmux session name is empty');
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(trimmed)) {
+    throw new Error(`tmux session name contains a control character: ${JSON.stringify(trimmed)}`);
+  }
+  const name = trimmed.replace(/[.:]/g, '_');
+  return { name, changed: name !== trimmed };
+}
+
+// Pull our flag out of the argv bound for claude. `--tmux-session name` and
+// `--tmux-session=name` are both accepted, the last one wins, and the env var is the
+// fallback. Returns the surviving argv as `rest`.
+export function extractSessionName(args, env = process.env) {
+  const rest = [];
+  let raw = null;
+  let fromFlag = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === SESSION_NAME_FLAG) {
+      if (i + 1 >= args.length) {
+        throw new Error(`${SESSION_NAME_FLAG} requires a value (e.g. ${SESSION_NAME_FLAG} api)`);
+      }
+      raw = args[++i];
+      fromFlag = true;
+    } else if (a.startsWith(`${SESSION_NAME_FLAG}=`)) {
+      raw = a.slice(SESSION_NAME_FLAG.length + 1);
+      fromFlag = true;
+    } else {
+      rest.push(a);
+    }
+  }
+  if (!fromFlag) {
+    raw = (env[SESSION_NAME_ENV] || '').trim();
+    if (!raw) return { name: null, changed: false, fromFlag: false, rest };
+  }
+  const { name, changed } = normalizeSessionName(raw);
+  return { name, changed, fromFlag, rest };
+}
+
+// A chosen name can be a prefix of another session's ("api" vs "api-worker"), and tmux
+// matches targets by prefix by default — it would attach to the wrong session. The '='
+// prefix forces an exact-name match.
+export function buildAttachSessionArgs(name) {
+  return ['attach-session', '-t', `=${name}`];
+}
+
+export function buildFirstWindowTarget(name) {
+  return `=${name}:0`;
+}
+
+// tmux refuses a second session under an existing name. Generated names never collided;
+// a chosen one is the obvious way to trip, so it earns a message that says what to do
+// next instead of a raw tmux error. Permanent, so retryTransientServerError must not
+// treat it as transient — it doesn't: the two patterns are disjoint.
+export function isDuplicateSessionError(err) {
+  const text = [err?.message, err?.stderr].filter(Boolean).map(String).join('\n');
+  return /duplicate session/.test(text);
+}
+
+export function duplicateSessionMessage(name) {
+  return `[claude-auto-retry] A tmux session named '${name}' already exists.\n`
+    + `  Attach to it:   tmux attach -t '=${name}'\n`
+    + `  Or name a new one:   claude ${SESSION_NAME_FLAG} ${name}-2\n`;
+}
+
+// The name only means anything when this launch is the one creating a session. Inside an
+// existing session, or in -p mode, there is nothing to name — say so for the per-launch
+// flag, but stay quiet for the env var, which is ambient and would warn at every prompt.
+export function sessionNameIgnoredWarning(mode, fromFlag) {
+  if (!fromFlag || mode === 'tmux-session') return null;
+  const why = mode === 'print'
+    ? 'print mode (-p) runs claude directly, without a tmux session'
+    : 'this launch reuses the tmux session you are already in';
+  return `[claude-auto-retry] ${SESSION_NAME_FLAG} ignored: ${why}.\n`;
+}
+
 // Session creation carries NO environment: the env crosses via the snapshot file (#68),
 // which also makes the tmux version irrelevant here — `-e` (3.2+) and the inline-export
 // fallback (< 3.2) are both gone, and with them the whole class of "tmux rejects this
@@ -323,8 +420,7 @@ export async function retryTransientServerError(fn, {
   }
 }
 
-async function createTmuxSession(args) {
-  const sessionName = `claude-retry-${process.pid}-${Date.now()}`;
+async function createTmuxSession(args, sessionName = defaultSessionName()) {
   const launcherPath = __filename;
 
   sweepStaleEnvSnapshots();
@@ -344,12 +440,13 @@ async function createTmuxSession(args) {
     // wrapped so an older tmux that rejects these options doesn't fail the whole
     // session creation.
     try {
-      execFileSync('tmux', buildSetWindowOptionArgs(`${sessionName}:0`, 'mouse', 'on'));
-      execFileSync('tmux', buildSetWindowOptionArgs(`${sessionName}:0`, 'mode-keys', 'vi'));
+      const win = buildFirstWindowTarget(sessionName);
+      execFileSync('tmux', buildSetWindowOptionArgs(win, 'mouse', 'on'));
+      execFileSync('tmux', buildSetWindowOptionArgs(win, 'mode-keys', 'vi'));
     } catch { /* old tmux without these options — skip silently */ }
 
     // Attach to the session
-    const attachResult = spawn('tmux', ['attach-session', '-t', sessionName], {
+    const attachResult = spawn('tmux', buildAttachSessionArgs(sessionName), {
       stdio: 'inherit',
     });
 
@@ -361,6 +458,10 @@ async function createTmuxSession(args) {
     // The inner launcher never ran, so nothing will consume the snapshot — remove it now
     // rather than leaving a secrets file for the 24h sweep.
     if (envFile) { try { unlinkSync(envFile); } catch { /* already gone */ } }
+    if (isDuplicateSessionError(err)) {
+      process.stderr.write(duplicateSessionMessage(sessionName));
+      return 1;
+    }
     process.stderr.write(`[claude-auto-retry] Failed to create tmux session: ${err.message}\n`);
     return 1;
   }
@@ -381,20 +482,35 @@ export function chooseLaunchMode(args, env = process.env) {
 // exported helpers (e.g. resolveLaunchCommand under test).
 const isDirectRun = process.argv[1]?.endsWith('launcher.js');
 if (isDirectRun) {
-  const args = process.argv.slice(2);
-
   // Inside the pane: adopt the launching shell's environment before anything reads it
-  // (config load, claude spawn, monitor fork all inherit from here).
+  // (config load, claude spawn, monitor fork all inherit from here) — including
+  // CLAUDE_AUTO_RETRY_SESSION_NAME, which extractSessionName reads next.
   consumeEnvSnapshot(process.env);
 
+  let named;
+  try {
+    named = extractSessionName(process.argv.slice(2));
+  } catch (err) {
+    process.stderr.write(`[claude-auto-retry] ${err.message}\n`);
+    process.exit(2);
+  }
+  const args = named.rest;   // our flag stripped; everything else belongs to claude
+
   const mode = chooseLaunchMode(args);
+  const ignored = sessionNameIgnoredWarning(mode, named.fromFlag);
+  if (ignored) process.stderr.write(ignored);
+  if (named.changed && mode === 'tmux-session') {
+    process.stderr.write(`[claude-auto-retry] tmux reserves '.' and ':' in session names; `
+      + `using '${named.name}'.\n`);
+  }
+
   let exitCode;
   if (mode === 'print') {
     exitCode = await launchPrintMode(args);
   } else if (mode === 'interactive') {
     exitCode = await launchInteractive(args);
   } else {
-    exitCode = await createTmuxSession(args);
+    exitCode = await createTmuxSession(args, named.name || defaultSessionName());
   }
 
   process.exit(exitCode);

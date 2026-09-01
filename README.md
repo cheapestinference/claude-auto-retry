@@ -215,6 +215,32 @@ export CLAUDE_AUTO_RETRY_LAUNCH_WRAPPER="caffeinate -i"
 Generic (not macOS-specific — e.g. `nice`, `chrt …` work too). Unset or blank spawns
 `claude` directly, unchanged.
 
+### Naming the session
+
+The auto-created session is named `claude-retry-<pid>-<timestamp>` by default — unique,
+but `tmux ls` after a few launches is a wall of timestamps with nothing to say which
+checkout each one belongs to. Name it instead:
+
+```sh
+claude --tmux-session api          # this launch
+tmux attach -t '=api'              # …and back to it later
+
+export CLAUDE_AUTO_RETRY_SESSION_NAME=api   # every launch from this shell (direnv, etc.)
+```
+
+`--tmux-session` is consumed by the launcher and never reaches `claude`; the flag wins
+over the env var. Notes:
+
+- **`.` and `:` are rewritten to `_`** — tmux reserves them as target separators, so
+  `--tmux-session my.api` creates `my_api` (the launcher tells you when it does this).
+- **A name already in use is an error**, not a second session: the launcher prints the
+  `tmux attach` command for the existing one and exits non-zero. Unnamed launches keep
+  their generated name and never collide.
+- **Attaching uses an exact-name target** (`-t '=api'`), so a session whose name is a
+  prefix of another's (`api` vs `api-worker`) still resolves to the right one.
+- Inside an existing tmux session, or in `--print` mode, no session is created and the
+  flag does nothing — the launcher says so rather than ignoring it silently.
+
 ### Session lifetime
 
 When `claude` exits **cleanly** inside the auto-created tmux session, the session now

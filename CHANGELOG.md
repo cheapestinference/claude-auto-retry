@@ -22,6 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset already in the past means the limit cleared — retry now rather than a year later.
 
 ### Added
+- **The auto-created tmux session can be named.** It was hardcoded to
+  `claude-retry-<pid>-<timestamp>`: unique, but opaque — `tmux ls` after a few launches is
+  a wall of timestamps and nothing says which checkout each session belongs to, so
+  re-attaching to a specific run meant guessing. `claude --tmux-session api` names one
+  launch and `CLAUDE_AUTO_RETRY_SESSION_NAME` names every launch from a shell; the flag
+  wins over the env var and is consumed by the launcher, so it never reaches `claude`
+  (which would reject it as an unknown option). Unnamed launches are unchanged. `.` and
+  `:` are normalized to `_` up front because tmux rewrites its own target separators as it
+  creates the session — without that the name we hold would stop matching the session tmux
+  made, and the follow-up `-t` targets would miss. A name already in use fails with the
+  `tmux attach` command for the existing session rather than a raw tmux error, and attach
+  now uses an exact-name target (`-t '=api'`) so a name that is a prefix of another
+  session's no longer resolves to the wrong one.
+
 - **A session Claude Code winds down near the 5-hour limit is nudged back to work (#78).**
   At ~95% of the window Claude Code injects a checkpoint instruction into the model's
   context and prints "⏺ Approaching your 5-hour usage limit — Claude will wrap up the
