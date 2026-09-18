@@ -1059,3 +1059,34 @@ describe('weekly limit with a calendar-dated reset', () => {
     assert.equal(findRateLimitMessage(pane, [], 12), WEEKLY);
   });
 });
+
+// --- Consumption warning vs. live limit (observed on Claude Code 2.1.275, Team plan) ---
+// The header banner "You've used 91% of your session limit · resets 12:40pm (Europe/Paris)
+// · Run /usage-credits to ask your admin for more" reports consumption BELOW the limit:
+// the session still works. It names no limit as reached, so LIMIT_PATTERNS never matched
+// it — but it carries both signals the /usage-credits backstop keys on (a companion and a
+// nearby reset) and renders in the header with only chrome below, so the backstop read it
+// as a live block and parked a working session until the reset.
+describe('usage percentage warning', () => {
+  const WARNING = "  You've used 91% of your session limit · resets 12:40pm (Europe/Paris) · Run /usage-credits to ask your admin for more";
+  const SEP = '─'.repeat(120);
+
+  it('is not a rate limit', () => {
+    assert.equal(isRateLimited([WARNING, SEP, '❯'].join('\n'), [], 12), false);
+  });
+
+  it('does not suppress a real banner rendered next to it', () => {
+    const real = "You've hit your session limit · resets 2am (Europe/Zurich) · run /usage-credits to finish";
+    assert.equal(isRateLimited([WARNING, real, SEP, '❯'].join('\n'), [], 12), true);
+  });
+
+  it('leaves the genuine banner path untouched', () => {
+    const real = "Claude usage limit reached · resets 3pm";
+    assert.equal(isRateLimited([real, SEP, '❯'].join('\n'), [], 12), true);
+  });
+
+  it('still honours a custom pattern the user wrote for the percentage footer', () => {
+    // Custom patterns test the raw tail by design: the user owns that tradeoff.
+    assert.equal(isRateLimited([WARNING, SEP, '❯'].join('\n'), [/used \d+% of/i], 12), true);
+  });
+});

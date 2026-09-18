@@ -22,6 +22,17 @@ export function stripAnsi(text) {
 // doubles as furniture in the chrome allowlist and as the high-confidence live-limit
 // backstop signal below — one source of truth for both.
 const USAGE_CREDITS = /\/usage-credits\b/i;
+// A CONSUMPTION warning, printed while the session still works:
+//   "You've used 91% of your session limit · resets 12:40pm (Europe/Paris) ·
+//    Run /usage-credits to ask your admin for more"
+// (observed live on Claude Code 2.1.275, Team plan). It names no limit as reached, so
+// LIMIT_PATTERNS correctly ignores it — but it carries BOTH signals the /usage-credits
+// backstop keys on, a companion and a reset time, and it renders in the header where
+// everything below it is chrome. The backstop therefore read a working session as a
+// blocked one and parked it until the reset. Masking the line stops it vouching for
+// either half of that pair; a genuine banner ("…hit your session limit · resets 2am")
+// still fires through the main LIMIT_PATTERNS path, which this does not touch.
+const USAGE_PERCENT_WARNING = /used\s+\d{1,3}\s*%\s+of\s+(?:your|the)\b/i;
 // …but only the SIGNAL may match the hint anywhere on the line. As FURNITURE it has to
 // LEAD its line, because a banner can name the hint INLINE — "You've hit your session
 // limit · resets 5:20pm · run /usage-credits to finish" is one line, not two, and the
@@ -476,7 +487,7 @@ export function isRateLimited(text, customPatterns = [], tailLines = 0) {
   if (tailLines > 0) {
     // The companion must not itself be tool echo (a grep for "/usage-credits" quoting
     // banner text would otherwise satisfy both the companion and the nearby-reset check).
-    const fullMask = toolEchoMask(all);
+    const fullMask = toolEchoMask(all).map((masked, i) => masked || USAGE_PERCENT_WARNING.test(all[i]));
     const companionIdx = all.findLastIndex((l, i) => !fullMask[i] && USAGE_CREDITS.test(l));
     // Require a RESET line nearby — NOT just a LIMIT line. A live limit banner always prints
     // its reset time next to the companion; a session merely *explaining* usage limits ("when
