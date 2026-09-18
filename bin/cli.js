@@ -212,7 +212,10 @@ function stopFailureHookEntry() {
   // owned by the scraper usage path, not a seconds-scale event retry (see src/events.js).
   return {
     matcher: 'overloaded|server_error',
-    hooks: [{ type: 'command', command: `node ${__filename} ${HOOK_MARKER}`, timeout: 5 }],
+    // Quoted: __filename is a real filesystem path, and an unquoted one splits on its
+    // first space — the hook then runs a truncated command, writes no marker, and the
+    // event channel silently degrades to the scraper.
+    hooks: [{ type: 'command', command: `node "${__filename}" ${HOOK_MARKER}`, timeout: 5 }],
   };
 }
 
