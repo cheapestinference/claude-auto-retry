@@ -792,6 +792,31 @@ export function nearLimitWrapUpMatch(text) {
   return null;
 }
 
+// Scrolled-up transcript. Claude Code's fullscreen TUI scrolls its own transcript (mouse
+// wheel, PgUp) inside the alternate screen — tmux copy-mode is never involved — and while
+// scrolled it pins an indicator just above the input box: "Jump to bottom (click) ↓" or,
+// overlaid on the last visible row, "Jump to bottom: fn+↓ to scroll" — and once output
+// arrives below the view, "1 new message (click) ↓". The pane then shows
+// HISTORY: the live tail (a limit banner, an idle prompt after a truncated turn) is off
+// screen, so every detector reads a stale view — a session that hit its limit while the
+// user had scrolled up was never retried. Returns the visible transcript down to the
+// indicator (a fingerprint the monitor uses to tell an idle scroll from an active one), or
+// null when the view is live. The indicator is drawn well in from the margin, so it trails a wide
+// run of padding, and every variant carries a ↓ later on its row; requiring both (and
+// confining the search to the bottom rows) keeps the phrase quoted in a sentence, or a
+// padded "3 new messages" in a table, from matching.
+const SCROLLED_UP_INDICATOR = /\s{10,}(?:Jump to bottom|\d+ new messages?)\b.*↓/;
+const SCROLLED_UP_BOTTOM_ROWS = 20;   // input box + footer + a task widget, with margin
+export function scrolledUpView(text) {
+  const all = stripAnsi(text).split('\n');
+  let end = all.length;
+  while (end > 0 && !all[end - 1].trim()) end--;
+  for (let i = end - 1; i >= Math.max(0, end - SCROLLED_UP_BOTTOM_ROWS); i--) {
+    if (SCROLLED_UP_INDICATOR.test(all[i])) return all.slice(0, i + 1).join('\n');
+  }
+  return null;
+}
+
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
 // live working footer pushed up by a tall chrome stack below it (task widget + input box
 // + footer) would be invisible to a raw last-N tail while the chrome-aware detectors still

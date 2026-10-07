@@ -198,6 +198,7 @@ Optional. Create `~/.claude-auto-retry.json`:
 | `fallbackWaitHours` | `5` | Wait time if reset time can't be parsed |
 | `retryMessage` | `"Continue where..."` | Message sent to Claude on retry |
 | `customPatterns` | `[]` | Additional regex patterns to detect rate limits |
+| `scrolledUpGraceSeconds` | `600` | If Claude Code's transcript is scrolled up ("Jump to bottom" / "N new messages" showing), the live screen is hidden and nothing can be detected — once the view sits untouched this long, it is jumped back to the bottom (Ctrl+End; a draft in the input box is kept) |
 
 All fields optional. Invalid values fall back to defaults automatically.
 

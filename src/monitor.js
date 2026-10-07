@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, scrolledUpView, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -174,6 +174,24 @@ function enterOverload(state, overload, rand) {
   return 'overload-detected';
 }
 
+// Jump a scrolled-up transcript back to the bottom once it has sat untouched for the grace
+// period. Any change to the visible view (the user still scrolling) restarts the clock, so
+// someone reading is left alone. Ctrl+End scrolls Claude Code's transcript to the bottom
+// without touching a draft in the input box (End only moves the input cursor).
+async function holdOrUnscroll(state, tmuxAdapter, pane, config, view) {
+  const now = Date.now();
+  const fresh = !state._scrolledUp;
+  if (fresh || state._scrolledUp.view !== view) state._scrolledUp = { view, since: now };
+  if (now - state._scrolledUp.since < config.scrolledUpGraceSeconds * 1000) {
+    return fresh ? 'scrolled-up' : 'scrolled-up-holding';
+  }
+  const fg = await checkForeground(tmuxAdapter, pane, config);
+  if (!fg.ok) return 'scrolled-up-holding';
+  await tmuxAdapter.sendKey(pane, 'C-End');
+  state._scrolledUp = null;
+  return 'scrolled-down';
+}
+
 export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, rand = Math.random) {
   if (!isAlive()) return 'exit';
 
@@ -185,6 +203,13 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   const raw = await tmuxAdapter.capturePane(pane, 120);
   const stripped = stripAnsi(raw);
   const overload = config.overload;
+
+  // A scrolled-up transcript shows history, not the live tail — nothing below can be read
+  // from it, and a stale banner in view must not drive a retry. Stand down until it is back
+  // at the bottom.
+  const scrolledView = scrolledUpView(stripped);
+  if (scrolledView !== null) return holdOrUnscroll(state, tmuxAdapter, pane, config, scrolledView);
+  state._scrolledUp = null;
 
   // Handle the interactive /rate-limit-options menu before any other logic. A bare
   // Enter here confirms the highlighted default, which on some Claude Code versions
@@ -756,6 +781,8 @@ export async function startMonitor(pane, pid) {
       if (result === 'wait-corrected') {
         await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${secs}s.`);
       }
+      if (result === 'scrolled-up') await logger.info(`Transcript is scrolled up — the live tail is off screen. Jumping back to the bottom once it sits untouched for ${config.scrolledUpGraceSeconds}s.`);
+      if (result === 'scrolled-down') await logger.info('Scrolled the idle transcript back to the bottom.');
       if (result === 'menu-unreadable') await logger.warn('Rate-limit options menu detected but its layout could not be read; not pressing Enter (would risk confirming "Upgrade your plan"). Will recheck.');
       if (result === 'retried') await logger.info(`Sent retry message (attempt ${state.attempts})`);
       if (result === 'user-continued') await logger.info('User already continued. Attempt counter reset.');

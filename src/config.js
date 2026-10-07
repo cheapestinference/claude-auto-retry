@@ -119,6 +119,12 @@ export const DEFAULT_CONFIG = {
   pollIntervalSeconds: 5,
   marginSeconds: 60,
   fallbackWaitHours: 5,
+  // How long Claude Code's transcript must sit scrolled up, untouched, before the monitor
+  // jumps it back to the bottom. While scrolled the live tail is off screen and nothing can
+  // be detected; the grace keeps us from yanking the view out from under someone reading.
+  // Ten minutes stays well inside the time parser's one-hour just-reset window, so a limit
+  // that reset while the view was held is still retried promptly once it is scrolled down.
+  scrolledUpGraceSeconds: 600,
   retryMessage: 'Continue where you left off. The previous attempt was rate limited.',
   customPatterns: [],
   overload: DEFAULT_OVERLOAD,
@@ -210,6 +216,7 @@ function validate(cfg) {
   cfg.pollIntervalSeconds = validNumber(cfg.pollIntervalSeconds, 1, DEFAULT_CONFIG.pollIntervalSeconds);
   cfg.marginSeconds = validNumber(cfg.marginSeconds, 0, DEFAULT_CONFIG.marginSeconds);
   cfg.fallbackWaitHours = validNumber(cfg.fallbackWaitHours, 0.1, DEFAULT_CONFIG.fallbackWaitHours);
+  cfg.scrolledUpGraceSeconds = validNumber(cfg.scrolledUpGraceSeconds, 0, DEFAULT_CONFIG.scrolledUpGraceSeconds);
   if (typeof cfg.retryMessage !== 'string' || !cfg.retryMessage) {
     cfg.retryMessage = DEFAULT_CONFIG.retryMessage;
   }
