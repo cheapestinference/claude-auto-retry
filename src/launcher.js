@@ -216,6 +216,11 @@ export function readStdinWithGrace(stream, graceMs) {
   });
 }
 
+// Resolves once `data` has been handed to the OS (or the write failed, e.g. EPIPE).
+export function writeFlushed(stream, data) {
+  return new Promise((resolve) => stream.write(data, () => resolve()));
+}
+
 async function launchPrintMode(args) {
   const claudeBin = findClaudeBinary();
   const config = await loadConfig();
@@ -253,7 +258,9 @@ async function launchPrintMode(args) {
       claude.on('error', (err) => {
         resolve({ code: 1, stdout: '', stderr: err.message });
       });
-      claude.on('exit', (code) => {
+      // 'close', not 'exit': 'exit' can fire while claude's stdout pipe still holds
+      // unread output, which would then be lost.
+      claude.on('close', (code) => {
         resolve({
           code: code ?? 1,
           stdout: Buffer.concat(chunks).toString(),
@@ -265,9 +272,12 @@ async function launchPrintMode(args) {
     const combined = result.stdout + result.stderr;
 
     if (!isRateLimited(combined, config.customPatterns)) {
-      // Clean exit — write buffered output
-      process.stdout.write(result.stdout);
-      process.stderr.write(result.stderr);
+      // Clean exit — write buffered output, and wait until it is flushed: the caller
+      // ends with process.exit(), which drops pending pipe writes (64 KiB survive).
+      await Promise.all([
+        writeFlushed(process.stdout, result.stdout),
+        writeFlushed(process.stderr, result.stderr),
+      ]);
       return result.code;
     }
 

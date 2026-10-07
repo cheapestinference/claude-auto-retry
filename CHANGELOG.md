@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Print mode no longer cuts claude's output off at 64 KiB.** `claude-auto-retry -p` buffers
+  claude's stdout and stderr and writes them once claude is done. When stdout is a pipe (a
+  harness reading `--output-format stream-json` or `json`), everything past the first 64 KiB
+  was lost, along with the final result event. Two races caused it: the launcher resolved on
+  the child's `exit`, which can fire before claude's stdout pipe has drained, and it called
+  `process.exit()` straight after `process.stdout.write()`, which drops writes still queued
+  (pipe writes are asynchronous on macOS). It now resolves on `close` and waits for both
+  writes to flush before exiting.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
