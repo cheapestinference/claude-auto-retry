@@ -3,6 +3,11 @@
 // "Aug" and "August" resolve; the day may carry an ordinal suffix or a trailing comma.
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
 const RESET_TIME_REGEX = /resets?\s+(?:on\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]+)\))?/i;
+// A banner that names the 5-hour window ("You've hit your session limit", "5-hour limit
+// reached") and no longer one. A dual render that also names the weekly window is left
+// untagged: its first reset may be either window's.
+const FIVE_HOUR_WINDOW_REGEX = /\bsession limit\b|\b5-hour\b/i;
+const LONGER_WINDOW_REGEX = /\bweekly\b|\bmonthly\b/i;
 const RELATIVE_TIME_REGEX = /(?:try again|wait|resets?\s+in)[:\s]\s*(?:for\s+)?(?:in\s+)?(\d+)\s*(hours?|minutes?|mins?|h|m)\b/i;
 
 export function parseResetTime(text) {
@@ -26,12 +31,14 @@ export function parseResetTime(text) {
     if (hour > 23 || hour < 0 || minute > 59) return null;
 
     const ambiguous = !ampm && hour >= 1 && hour <= 12;
+    const window = FIVE_HOUR_WINDOW_REGEX.test(text) && !LONGER_WINDOW_REGEX.test(text)
+      ? { window: '5h' } : {};
     if (monthIdx !== -1) {
       const day = parseInt(absMatch[2], 10);
       if (day < 1 || day > 31) return null;
-      return { hour, minute, timezone, ambiguous, month: monthIdx, day };
+      return { hour, minute, timezone, ambiguous, month: monthIdx, day, ...window };
     }
-    return { hour, minute, timezone, ambiguous };
+    return { hour, minute, timezone, ambiguous, ...window };
   }
 
   // Try relative time: "try again in 5 minutes" / "wait 2 hours"
@@ -61,6 +68,14 @@ export function parseResetTime(text) {
 // the monitor an hour EARLY with the banner still live (burning maxRetries into a limited
 // session, then giving up before the real reset); spring-forward over-waited an hour.
 const RESET_GRACE_MS = 60 * 60 * 1000; // 1 hour
+
+// A 5-hour window resets at most five hours after its banner appears, so a longer wait
+// computed from one means the banner was read after its reset passed (a monitor that
+// missed it, restarted, or settled late): the next occurrence of the clock time is the
+// wrong one, and the limit has already cleared. An hour of slack over the window keeps a
+// rounded reset time from tripping the cap.
+const FIVE_HOUR_CAP_MS = 6 * 3600 * 1000;
+const capFiveHour = (parsed, ms) => (parsed.window === '5h' && ms > FIVE_HOUR_CAP_MS ? 0 : ms);
 
 export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, now = new Date()) {
   if (!parsed) return (fallbackHours * 3600 + marginSeconds) * 1000;
@@ -199,7 +214,7 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
         : getTargetTimestamp(earlyHour, parsed.minute, 1) - now.getTime();
     }
 
-    return Math.max(0, target) + marginSeconds * 1000;
+    return capFiveHour(parsed, Math.max(0, target)) + marginSeconds * 1000;
   }
 
   // Roll a stale (past-grace) reset to TOMORROW's occurrence, date-anchored (see the
@@ -209,5 +224,5 @@ export function calculateWaitMs(parsed, marginSeconds = 60, fallbackHours = 5, n
     : today > -RESET_GRACE_MS ? 0
     : getTargetTimestamp(parsed.hour, parsed.minute, 1) - now.getTime();
 
-  return diff + marginSeconds * 1000;
+  return capFiveHour(parsed, diff) + marginSeconds * 1000;
 }

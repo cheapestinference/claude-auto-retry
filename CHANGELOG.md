@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A session-limit banner read after its reset no longer waits for the next day.** A
+  5-hour limit resets at most five hours after its banner appears, but the banner only
+  gives a clock time ("resets 12:50am"), so a monitor that first read it late took the
+  NEXT occurrence. Observed live: an unattended session hit its session limit at 22:02,
+  the monitor first read the banner at 10:12 the next morning, and waited 14.6 hours for
+  a limit that had cleared at 00:50. A reset parsed from a banner naming the 5-hour window
+  ("session limit", "5-hour limit") that lands more than six hours away now means the
+  limit already cleared, and the retry goes out at once. Weekly, monthly and unnamed
+  windows, and a dual render naming both windows, are unchanged.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
