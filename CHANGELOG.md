@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A banner above a named session's input box is no longer pushed out of view.** When a
+  session has a name (`--name`, `/rename`), Claude Code draws it into the rule above the
+  input box ("──────── agent-3 ─"). That rule wasn't recognized as chrome, so the content
+  tail ended at the input box. In an observed incident, a Remote Control "account changed"
+  notice followed by ten blank rows then pushed a live weekly-limit banner out of the
+  12-line window, and the monitor dropped its five-day wait as "user continued" without
+  sending anything. The session sat idle and nothing re-detected the limit. The named rule
+  is now chrome.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
@@ -22,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset already in the past means the limit cleared — retry now rather than a year later.
 
 ### Added
+- **A usage-limit wait retries when the signed-in account changes.** Account switchers
+  (claude-swap's `cswap auto`, a manual `/login`) move the machine to another account, and a
+  running Claude Code picks the new credential up. The monitor now reads the account from
+  `.claude.json` (`oauthAccount`; `CLAUDE_CONFIG_DIR` is honoured, and it re-parses only when
+  the file changes). If the account differs from the one that hit the limit, it sends the
+  retry message 45 seconds after the change instead of sitting out the old account's reset;
+  the delay outlasts Claude Code's ~30-second macOS Keychain cache, which would otherwise
+  send the retry on the old, limited credential. A limit seen within two minutes of a
+  switch is attributed to the previous account, so a switcher that acts on the same
+  exhaustion (a ~100% threshold) and lands before the banner is read still gets the retry.
+  If the new account is limited too, its own banner starts a fresh wait rather than a run of
+  blind retries. A session already working, or with something other than Claude in the
+  foreground, is not typed into.
 - **A session Claude Code winds down near the 5-hour limit is nudged back to work (#78).**
   At ~95% of the window Claude Code injects a checkpoint instruction into the model's
   context and prints "⏺ Approaching your 5-hour usage limit — Claude will wrap up the

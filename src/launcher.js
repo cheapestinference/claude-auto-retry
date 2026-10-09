@@ -9,6 +9,7 @@ import { getCurrentPane, buildSetWindowOptionArgs } from './tmux.js';
 import { isRateLimited } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { loadConfig } from './config.js';
+import { createAccountReader, ACCOUNT_SETTLE_MS } from './account.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -216,9 +217,42 @@ export function readStdinWithGrace(stream, graceMs) {
   });
 }
 
+// How often a print-mode wait looks at the signed-in account. The read is one stat unless
+// the file changed, and the waits it shortens run for hours.
+export const ACCOUNT_POLL_MS = 5_000;
+
+// Sleep out a print-mode limit wait, ending early if the machine moves to another account.
+// The limit belonged to `limitedAccount` (the one signed in when the attempt started), and
+// every retry is a fresh claude process that reads the credential anew, so once an account
+// switcher (claude-swap, a manual /login) has moved off it there is nothing left to wait for.
+// The change must hold for ACCOUNT_SETTLE_MS first, as in the interactive monitor: a switch
+// rewrites .claude.json and the credential separately, and one switched back counts for
+// nothing. An unreadable account (file mid-write, logged out) changes nothing; with no
+// account known at launch (API key) this is a plain sleep. Resolves 'switched' or 'reset'.
+export async function waitForResetOrSwitch(waitMs, limitedAccount, {
+  readAccount = () => null,
+  pollMs = ACCOUNT_POLL_MS,
+  settleMs = ACCOUNT_SETTLE_MS,
+  now = Date.now,
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  const end = now() + waitMs;
+  let other = null, since = 0;
+  while (now() < end) {
+    await sleep(Math.min(pollMs, end - now()));
+    const account = limitedAccount ? readAccount() : null;
+    if (!account) continue;
+    if (account === limitedAccount) { other = null; continue; }
+    if (account !== other) { other = account; since = now(); }
+    if (now() - since >= settleMs) return 'switched';
+  }
+  return 'reset';
+}
+
 async function launchPrintMode(args) {
   const claudeBin = findClaudeBinary();
   const config = await loadConfig();
+  const readAccount = createAccountReader();
   let retries = 0;
 
   // A piped prompt (`cat doc.md | claude -p`) is read to EOF by the FIRST attempt when
@@ -236,6 +270,8 @@ async function launchPrintMode(args) {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
+    // Whose limit a banner from this attempt is: the account signed in as it starts.
+    const startAccount = readAccount();
     const result = await new Promise((resolve) => {
       const chunks = [];
       const errChunks = [];
@@ -282,7 +318,9 @@ async function launchPrintMode(args) {
     const waitMs = calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
 
     process.stderr.write(`[claude-auto-retry] Rate limited. Waiting ${Math.round(waitMs / 1000)}s before retry ${retries}/${config.maxRetries}...\n`);
-    await new Promise((r) => setTimeout(r, waitMs));
+    if (await waitForResetOrSwitch(waitMs, startAccount, { readAccount }) === 'switched') {
+      process.stderr.write(`[claude-auto-retry] Signed-in account changed during the wait; retrying now (retry ${retries}/${config.maxRetries})\n`);
+    }
   }
 }
 

@@ -79,6 +79,11 @@ const isWorkingLine = (l) => WORKING_PATTERNS.some((p) => p.test(l));
 const CHROME_LINE = [
   /^\s*$/,                                          // blank
   /^[\s─│╭╮╰╯┌┐└┘├┤┬┴┼▏▕|]+$/,                       // box-drawing / rules
+  /^\s*─{8,} [^│─\s][^│]*? ─+\s*$/,                  // input-box rule carrying the session's name
+                                                     // ("──────── agent-3 ─", set by --name or /rename):
+                                                     // unrecognized, it ended the content tail at the
+                                                     // input box, and a notice + blank rows above it
+                                                     // pushed a live banner out of the window
   /^\s*│\s*[>❯][^│]*│\s*$/,                          // boxed input row ("│ > … │"): anchored to
                                                      // the PROMPT GLYPH, not "anything between two
                                                      // bars" — a bare │…│ rule matches unicode-
