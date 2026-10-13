@@ -110,9 +110,11 @@ function usageWaitUntil(stripped, config) {
 
 // `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
 // the menu path, where a re-rendered /rate-limit-options menu means the session hit the
-// limit again rather than continuing the old episode.
-function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
-  const { message, parsed, until } = usageWaitUntil(stripped, config);
+// limit again rather than continuing the old episode, and by an expired wait whose banner
+// still names a reset ahead (the wait is re-armed for it). `wait` takes a usageWaitUntil
+// result the caller already computed.
+function enterUsageWait(state, stripped, config, { fresh = false, wait = usageWaitUntil(stripped, config) } = {}) {
+  const { message, parsed, until } = wait;
   state.lastRateLimitMessage = message;
   state.waitUntil = until;
   state.status = 'waiting';
@@ -143,15 +145,24 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
 //     menu re-rendered once attempts > 0 committed a fallback that could never be
 //     corrected — the very bug being fixed, surviving on that path) and left every
 //     correctly-derived wait exposed to re-parsing for its whole duration.
-//   - SHORTEN ONLY, by a margin (EPSILON). Never let the pane push a wake-up out.
+//   - SHORTEN ONLY, by a margin (EPSILON), unless the banner carries a DATE. A clock time
+//     alone can be a stale banner rolled to tomorrow, so it never pushes a wake-up out.
+//     A dated reset ("resets Oct 15 at 9pm") is an absolute instant: a weekly limit's
+//     banner said three days while the fallback said 5h, and the monitor woke into the
+//     live limit and spent every retry on it.
 //   - Success clears the latch: the wait now comes from a real reset time, so it stops
 //     being a candidate and the correction logs exactly once.
 const WAIT_CORRECTION_EPSILON_MS = 1000;
+// Pause after sending the retry message, for Claude Code to answer it.
+const RETRY_COOLDOWN_MS = 30_000;
 function correctUsageWait(state, stripped, config) {
   if (!state._waitIsFallback) return null;
   if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) return null;
   const { message, parsed, until } = usageWaitUntil(stripped, config);
-  if (!parsed || until > state.waitUntil - WAIT_CORRECTION_EPSILON_MS) return null;
+  if (!parsed) return null;
+  const dated = parsed.month !== undefined;
+  const change = dated ? Math.abs(until - state.waitUntil) : state.waitUntil - until;
+  if (change < WAIT_CORRECTION_EPSILON_MS) return null;
   state.waitUntil = until;
   state._waitIsFallback = false;
   return message;
@@ -264,6 +275,16 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       return 'user-continued';
     }
 
+    // Still limited, and the live banner names a reset that is still ahead: the standing
+    // wait was a guess (the fallback), or our retry was answered by a fresh banner. Wait
+    // for that reset instead of spending retries into a limit that cannot clear before
+    // it — and re-arm a monitor that had given up, so it retries when the reset comes.
+    // A reset already passed parses to the margin alone and falls through to the retry.
+    const live = usageWaitUntil(stripped, config);
+    if (live.parsed && live.until - Date.now() > config.marginSeconds * 1000 + RETRY_COOLDOWN_MS) {
+      return enterUsageWait(state, stripped, config, { fresh: true, wait: live });
+    }
+
     if (state.attempts >= config.maxRetries) {
       // Stay in 'waiting' to avoid re-detecting the stale rate limit on the next tick
       // and creating an infinite max-retries loop. This IS a give-up (no further
@@ -295,7 +316,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // Increment attempts and set cooldown BEFORE sendKeys so that a failure
     // (e.g. pane destroyed) still consumes a retry and avoids tight-loop errors.
     state.attempts++;
-    state.waitUntil = Date.now() + 30_000;
+    state.waitUntil = Date.now() + RETRY_COOLDOWN_MS;
     state._waitIsFallback = false;   // send cooldown, deliberately unrelated to the reset time
     await tmuxAdapter.sendKeys(pane, config.retryMessage);
     return 'retried';
