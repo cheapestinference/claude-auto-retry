@@ -102,7 +102,9 @@ describe('processOneTick', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => false), 'exit');
   });
   it('sends retry when wait expired and rate limit visible', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)');
+    // The reset arrived a minute ago, as at any real wait expiry. A fixed "resets 3pm" is
+    // still ahead for part of the day, and a banner naming a reset ahead re-arms the wait.
+    const t = mockTmux(bannerAt(-60_000));
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
@@ -292,7 +294,74 @@ describe('processOneTick', () => {
     assert.ok(secs > 3600 && secs < 3 * 3600, `expected ~2h, got ${Math.round(secs)}s`);
   });
 
-  it('never LENGTHENS the wait from the banner', async () => {
+  // --- A weekly limit reached through the menu: the fallback guessed 5h, the banner said
+  //     three days. The correction only shortened, so the monitor woke at 5h, sent
+  //     maxRetries "continue"s 30s apart into the live limit (each answered by the same
+  //     banner), then gave up for good — and so never retried at the real reset either. ---
+  function datedBannerAt(msFromNow, zone = 'UTC') {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(Date.now() + msFromNow));
+    const p = (type) => parts.find(x => x.type === type).value;
+    const h = Number(p('hour'));
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return `You've hit your weekly limit · resets ${p('month')} ${p('day')} at ${h12}:${p('minute')}${h >= 12 ? 'pm' : 'am'} (${zone})`;
+  }
+  const DAY_MS = 24 * 3600_000;
+  // Seconds from now to the wake-up, against an expected offset with a few minutes' slack.
+  const assertWaitNear = (s, ms) => {
+    const delta = s.waitUntil - Date.now();
+    assert.ok(Math.abs(delta - ms) < 5 * 60_000, `expected ~${Math.round(ms / 1000)}s, got ${Math.round(delta / 1000)}s`);
+  };
+
+  it('lengthens a menu fallback to a dated reset days away', async () => {
+    const t = mockTmux(MENU_NO_RESET);
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    t.capturePane = async () => datedBannerAt(3 * DAY_MS);
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
+    assertWaitNear(s, 3 * DAY_MS);
+    assert.equal(s._waitIsFallback, false);
+    assert.equal(t._sent.length, 0);
+  });
+
+  it('waits for a still-future reset instead of re-sending into it', async () => {
+    // The incident's screen after the first retry: our "continue", answered by the banner.
+    const t = mockTmux([
+      '❯ continue',
+      `  ⎿  ${datedBannerAt(2 * DAY_MS)}`,
+      '     /upgrade to increase your usage limit.',
+    ].join('\n'));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.attempts = 1; s.waitUntil = Date.now() - 1;   // send cooldown over
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(t._sent.length, 0);
+    assertWaitNear(s, 2 * DAY_MS);
+    assert.equal(s.attempts, 0);                  // the real reset gets a full set of retries
+  });
+
+  it('an expired wait whose banner reset is still ahead waits again, not sends', async () => {
+    const t = mockTmux(bannerAt(3 * 3600_000));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(t._sent.length, 0);
+    assertWaitNear(s, 3 * 3600_000);
+  });
+
+  it('a given-up monitor re-arms for a reset that is still ahead', async () => {
+    const t = mockTmux(datedBannerAt(2 * DAY_MS));
+    const s = createMonitorState();
+    s.status = 'waiting'; s.attempts = DEFAULT_CONFIG.maxRetries; s._gaveUp = true;
+    s.waitUntil = Date.now() - 1;                 // give-up backoff over
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s._gaveUp, false);
+    assert.equal(s.attempts, 0);
+    assertWaitNear(s, 2 * DAY_MS);
+  });
+
+  it('never LENGTHENS the wait from an undated banner', async () => {
+    // A clock time alone can be a stale banner rolled to tomorrow; only a date is absolute.
     const t = mockTmux(bannerAt(2 * 3600_000));
     const s = createMonitorState();
     s.status = 'waiting'; s.waitUntil = Date.now() + 30 * 60_000; s._waitIsFallback = true;
@@ -448,7 +517,7 @@ describe('processOneTick', () => {
   const F1_PANE = [
     '  ⎿  deploying… Retrying in 5s (attempt 2/3)...',
     '  ⎿  deploy failed after 3 attempts',
-    "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+    bannerAt(-60_000), '❯ ',
   ].join('\n');
   it('F1 pane at wait expiry: the stale transcript must not suppress the retry send', async () => {
     const t = mockTmux(F1_PANE);
@@ -484,7 +553,7 @@ describe('processOneTick', () => {
     const pane = [
       '● Task(build the parser)', '  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)',
       '● Done. The parser passes all 14 tests.',
-      "You've hit your session limit · resets 3pm (UTC)", '❯ ',
+      bannerAt(-60_000), '❯ ',
     ].join('\n');
     const t = mockTmux(pane);
     const s = createMonitorState();
@@ -595,14 +664,14 @@ describe('processOneTick', () => {
     assert.equal(s.status, 'waiting');
   });
   it('retries when Claude process is in foreground (fixes macOS zsh issue)', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'zsh', true);
+    const t = mockTmux(bannerAt(-60_000), 'zsh', true);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
     assert.equal(t._sent.length, 1);
   });
   it('falls back to pane_current_command when process state is false', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'vim', false);
+    const t = mockTmux(bannerAt(-60_000), 'vim', false);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
@@ -610,7 +679,7 @@ describe('processOneTick', () => {
     assert.equal(s._lastForeground, 'vim');
   });
   it('falls back to pane_current_command when process state is null', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'vim', null);
+    const t = mockTmux(bannerAt(-60_000), 'vim', null);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'skipped-not-claude');
@@ -618,7 +687,7 @@ describe('processOneTick', () => {
     assert.equal(s._lastForeground, 'vim');
   });
   it('accepts custom foregroundCommands in fallback path', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'my-claude-wrapper', null);
+    const t = mockTmux(bannerAt(-60_000), 'my-claude-wrapper', null);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     const config = { ...DEFAULT_CONFIG, foregroundCommands: ['my-claude-wrapper'] };
@@ -626,7 +695,7 @@ describe('processOneTick', () => {
     assert.equal(t._sent.length, 1);
   });
   it('matches npx in fallback path', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)', 'npx', null);
+    const t = mockTmux(bannerAt(-60_000), 'npx', null);
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting';
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
@@ -639,7 +708,7 @@ describe('processOneTick', () => {
     assert.equal(s.attempts, 0);
   });
   it('stops retrying after max attempts and stays in waiting', async () => {
-    const t = mockTmux('5-hour limit reached - resets 3pm (UTC)');
+    const t = mockTmux(bannerAt(-60_000));
     const s = createMonitorState();
     s.waitUntil = Date.now() - 1000; s.status = 'waiting'; s.attempts = 5;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'max-retries');

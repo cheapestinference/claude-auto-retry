@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A wait no longer runs out into a limit whose banner says the reset is still ahead.**
+  Observed: a session hit its weekly limit through the /rate-limit-options menu, which
+  showed no reset time, so the wait fell to the 5-hour fallback. The banner printed next
+  said "resets Oct 15 at 9pm", three days out, but the mid-wait correction only ever
+  shortened a wait. At 5h the monitor sent "continue" five times, 30s apart. Each one was
+  answered with the same banner. Then it gave up, and stayed given up past the real reset.
+  Two changes:
+  - A fallback wait now follows a dated banner in either direction. A dated reset is an
+    absolute instant. A clock time alone can be a stale banner rolled to tomorrow, so it
+    still only shortens.
+  - When a wait (or the 30s pause after a retry) ends and the live banner still names a
+    reset more than 30s ahead, the monitor waits for that reset instead of sending. This
+    starts a fresh retry episode, which also re-arms a monitor that had given up.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
