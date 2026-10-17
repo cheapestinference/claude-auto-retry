@@ -138,16 +138,33 @@ export function buildTmuxInnerCmd(launcherPath, args, env = process.env, envFile
   const escapedArgs = args.map(a => shellEscape(a)).join(' ');
   const shell = env.SHELL || 'bash';
   const envPtr = envFilePath ? `CLAUDE_AUTO_RETRY_ENV_FILE=${shellEscape(envFilePath)} ` : '';
-  const launch = `${envPtr}CLAUDE_AUTO_RETRY_ACTIVE=1 ${shellEscape(process.execPath)} ${escapedLauncher} ${escapedArgs}`;
+  const launch = `${envPtr}CLAUDE_AUTO_RETRY_ACTIVE=1 CLAUDE_AUTO_RETRY_NO_SUSPEND=1 ${shellEscape(process.execPath)} ${escapedLauncher} ${escapedArgs}`;
   if (env.CLAUDE_AUTO_RETRY_KEEP_SHELL) {
     return `${launch}; exec ${shellEscape(shell)}`;
   }
   return `${launch}; rc=$?; [ "$rc" -ne 0 ] && exec ${shellEscape(shell)}; exit "$rc"`;
 }
 
+// Claude Code reads ctrl+z itself (its tty is in raw mode, so `stty susp undef` never
+// applies), then drops raw mode, leaves the alt screen and SIGTSTPs its whole process
+// group, redrawing only on SIGCONT. The launcher is in that group, so with
+// CLAUDE_AUTO_RETRY_NO_SUSPEND set it catches the SIGTSTP (which also keeps the launcher
+// itself running) and continues the group at once: ctrl+z becomes a redraw. The session
+// we create always sets it (buildTmuxInnerCmd): its pane command has no job control, so
+// nothing could `fg` claude, and its group is orphaned, so the kernel discards the stop
+// and claude sat waiting for a SIGCONT that never came — a dead pane.
+export function installNoSuspend(env = process.env, proc = process) {
+  if (!env.CLAUDE_AUTO_RETRY_NO_SUSPEND) return false;
+  proc.on('SIGTSTP', () => {
+    try { proc.kill(0, 'SIGCONT'); } catch {}
+  });
+  return true;
+}
+
 async function launchInteractive(args) {
   const claudeBin = findClaudeBinary();
   const pane = getCurrentPane();
+  installNoSuspend();
 
   // CLAUDE_AUTO_RETRY_PANE is inherited by claude's child processes — notably the
   // StopFailure hook, which writes a pane-keyed event marker the monitor consumes.

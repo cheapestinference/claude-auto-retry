@@ -8,6 +8,7 @@ import {
   resolveLaunchCommand, buildTmuxInnerCmd, buildNewSessionArgs,
   writeEnvSnapshot, writeEnvSnapshotSafe, applyEnvSnapshot, consumeEnvSnapshot, sweepStaleEnvSnapshots,
   chooseLaunchMode, isTransientTmuxServerError, retryTransientServerError,
+  installNoSuspend,
 } from '../src/launcher.js';
 
 describe('resolveLaunchCommand', () => {
@@ -241,6 +242,11 @@ describe('buildTmuxInnerCmd', () => {
     assert.ok(cmd.includes("'/path/launcher.js' '--resume'"));
   });
 
+  it('turns ctrl+z suspend off in the pane, where nothing could fg claude', () => {
+    const cmd = buildTmuxInnerCmd('/path/launcher.js', [], { SHELL: '/bin/zsh' }, null);
+    assert.ok(cmd.includes('CLAUDE_AUTO_RETRY_NO_SUSPEND=1 '), cmd);
+  });
+
   it('omits the pointer when no snapshot could be written', () => {
     const cmd = buildTmuxInnerCmd('/path/launcher.js', [], { SHELL: '/bin/zsh' }, null);
     assert.ok(!cmd.includes('CLAUDE_AUTO_RETRY_ENV_FILE'));
@@ -289,6 +295,33 @@ describe('buildTmuxInnerCmd', () => {
   it('falls back to bash when $SHELL is unset', () => {
     const cmd = buildTmuxInnerCmd('/path/launcher.js', [], {});
     assert.ok(cmd.includes("exec 'bash'"), cmd);
+  });
+});
+
+// Claude Code SIGTSTPs its own process group on ctrl+z and redraws only on SIGCONT. In
+// the session we create the stop is discarded (orphaned group), leaving a dead pane.
+describe('installNoSuspend', () => {
+  function fakeProc() {
+    const handlers = {};
+    const kills = [];
+    return {
+      handlers, kills,
+      on: (sig, fn) => { handlers[sig] = fn; },
+      kill: (pid, sig) => { kills.push([pid, sig]); },
+    };
+  }
+
+  it('does nothing unless CLAUDE_AUTO_RETRY_NO_SUSPEND is set', () => {
+    const proc = fakeProc();
+    assert.equal(installNoSuspend({}, proc), false);
+    assert.deepEqual(proc.handlers, {});
+  });
+
+  it('answers SIGTSTP by continuing the whole process group', () => {
+    const proc = fakeProc();
+    assert.equal(installNoSuspend({ CLAUDE_AUTO_RETRY_NO_SUSPEND: '1' }, proc), true);
+    proc.handlers.SIGTSTP();
+    assert.deepEqual(proc.kills, [[0, 'SIGCONT']]);
   });
 });
 
