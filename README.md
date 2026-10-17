@@ -231,6 +231,16 @@ export CLAUDE_AUTO_RETRY_KEEP_SHELL=1
 export CLAUDE_AUTO_RETRY_NO_TMUX=1
 ```
 
+### Ctrl+Z
+
+Claude Code suspends itself on ctrl+z. In the auto-created tmux session there is no shell
+to `fg` it from, so the launcher resumes it straight away and ctrl+z just redraws the
+screen. Inside your own tmux session ctrl+z suspends as usual. To turn it off there too:
+
+```sh
+export CLAUDE_AUTO_RETRY_NO_SUSPEND=1
+```
+
 ### Environment forwarding
 
 Your full shell environment reaches `claude` inside the tmux session via a `0600`

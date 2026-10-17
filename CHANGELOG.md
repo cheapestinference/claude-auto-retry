@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Ctrl+Z no longer kills the pane of a session the launcher created.** Claude Code
+  handles ctrl+z itself: its tty is in raw mode, so `stty susp undef` never applies. It
+  drops raw mode and SIGTSTPs its whole process group, and redraws only on SIGCONT. In the
+  launcher's tmux session that group is orphaned, so the kernel discards the stop. Claude
+  then sat waiting for a SIGCONT that never came, with no shell to `fg` from. The launcher
+  is in the same group, so it now catches the SIGTSTP and continues the group at once, and
+  ctrl+z becomes a redraw. Inside an existing tmux session ctrl+z still suspends to the
+  shell, unless `CLAUDE_AUTO_RETRY_NO_SUSPEND=1` is set.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
