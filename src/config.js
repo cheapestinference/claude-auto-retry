@@ -202,40 +202,38 @@ function validPatterns(raw, defaults) {
   return pats.length > 0 ? pats : [...defaults];
 }
 
-// Safeguard and streamInterrupted are the same SHAPE of block — a bounded, seconds-scale
-// retry family (patterns + cap + delay + message) — so one validator serves both. Overload
-// keeps its own: it carries a backoff schedule and relaunch knobs this shape has no room for.
-function validateBoundedRetry(raw, defaults) {
+// Per-field validators for the bounded-family blocks below. Each takes the merged value and
+// the block's default for that field and returns the value to keep.
+const BLOCK_FIELD_VALIDATORS = {
+  // Case-insensitive regexes; see validPatterns.
+  patterns: (v, d) => validPatterns(v, d),
+  maxRetries: (v, d) => validNumber(v, 1, d),
+  retryDelaySeconds: (v, d) => validNumber(v, 1, d),
+  retryMessage: (v, d) => (typeof v === 'string' && v ? v : d),
+};
+
+// ONE validator for every bounded-family block, parameterized by the fields that block
+// carries. There used to be three near-copies (bounded retry, message nudge, key nudge) that
+// differed only in which of these fields they checked — the third copy is where the next
+// drift would have landed. Shallow-merged onto the defaults so a partial user block keeps
+// the documented defaults for the keys it omits; `enabled` is common to every block.
+// Overload keeps its own validator: a backoff schedule and relaunch knobs don't fit here.
+function validateBlock(raw, defaults, fields) {
   const b = { ...defaults, ...(raw && typeof raw === 'object' ? raw : {}) };
   b.enabled = typeof b.enabled === 'boolean' ? b.enabled : defaults.enabled;
-  b.patterns = validPatterns(b.patterns, defaults.patterns);
-  b.maxRetries = validNumber(b.maxRetries, 1, defaults.maxRetries);
-  b.retryDelaySeconds = validNumber(b.retryDelaySeconds, 1, defaults.retryDelaySeconds);
-  if (typeof b.retryMessage !== 'string' || !b.retryMessage) {
-    b.retryMessage = defaults.retryMessage;
-  }
+  for (const f of fields) b[f] = BLOCK_FIELD_VALIDATORS[f](b[f], defaults[f]);
   return b;
 }
 
-// The wrap-up nudge has no patterns (the render is fixed and shape-anchored) and no delay
-// (it fires at the idle prompt), so the bounded-retry validator above does not fit.
-function validateNudge(raw, defaults) {
-  const b = { ...defaults, ...(raw && typeof raw === 'object' ? raw : {}) };
-  b.enabled = typeof b.enabled === 'boolean' ? b.enabled : defaults.enabled;
-  b.maxRetries = validNumber(b.maxRetries, 1, defaults.maxRetries);
-  if (typeof b.retryMessage !== 'string' || !b.retryMessage) b.retryMessage = defaults.retryMessage;
-  return b;
-}
-
-// The stale-reset nudge sends a keypress, not a message, and matches a fixed render — so
-// neither validator above fits: no patterns, no retryMessage, but a delay.
-function validateKeyNudge(raw, defaults) {
-  const b = { ...defaults, ...(raw && typeof raw === 'object' ? raw : {}) };
-  b.enabled = typeof b.enabled === 'boolean' ? b.enabled : defaults.enabled;
-  b.maxRetries = validNumber(b.maxRetries, 1, defaults.maxRetries);
-  b.retryDelaySeconds = validNumber(b.retryDelaySeconds, 1, defaults.retryDelaySeconds);
-  return b;
-}
+// The block shapes, by what each family needs:
+//   bounded retry (safeguard, streamInterrupted) — patterns + cap + delay + message.
+//   message nudge (nearLimitWrapUp) — the render is fixed and shape-anchored (no patterns)
+//     and it fires at the idle prompt (no delay).
+//   key nudge (nativeStaleReset) — a bare Enter, not a message, on a fixed render: no
+//     patterns and no retryMessage, but a delay.
+const BOUNDED_RETRY_FIELDS = ['patterns', 'maxRetries', 'retryDelaySeconds', 'retryMessage'];
+const MESSAGE_NUDGE_FIELDS = ['maxRetries', 'retryMessage'];
+const KEY_NUDGE_FIELDS = ['maxRetries', 'retryDelaySeconds'];
 
 function validate(cfg) {
   cfg.maxRetries = validNumber(cfg.maxRetries, 1, DEFAULT_CONFIG.maxRetries);
@@ -260,10 +258,10 @@ function validate(cfg) {
     }
   }
   cfg.overload = validateOverload(cfg.overload);
-  cfg.safeguard = validateBoundedRetry(cfg.safeguard, DEFAULT_SAFEGUARD);
-  cfg.streamInterrupted = validateBoundedRetry(cfg.streamInterrupted, DEFAULT_STREAM_INTERRUPTED);
-  cfg.nearLimitWrapUp = validateNudge(cfg.nearLimitWrapUp, DEFAULT_NEAR_LIMIT_WRAP_UP);
-  cfg.nativeStaleReset = validateKeyNudge(cfg.nativeStaleReset, DEFAULT_NATIVE_STALE_RESET);
+  cfg.safeguard = validateBlock(cfg.safeguard, DEFAULT_SAFEGUARD, BOUNDED_RETRY_FIELDS);
+  cfg.streamInterrupted = validateBlock(cfg.streamInterrupted, DEFAULT_STREAM_INTERRUPTED, BOUNDED_RETRY_FIELDS);
+  cfg.nearLimitWrapUp = validateBlock(cfg.nearLimitWrapUp, DEFAULT_NEAR_LIMIT_WRAP_UP, MESSAGE_NUDGE_FIELDS);
+  cfg.nativeStaleReset = validateBlock(cfg.nativeStaleReset, DEFAULT_NATIVE_STALE_RESET, KEY_NUDGE_FIELDS);
   return cfg;
 }
 
