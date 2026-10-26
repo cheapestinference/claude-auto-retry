@@ -88,6 +88,28 @@ describe('nativeWaitArmed', () => {
   });
 
   it('returns null for empty text', () => assert.equal(nativeWaitArmed('', 12), null));
+
+  // The armed regex already tolerated the one-line record ("Usage limit reached ·
+  // continuing automatically at … · esc to cancel"); firing did not, so a one-line firing
+  // render matched NEITHER and an expired wait typed over native mid-fire.
+  it('matches the one-line firing variant as firing', () => {
+    const r = nativeWaitArmed('  Usage limit reached · continuing shortly · esc to cancel', 12);
+    assert.ok(r);
+    assert.equal(r.firing, true);
+    assert.equal(nativeWaitArmed(FIRING, 12).firing, true, 'two-line form unchanged');
+    assert.equal(nativeWaitArmed('  Usage limit reached · continuing shortly', 12), null,
+      'still needs esc to cancel on the same line');
+    assert.equal(nativeWaitArmed('⏺ Usage limit reached · continuing shortly · esc to cancel', 12), null,
+      'a model-output line still never matches');
+  });
+});
+
+// Invisible codepoints are unreviewable (#75 shipped a VS16 miss): the source spells the
+// variation selector as an escape, never as the raw character.
+it('src/patterns.js carries no raw U+FE0F', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../src/patterns.js', import.meta.url), 'utf8');
+  assert.equal(src.includes('\uFE0F'), false);
 });
 
 describe('nativeDeferSeconds config validation', () => {
@@ -353,6 +375,15 @@ describe('processOneTick — mid-wait stale-reset awareness', () => {
     assert.equal(tmux._sent.length + tmux._keys.length, 0);
   });
 
+  // The mid-wait check sits behind a cheap literal pre-gate (it runs every tick of a
+  // multi-hour wait). The gate must be exactly as permissive as staleResetMatch, which
+  // is case-insensitive — a case-sensitive includes() would miss "Press Enter".
+  it('the pre-gate keeps detection: a capitalised "Press Enter to continue" still routes', async () => {
+    const tmux = mockTmux(STALE.replace('Press enter', 'Press Enter'));
+    const s = farWait();
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'stale-reset-detected');
+  });
+
   it('nativeStaleReset disabled: a stale screen mid-wait keeps waiting', async () => {
     const tmux = mockTmux(STALE);
     const s = farWait();
@@ -368,4 +399,162 @@ it('armed line + relative "try again in N min" banner at expiry → sends, no re
   s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.attempts = 0;
   assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
   assert.equal(tmux._sent.length, 1);
+});
+
+// The re-arm is bounded. "Armed line visible" and "banner reset still ahead" are not
+// independent signals when both lines belong to ONE static episode (a quoted pair, a stuck
+// redraw): read more than RESET_GRACE_MS (1h) past its reset, the banner rolls to
+// tomorrow, so every expiry re-armed a fresh ~22h wait with attempts = 0 — forever, never
+// reaching maxRetries.
+describe('processOneTick — the native re-arm is bounded', () => {
+  const H = 3600_000;
+  const paneAt = (msFromNow) => ARMED.replaceAll(RESET, hhmm(msFromNow));
+  const expire = (s) => { s.waitUntil = Date.now() - 1; };
+
+  it('a static armed pair (same reset every read) does NOT re-arm at expiry — the retry is sent', async () => {
+    const pane = paneAt(-2 * H);          // reset 2h ago → rolls to tomorrow on every read
+    const tmux = mockTmux(pane);
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(s.status, 'waiting');
+    expire(s);
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(tmux._sent.length, 1);
+    assert.equal(s.attempts, 1, 'the attempt counts toward maxRetries');
+  });
+
+  // Claude's banner names the zone ("resets 3:00pm (UTC)"), native's own row does not
+  // ("limit resets 3:00pm"): the SAME reset. A static pane whose bottom-most banner at
+  // expiry is the other render must still be refused, not re-armed ~22h once more.
+  it('a static pair read through the other render (zone vs no zone) still does NOT re-arm', async () => {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const past = hhmm(-2 * H);
+    const zoned = paneAt(-2 * H).replace(`limit resets ${past}`, `limit resets ${past} (${tz})`);
+    const tmux = mockTmux(zoned);
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(s.status, 'waiting');
+    expire(s);
+    tmux._pane = paneAt(-2 * H);           // zoneless render of the same reset
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
+  });
+
+  it('a static pair still reaches max-retries instead of looping', async () => {
+    const tmux = mockTmux(paneAt(-2 * H));
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    const results = [];
+    for (let i = 0; i < DEFAULT_CONFIG.maxRetries + 1; i++) {
+      expire(s);
+      results.push(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true));
+    }
+    assert.ok(!results.includes('native-rearmed'), results.join(','));
+    assert.equal(results.at(-1), 'max-retries');
+  });
+
+  it('a legit chain (the banner reset moved ~5h) still re-arms', async () => {
+    const tmux = mockTmux(ARMED);
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    expire(s);
+    tmux._pane = paneAt(7 * H);
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-rearmed');
+    assert.equal(tmux._sent.length, 0);
+  });
+
+  it('caps consecutive re-arms at 3, then falls through to the send', async () => {
+    const tmux = mockTmux(ARMED);
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    for (let k = 1; k <= 3; k++) {
+      expire(s);
+      tmux._pane = paneAt((2 + k) * H);
+      assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-rearmed', `re-arm ${k}`);
+    }
+    expire(s);
+    tmux._pane = paneAt(6 * H);
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
+    assert.equal(tmux._sent.length, 1);
+  });
+
+  it('the cap clears on stand-down, so a later genuine episode re-arms again', async () => {
+    const tmux = mockTmux(ARMED);
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    for (let k = 1; k <= 3; k++) {
+      expire(s);
+      tmux._pane = paneAt((2 + k) * H);
+      await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    }
+    // Native fired and the session resumed: stand down.
+    expire(s);
+    tmux._pane = `${BANNER_ONLY}\n⏺ Picking the tests back up.\n✻ Cogitating… (esc to interrupt)`;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    // A new limit later in the run, and native chains once more.
+    tmux._pane = paneAt(8 * H);
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(s.status, 'waiting');
+    expire(s);
+    tmux._pane = paneAt(9 * H);
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-rearmed');
+    assert.equal(tmux._sent.length, 0);
+  });
+});
+
+// Confirming the menu's native row arms native by construction, but the menu capture
+// carries no armed line yet — so the wait used to arm reset + margin with no defer, and a
+// parsed menu reset latched _waitIsFallback = false, so no later correction could add it.
+describe('processOneTick — a native-row menu confirm defers', () => {
+  const menuPane = (rows) => [
+    `You've hit your session limit · resets ${RESET}`,
+    'What do you want to do?',
+    ...rows.map((r, i) => `${i === 0 ? '❯' : ' '} ${i + 1}. ${r}`),
+    'Enter to confirm · Esc to cancel',
+  ].join('\n');
+
+  it('native row selected + parsed reset → the wait includes nativeDeferSeconds', async () => {
+    const base = await arm(BANNER_ONLY);
+    const s = createMonitorState();
+    const r = await processOneTick(s, mockTmux(menuPane(['Upgrade your plan', `Wait here, then continue automatically at ${RESET}`])),
+      '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(r, 'menu-confirmed');
+    assert.ok(near(s.waitUntil - Date.now(), base.ms + DEFAULT_CONFIG.nativeDeferSeconds * 1000),
+      `got +${Math.round((s.waitUntil - Date.now() - base.ms) / 1000)}s over the plain wait`);
+  });
+
+  it('old "Stop and wait" row only → no defer (unchanged)', async () => {
+    const base = await arm(BANNER_ONLY);
+    const s = createMonitorState();
+    await processOneTick(s, mockTmux(menuPane(['Upgrade your plan', 'Stop and wait for limit to reset'])),
+      '%0', DEFAULT_CONFIG, () => true);
+    assert.ok(near(s.waitUntil - Date.now(), base.ms), 'reset + margin only');
+  });
+
+  it('nativeDeferSeconds: 0 → no defer even on the native row', async () => {
+    const base = await arm(BANNER_ONLY);
+    const s = createMonitorState();
+    await processOneTick(s, mockTmux(menuPane(['Upgrade your plan', `Wait here, then continue automatically at ${RESET}`])),
+      '%0', { ...DEFAULT_CONFIG, nativeDeferSeconds: 0 }, () => true);
+    assert.ok(near(s.waitUntil - Date.now(), base.ms));
+  });
+
+  // The menu often renders no reset line: the fallback wait is then corrected from the
+  // banner printed after the confirm. The native row was still selected, so that
+  // correction carries the defer even when the armed line hasn't rendered yet.
+  it('a fallback menu wait corrected from the post-confirm banner keeps the defer', async () => {
+    const base = await arm(BANNER_ONLY);
+    const tmux = mockTmux([
+      'What do you want to do?',
+      '❯ 1. Upgrade your plan',
+      '  2. Wait here, then continue automatically',
+      'Enter to confirm · Esc to cancel',
+    ].join('\n'));
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(s._waitIsFallback, true);
+    tmux._pane = BANNER_ONLY;
+    s._menuCooldownUntil = 0;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'wait-corrected');
+    assert.ok(near(s.waitUntil - Date.now(), base.ms + DEFAULT_CONFIG.nativeDeferSeconds * 1000));
+  });
 });

@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, staleResetMatch, nativeWaitArmed, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuWaitTarget, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, staleResetMatch, nativeWaitArmed, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -20,6 +20,15 @@ const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
 // How long the waiting branch holds off typing while native shows "Continuing shortly".
 // Native fires within 90 s of the reset; 3 min is 2x slack. See the skip in processOneTick.
 const NATIVE_FIRING_MAX_SKIP_MS = 3 * 60_000;
+// Consecutive native re-arms allowed before the expiry falls through to the send. A real
+// chain (native fired, re-hit the limit, re-armed) rarely runs more than once or twice in a
+// row; past 3 something is replaying one render. See the re-arm in processOneTick.
+const NATIVE_MAX_REARMS = 3;
+// Cheap pre-gate for the waiting branch's per-tick stale check: the stale screen's prompt
+// row always contains this phrase, so without it the expensive scans can be skipped.
+// Case-insensitive and unanchored on purpose — it must never reject a screen
+// staleResetMatch (whose STALE_RESET_PROMPT is /i) would accept, e.g. "Press Enter".
+const STALE_PROMPT_PREGATE = /press enter to continue/i;
 
 export function createMonitorState() {
   return {
@@ -42,6 +51,13 @@ export function createMonitorState() {
     _wrapUpHoldUntil: 0, _wrapUpNudges: 0,
     // Native stale-reset nudge sub-state (bounded Enter presses; same shape as above).
     staleResetAttempts: 0, staleResetWaitUntil: 0,
+    // Native re-arm bounds (see the re-arm in processOneTick): the identity of the parsed
+    // reset the standing wait was armed for (null = fallback/relative, no identity), and
+    // how many native re-arms have happened back to back.
+    _waitResetKey: null, _nativeRearms: 0,
+    // Set while the standing wait came from confirming the menu's native "Wait here, then
+    // continue automatically" row: native is armed by construction (see usageWaitUntil).
+    _assumeNativeArmed: false,
   };
 }
 
@@ -97,6 +113,7 @@ function resetStaleReset(state) {
 // recheck, which is where the stale render usually turns up (see the recheck comment).
 function enterStaleReset(state, match, cfg) {
   resetStaleReset(state);
+  state._nativeRearms = 0;   // the usage episode (and its re-arm chain) is over
   state.status = 'stale-reset';
   state.staleResetWaitUntil = Date.now() + (cfg.retryDelaySeconds * 1000);
   state._staleResetMatch = match;
@@ -139,21 +156,47 @@ async function checkForeground(tmuxAdapter, pane, config) {
 // the resumed session; ours stays the backstop for a native wait that never fired. Only
 // on a PARSED reset: the defer is relative to the reset native is counting down to, and a
 // fallback wait is already hours out.
-function usageWaitUntil(stripped, config) {
+//
+// assumeNativeArmed: the wait follows a confirm of the menu's native row. That confirm IS
+// what arms native, but the captured menu screen predates the armed line, so reading the
+// screen alone armed reset + margin with no defer — and a parsed menu reset latches
+// _waitIsFallback = false, so no later correction could add it: the exact race the defer
+// exists to prevent, on the path that selects native on purpose.
+const SELECTED_NATIVE_ROW = '"Wait here, then continue automatically" (selected in the menu)';
+function usageWaitUntil(stripped, config, { assumeNativeArmed = false } = {}) {
   const message = findRateLimitMessage(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
   const parsed = message ? parseResetTime(message) : null;
   const native = parsed && config.nativeDeferSeconds > 0
-    ? nativeWaitArmed(stripped, RATE_LIMIT_TAIL_LINES) : null;
+    ? (nativeWaitArmed(stripped, RATE_LIMIT_TAIL_LINES)
+      || (assumeNativeArmed ? { line: SELECTED_NATIVE_ROW, firing: false } : null))
+    : null;
   const deferMs = native ? config.nativeDeferSeconds * 1000 : 0;
   const until = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours) + deferMs;
   return { message, parsed, until, native };
 }
 
+// Identity of a parsed ABSOLUTE reset, for the re-arm's different-reset guard: the clock
+// (hour, minute) plus the date a weekly banner carries, so two reads of the same reset
+// compare equal on any day. NOT the timezone: Claude's banner names it ("resets 3:00pm
+// (UTC)") while native's own row doesn't ("limit resets 3:00pm") — the same reset under two
+// keys let a static pane re-arm one extra ~22h wait whenever the bottom-most banner at
+// expiry was the other render. A genuine re-arm moves the reset ~5h, so the zone adds no
+// discrimination. Relative hints and fallbacks have no identity.
+function resetKey(parsed) {
+  if (!parsed || parsed.relative) return null;
+  return [parsed.hour, parsed.minute, parsed.month ?? '', parsed.day ?? ''].join('|');
+}
+
 // `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
 // the menu path, where a re-rendered /rate-limit-options menu means the session hit the
 // limit again rather than continuing the old episode.
-function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
-  const { message, parsed, until, native } = usageWaitUntil(stripped, config);
+// `rearm` marks the native re-arm's own call: every OTHER arm (first detection, a menu
+// confirm, a hand-off from another family) starts a new chain, so it clears the
+// consecutive re-arm count; the re-arm itself must not, or the cap could never trip.
+// `assumeNativeArmed`: see usageWaitUntil — latched for the episode so the fallback
+// correction (a menu that rendered no reset line) adds the defer too.
+function enterUsageWait(state, stripped, config, { fresh = false, rearm = false, assumeNativeArmed = false } = {}) {
+  const { message, parsed, until, native } = usageWaitUntil(stripped, config, { assumeNativeArmed });
   state.lastRateLimitMessage = message;
   state.waitUntil = until;
   state.status = 'waiting';
@@ -164,6 +207,9 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
   // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
   // of the ~600 dead re-derivations a 5h wait would otherwise run.
   state._waitIsFallback = !parsed;
+  state._waitResetKey = resetKey(parsed);
+  state._assumeNativeArmed = assumeNativeArmed;
+  if (!rearm) state._nativeRearms = 0;
   state._gaveUp = false;
   if (fresh) state.attempts = 0;
   // Its own result (status stays 'waiting') so the detection logs that we deferred.
@@ -194,10 +240,12 @@ const WAIT_CORRECTION_EPSILON_MS = 1000;
 function correctUsageWait(state, stripped, config) {
   if (!state._waitIsFallback) return null;
   if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) return null;
-  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  const { message, parsed, until } = usageWaitUntil(stripped, config, { assumeNativeArmed: state._assumeNativeArmed });
   if (!parsed || until > state.waitUntil - WAIT_CORRECTION_EPSILON_MS) return null;
   state.waitUntil = until;
   state._waitIsFallback = false;
+  // The wait now stands on this reset — the identity the re-arm guard compares against.
+  state._waitResetKey = resetKey(parsed);
   return message;
 }
 
@@ -205,6 +253,7 @@ function correctUsageWait(state, stripped, config) {
 function leaveUsageWait(state) {
   state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
   state._waitIsFallback = false; state._nativeFiringSince = 0;
+  state._nativeRearms = 0; state._waitResetKey = null; state._assumeNativeArmed = false;
 }
 
 function enterOverload(state, overload, rand) {
@@ -255,12 +304,13 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       return 'skipped-not-claude';
     }
 
-    const steps = menuStepsToWaitOption(stripped, RATE_LIMIT_TAIL_LINES);
-    if (steps === null) {
+    const target = menuWaitTarget(stripped, RATE_LIMIT_TAIL_LINES);
+    if (target === null) {
       // Layout unreadable — refuse to press Enter (could confirm "Upgrade").
       state._menuCooldownUntil = Date.now() + cooldown;
       return 'menu-unreadable';
     }
+    const { steps } = target;
     const key = steps >= 0 ? 'Down' : 'Up';
     for (let i = 0; i < Math.abs(steps); i++) {
       await tmuxAdapter.sendKey(pane, key);
@@ -276,7 +326,9 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // new retry episode — carrying the old attempt count over left the correction blocked
     // and, once maxRetries had been reached, published a healthy-looking countdown that
     // gave up again on expiry without ever sending.
-    enterUsageWait(state, stripped, config, { fresh: true });
+    // assumeNativeArmed when the row we confirmed was native's own: that confirm armed the
+    // native wait, so ours defers to it even though this capture shows no armed line yet.
+    enterUsageWait(state, stripped, config, { fresh: true, assumeNativeArmed: target.native });
     state._menuCooldownUntil = Date.now() + cooldown;
     return 'menu-confirmed';
   }
@@ -306,7 +358,11 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       // the countdown parked the session until it expired. Only the stale screen with NO
       // live banner leaves early; a banner-gone screen without it keeps waiting, exactly
       // as before (no early 'user-continued').
-      if (!correctedMessage && !isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+      // STALE_PROMPT_PREGATE first: this runs on every tick of a multi-hour wait, and the
+      // full isRateLimited battery + staleResetMatch would otherwise scan the capture each
+      // time for a screen that, nearly always, isn't there. No phrase, no stale screen.
+      if (!correctedMessage && STALE_PROMPT_PREGATE.test(stripped)
+          && !isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
         const stale = staleResetFor(stripped, tmuxAdapter, config);
         if (stale) {
           leaveUsageWait(state);
@@ -371,11 +427,35 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // must fall through to the send. calculateWaitMs returns 0 (margin aside) for a
     // just-passed reset (RESET_GRACE_MS). Absolute resets only: a relative hint ("try
     // again in 5 minutes") reads as future on every re-read and would re-arm forever.
-    if (native && !native.firing) {
+    //
+    // BOUNDED, because those two signals are NOT independent when both lines belong to one
+    // static episode — a quoted pair, a stuck redraw. Read more than RESET_GRACE_MS past its
+    // reset, the banner rolls to TOMORROW (a "future" reset), so every expiry re-armed a
+    // fresh ~22h wait with attempts = 0, forever; before the re-arm existed that pane sent
+    // the retry and hit the maxRetries bound. Two guards restore that bound:
+    //   1. DIFFERENT RESET. A genuine re-arm is for a NEW window (the reset moved ~5h), so
+    //      the live banner must parse to a different reset than the one this wait was armed
+    //      for (_waitResetKey). The static pair parses the same clock on every read →
+    //      refused at the FIRST expiry of a wait armed from it → the send path below. A wait
+    //      with no stored identity (fallback-armed, or set up without an arm) counts as
+    //      different, so there the bound is ONE re-arm (which stores the key) before the
+    //      static pair is refused and sends.
+    //      Accepted cost: a reset that recurs at the same clock with nothing else to tell it
+    //      apart (a weekly limit rendered WITHOUT its date re-arms exactly 7 days later at
+    //      the same time) is refused too, and we send once — benign, the pre-re-arm
+    //      behavior. A dated weekly banner carries its day in the identity, so it differs.
+    //   2. CONSECUTIVE CAP (belt and braces, for anything guard 1 misses — e.g. a redraw
+    //      that alternates renders): at most NATIVE_MAX_REARMS back to back. The count
+    //      clears on every other arm, on stand-down and on the stale route — never on the
+    //      re-arm's own enterUsageWait.
+    if (native && !native.firing && (state._nativeRearms || 0) < NATIVE_MAX_REARMS) {
       const message = findRateLimitMessage(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
       const parsed = message ? parseResetTime(message) : null;
-      if (parsed && !parsed.relative && calculateWaitMs(parsed, 0, config.fallbackWaitHours) > 0) {
-        enterUsageWait(state, stripped, config, { fresh: true });
+      const key = resetKey(parsed);
+      const differs = state._waitResetKey == null || key !== state._waitResetKey;
+      if (parsed && !parsed.relative && differs && calculateWaitMs(parsed, 0, config.fallbackWaitHours) > 0) {
+        enterUsageWait(state, stripped, config, { fresh: true, rearm: true });
+        state._nativeRearms = (state._nativeRearms || 0) + 1;
         return 'native-rearmed';
       }
     }
@@ -638,16 +718,26 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
       resetStaleReset(state); return enterUsageWait(state, stripped, config);
     }
-    // In flight (our Enter took, or the user typed) — defer WITHOUT consuming or resetting
-    // the counter, exactly as the other bounded families do.
+    // Render gone → native continued (or the user pressed Enter). Episode over — and this
+    // is also how a give-up recovers: reset clears _gaveUp, so a session continued by hand
+    // after the nudge gave up stops showing 🔴AR. Checked BEFORE the working gate below.
+    // The invariant: a real working turn renders its footer BELOW the pair, and the pair
+    // must be the bottom-most content (staleResetMatch), so a working footer breaks the
+    // match and lands here. Deferring on working first held status 'stale-reset' and the
+    // give-up's _gaveUp for the rest of the run: 🔴AR through hours of healthy work.
+    if (!staleResetMatch(stripped, RATE_LIMIT_TAIL_LINES)) {
+      resetStaleReset(state); state.status = 'monitoring'; return 'stale-reset-cleared';
+    }
+    // The pair still matches, yet isWorking is true: a working-shaped line ABOVE the input
+    // box (an internal-retry "Retrying in … · attempt N/M", a background-agent count) —
+    // isWorking reads a content tail, so such lines satisfy it without being a live turn
+    // below the pair. Defer WITHOUT consuming or resetting, as the other bounded families
+    // do: clearing here (an earlier fix did) let the monitoring branch re-detect the pair
+    // with a fresh budget every cycle — 13 Enter presses in 40 ticks with maxRetries 2 and
+    // no give-up (reviewer-executed).
     if (isWorking(stripped)) {
       state.staleResetWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
       return 'stale-reset-working';
-    }
-
-    // Render gone → native continued (or the user pressed Enter). Episode over.
-    if (!staleResetMatch(stripped, RATE_LIMIT_TAIL_LINES)) {
-      resetStaleReset(state); state.status = 'monitoring'; return 'stale-reset-cleared';
     }
 
     // Still asking after our Enters: something other than staleness holds the session.
@@ -935,7 +1025,8 @@ export async function startMonitor(pane, pid) {
       if (result === 'native-firing-overdue') await logger.warn(`Native auto-continue has shown "Continuing shortly" for over ${NATIVE_FIRING_MAX_SKIP_MS / 60_000} min without the session resuming — stopped deferring and sent the retry message as the backstop (attempt ${state.attempts}).`);
       if (result === 'native-firing') await logger.info('Native auto-continue is firing ("Continuing shortly") — not typing over it. Will recheck.');
       if (result === 'menu-confirmed') {
-        await logWait((secs) => `Rate-limit options menu: selected the wait option (native "Wait here, then continue automatically" when offered, else "Stop and wait for limit to reset"). Waiting ${secs}s...`);
+        const deferred = state._nativeWaitLine ? ` (includes +${config.nativeDeferSeconds}s nativeDeferSeconds — native auto-continue is armed (${state._nativeWaitLine}), so ours only fires if native didn't continue)` : '';
+        await logWait((secs) => `Rate-limit options menu: selected the wait option (native "Wait here, then continue automatically" when offered, else "Stop and wait for limit to reset"). Waiting ${secs}s${deferred}...`);
       }
       if (result === 'wait-corrected') {
         await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${secs}s.`);

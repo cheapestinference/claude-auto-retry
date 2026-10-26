@@ -341,8 +341,9 @@ function presentsResetTime(line) {
 //   - THE MARKER VARIES. ⚠ and · prefix limit renders elsewhere in this file (see the TUI
 //     sketch above); admitting only ⎿/└ made "⚠ You've hit your org's monthly spend limit …"
 //     invisible.
-//   - ⚠ ALSO ARRIVES IN EMOJI PRESENTATION. "⚠️" is U+26A0 + U+FE0F, and the variation
-//     selector is neither whitespace nor part of the phrase, so it failed the whole pattern.
+//   - ⚠ ALSO ARRIVES IN EMOJI PRESENTATION. "⚠\uFE0F" is U+26A0 + U+FE0F (escaped here: no
+//     raw VS16 in source), and the variation selector is neither whitespace nor part of the
+//     phrase, so it failed the whole pattern.
 //   - THE BANNER CAN BE BOXED. "│ ⚠ You've hit your limit │" is the render this suite
 //     already pins for SESSION banners; those survive on the unanchored LIMIT+RESET pair,
 //     but the spend banner has no reset line, so this pattern is its only path in.
@@ -584,6 +585,17 @@ export function isRateLimitOptionsPrompt(text, tailLines = 0) {
 // caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
 // tailLines mirrors isRateLimitOptionsPrompt so option counting ignores quoted menus.
 export function menuStepsToWaitOption(text, tailLines = 0) {
+  const target = menuWaitTarget(text, tailLines);
+  return target ? target.steps : null;
+}
+
+// The same read, plus WHICH row it targets: { steps, native } (native = the "Wait here,
+// then continue automatically" row), or null when unreadable. The monitor needs `native`:
+// confirming that row arms native's own wait by construction, yet the menu capture carries
+// no armed line for the wait computation to see, so the monitor must be told to defer.
+// A second export rather than a new return shape for menuStepsToWaitOption, so its
+// number-or-null contract (and every caller/test pinned on it) stays as it was.
+export function menuWaitTarget(text, tailLines = 0) {
   const all = stripAnsi(text).split('\n');
   const lines = tailLines > 0 ? contentTail(all, tailLines) : all;  // chrome-aware, matches isRateLimitOptionsPrompt (Finding 5)
   const optionLines = lines.filter(l => MENU_OPTION_REGEX.test(l));
@@ -592,7 +604,7 @@ export function menuStepsToWaitOption(text, tailLines = 0) {
   const nativePos = optionLines.findIndex(l => NATIVE_WAIT_OPTION_REGEX.test(l));
   const waitPos = nativePos !== -1 ? nativePos : optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
   if (cursorPos === -1 || waitPos === -1) return null;
-  return waitPos - cursorPos;
+  return { steps: waitPos - cursorPos, native: nativePos !== -1 };
 }
 
 // --- Overload / transient API error detection (distinct from usage limits) ---
@@ -833,9 +845,15 @@ export function nearLimitWrapUpMatch(text) {
 //      ❯ (the user's row) never begin a match.
 // "Press enter to continue" alone is generic (installers, pagers, test runners print it),
 // so only the PAIR is the signature.
-const STALE_RESET_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
-const STALE_RESET_HEAD = new RegExp(`${STALE_RESET_PREFIX}Your usage limit has reset\\b`, 'i');
-const STALE_RESET_PROMPT = new RegExp(`${STALE_RESET_PREFIX}Press enter to continue\\b`, 'i');
+//
+// How a native status row may begin — rule 2 above. ONE definition shared by both native
+// detectors (this one and nativeWaitArmed below): they read rows of the same native status
+// area, and two character-for-character copies would drift the first time one is patched.
+// The variation selector is spelled \uFE0F, never as the raw codepoint: invisible
+// characters are unreviewable, and #75 shipped exactly such a VS16 miss.
+const NATIVE_STATUS_ROW_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
+const STALE_RESET_HEAD = new RegExp(`${NATIVE_STATUS_ROW_PREFIX}Your usage limit has reset\\b`, 'i');
+const STALE_RESET_PROMPT = new RegExp(`${NATIVE_STATUS_ROW_PREFIX}Press enter to continue\\b`, 'i');
 // The input row, bare ("❯ draft") or boxed ("│ > draft │"). Empty, it is chrome and gets
 // stripped from the tail — which is exactly why its position is checked separately.
 const INPUT_ROW = /^\s*(?:│\s*)?[❯>]/;
@@ -876,16 +894,21 @@ export function staleResetMatch(text, tailLines = STALE_RESET_TAIL_LINES) {
 //      this a live status row; a sentence describing native auto-continue doesn't carry
 //      it. The separator is left loose (the middle dot has been `·` in every observed
 //      render, but nothing depends on it), both parts are required.
-//   2. How the line begins: indentation and at most one chrome prefix (same set as the
-//      stale-reset rows), so ⏺/● (model output) and ❯ (the user's row) never begin a match.
+//   2. How the line begins: indentation and at most one chrome prefix (the shared
+//      NATIVE_STATUS_ROW_PREFIX, same as the stale-reset rows), so ⏺/● (model output) and
+//      ❯ (the user's row) never begin a match.
 //   3. Tool-echo masked (#63), and tail-windowed like every other detector.
 // The transcript record ("Usage limit reached · continuing automatically at … · esc to
 // cancel") also matches. Harmless: it names the same episode, and a false positive here
 // costs at most a few minutes of extra wait or one skipped tick — never a send.
-const NATIVE_WAIT_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
-const NATIVE_WAIT_ARMED = new RegExp(`${NATIVE_WAIT_PREFIX}(?:.*?\\s)?continuing automatically at\\s+\\S.*?\\besc to cancel\\b`, 'i');
-const NATIVE_WAIT_FIRING = new RegExp(`${NATIVE_WAIT_PREFIX}continuing shortly\\b.*?\\besc to cancel\\b`, 'i');
-const NATIVE_WAIT_LEAD = /^\s*(?:[│⎿└⚠·]️?\s*)?[⏺●∙❯>]/;
+// Both regexes tolerate that one-line form's leading text (`(?:.*?\s)?`). Firing used to
+// anchor "continuing shortly" right after the prefix, so a one-line firing render ("Usage
+// limit reached · continuing shortly · esc to cancel") matched NEITHER: nativeWaitArmed
+// returned null and an expired wait typed over native mid-fire. The same-line "esc to
+// cancel" stays the anti-prose gate for both.
+const NATIVE_WAIT_ARMED = new RegExp(`${NATIVE_STATUS_ROW_PREFIX}(?:.*?\\s)?continuing automatically at\\s+\\S.*?\\besc to cancel\\b`, 'i');
+const NATIVE_WAIT_FIRING = new RegExp(`${NATIVE_STATUS_ROW_PREFIX}(?:.*?\\s)?continuing shortly\\b.*?\\besc to cancel\\b`, 'i');
+const NATIVE_WAIT_LEAD = /^\s*(?:[│⎿└⚠·]\uFE0F?\s*)?[⏺●∙❯>]/;
 
 // Returns { line, firing } for the bottom-most native wait row in the tail, else null.
 // firing = the "Continuing shortly" row: native is continuing right now.

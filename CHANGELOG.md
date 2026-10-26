@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The native re-arm can no longer loop forever on a static screen.** At expiry the wait
+  re-arms (instead of typing) when native's armed line and a banner with a future reset
+  agree. Both lines of ONE static episode — a quoted pair, a stuck redraw — satisfied that:
+  read more than an hour past its reset, the banner rolls to tomorrow, so every expiry
+  re-armed a fresh ~22h wait with the attempt count zeroed and `maxRetries` never applied.
+  A re-arm now needs the banner's reset to differ from the one the wait was armed for (a
+  genuine re-arm is for a new window), so the static pair sends at its first expiry as it
+  did before the re-arm existed; and at most 3 re-arms may run back to back. Known cost: a
+  reset that recurs at the same clock with no date (a weekly banner without its date) sends
+  once instead of re-arming.
+- **A stale-reset give-up no longer sticks after you press Enter yourself.** Once the
+  Enter nudge gave up (`🔴AR`), a session the user continued by hand kept the stale-reset
+  status and the give-up flag for the rest of the run: `🔴AR` through hours of healthy
+  work. The pair leaving the bottom of the pane (a working turn's footer renders below it)
+  now ends the episode and clears the give-up, checked before the working gate; a
+  working-shaped line merely sitting above the input box still only defers, so the Enter
+  presses stay bounded by `maxRetries`.
+- **Confirming the menu's native row now defers to native.** Selecting "Wait here, then
+  continue automatically" arms native's own wait, but the menu screen has no armed line
+  yet, so the wait armed at reset + margin with no `nativeDeferSeconds` — and could not be
+  corrected later — racing the native continue the menu had just chosen. The defer is now
+  added whenever the confirmed row is native's (including a menu wait later corrected from
+  the post-confirm banner); the "Stop and wait" row is unchanged.
+- **A one-line "continuing shortly · esc to cancel" render is recognized as native
+  firing.** The armed form already tolerated leading text ("Usage limit reached ·
+  continuing automatically at … · esc to cancel"); the firing form did not, so its one-line
+  variant matched neither and an expired wait typed over native mid-fire.
 - **The usage wait now defers to an armed native auto-continue instead of racing it.**
   Claude Code v2.1.234+ fires its own continue at reset + 30–90 s; this tool's wait fired
   at reset + `marginSeconds` (60 s), so it often won — and its typed "continue" cancelled
@@ -104,6 +131,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   indentation are one rule: a glyphed head may sit anywhere, a bare head must start at
   column 0, because an indented glyph-less head is the hanging-indent shape of a quotation
   rather than a render. Configured under a `streamInterrupted` block.
+
+### Changed
+- The waiting branch's per-tick stale-reset check now runs only when the capture contains
+  "Press enter to continue" (case-insensitive) — a cheap pre-gate in front of the full
+  limit-detector battery that otherwise scanned every tick of a multi-hour wait. No
+  behavior change.
+- One shared validator for the bounded-family config blocks (`safeguard`,
+  `streamInterrupted`, `nearLimitWrapUp`, `nativeStaleReset`), parameterized by each block's
+  fields, replaces three near-copies. No behavior change.
+- The native status-row prefix is one shared constant for the stale-reset and native-wait
+  detectors, and the variation selector in `patterns.js` is spelled `\uFE0F` everywhere —
+  no raw invisible codepoint in source (#75 shipped a VS16 miss).
 
 ## [0.7.3] - 2026-08-16
 
