@@ -792,6 +792,47 @@ export function nearLimitWrapUpMatch(text) {
   return null;
 }
 
+// --- Native auto-continue gone stale (Claude Code v2.1.234+) ---
+// Native auto-continue waits out a usage limit on its own, but when the host slept more
+// than ~30 min past the reset it declines to continue: the two status lines under the
+// input box become
+//   Your usage limit has reset
+//   Press enter to continue
+// and the session waits for a human Enter, indefinitely. No limit banner is left on
+// screen, so isRateLimited is false and a monitor mid-wait read this as "the user
+// continued" and stood down — leaving the session parked forever.
+//
+// Shape-anchored, like the #77 render head: each phrase must BE its line's content —
+// leading whitespace (status rows are indented) and at most one chrome prefix (│ box
+// border, ⎿/└ echo marker, ⚠/· banner marker), then the phrase; trailing text is allowed
+// ("· esc to cancel", a closing │). Prose carries the phrases mid-sentence, the model's
+// own output carries ⏺/●, the user's typed row carries ❯ — none of those start the line
+// with the phrase, so none match. "Press enter to continue" alone is generic (installers,
+// pagers, test runners print it), so only the PAIR, in that order, is the signature.
+// Known limit: a hanging-indent quotation of BOTH lines, in order, at the bottom of the
+// pane still matches — the cost is an Enter at an idle prompt, bounded by maxRetries.
+const STALE_RESET_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
+const STALE_RESET_HEAD = new RegExp(`${STALE_RESET_PREFIX}Your usage limit has reset\\b`, 'i');
+const STALE_RESET_PROMPT = new RegExp(`${STALE_RESET_PREFIX}Press enter to continue\\b`, 'i');
+// Same budget as the banner path (monitor.js RATE_LIMIT_TAIL_LINES): the pair renders as
+// the bottom-most status rows, so it is always inside a 12-line content tail when live.
+const STALE_RESET_TAIL_LINES = 12;
+
+// Returns the "Your usage limit has reset" line (trimmed) when the pair is live in the
+// tail, else null. Tool-echo masked (#63): the pair inside a Bash() result is a file's
+// content, not native chrome.
+export function staleResetMatch(text, tailLines = STALE_RESET_TAIL_LINES) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines)
+    : { start: 0, end: all.length };
+  const lines = all.slice(start, end);
+  const mask = toolEchoMask(all).slice(start, end);
+  const head = lines.findIndex((l, i) => !mask[i] && STALE_RESET_HEAD.test(l));
+  if (head === -1) return null;
+  const prompted = lines.some((l, i) => i > head && !mask[i] && STALE_RESET_PROMPT.test(l));
+  return prompted ? lines[head].trim() : null;
+}
+
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
 // live working footer pushed up by a tall chrome stack below it (task widget + input box
 // + footer) would be invisible to a raw last-N tail while the chrome-aware detectors still

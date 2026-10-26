@@ -114,6 +114,20 @@ export const DEFAULT_NEAR_LIMIT_WRAP_UP = {
   retryMessage: 'continue',
 };
 
+// Native auto-continue gone stale (Claude Code v2.1.234+). Native waits out a usage limit
+// by itself, but if the host slept more than ~30 min past the reset it does NOT continue:
+// its two status lines turn into "Your usage limit has reset" / "Press enter to continue"
+// and it waits for a human Enter, indefinitely. Our own wait stood down on that screen
+// (the banner is gone), so nobody pressed it. The remedy is the keypress the UI asks for —
+// a bare Enter, no message — so there are no patterns (the render is fixed and
+// shape-anchored, see staleResetMatch) and no retryMessage. Bounded: if two Enters don't
+// clear it, something other than staleness is holding the session.
+export const DEFAULT_NATIVE_STALE_RESET = {
+  enabled: true,
+  maxRetries: 2,
+  retryDelaySeconds: 3,   // let the wake settle (and native's own UI finish redrawing) first
+};
+
 export const DEFAULT_CONFIG = {
   maxRetries: 5,
   pollIntervalSeconds: 5,
@@ -125,6 +139,7 @@ export const DEFAULT_CONFIG = {
   safeguard: DEFAULT_SAFEGUARD,
   streamInterrupted: DEFAULT_STREAM_INTERRUPTED,
   nearLimitWrapUp: DEFAULT_NEAR_LIMIT_WRAP_UP,
+  nativeStaleReset: DEFAULT_NATIVE_STALE_RESET,
 };
 
 const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
@@ -205,6 +220,16 @@ function validateNudge(raw, defaults) {
   return b;
 }
 
+// The stale-reset nudge sends a keypress, not a message, and matches a fixed render — so
+// neither validator above fits: no patterns, no retryMessage, but a delay.
+function validateKeyNudge(raw, defaults) {
+  const b = { ...defaults, ...(raw && typeof raw === 'object' ? raw : {}) };
+  b.enabled = typeof b.enabled === 'boolean' ? b.enabled : defaults.enabled;
+  b.maxRetries = validNumber(b.maxRetries, 1, defaults.maxRetries);
+  b.retryDelaySeconds = validNumber(b.retryDelaySeconds, 1, defaults.retryDelaySeconds);
+  return b;
+}
+
 function validate(cfg) {
   cfg.maxRetries = validNumber(cfg.maxRetries, 1, DEFAULT_CONFIG.maxRetries);
   cfg.pollIntervalSeconds = validNumber(cfg.pollIntervalSeconds, 1, DEFAULT_CONFIG.pollIntervalSeconds);
@@ -230,6 +255,7 @@ function validate(cfg) {
   cfg.safeguard = validateBoundedRetry(cfg.safeguard, DEFAULT_SAFEGUARD);
   cfg.streamInterrupted = validateBoundedRetry(cfg.streamInterrupted, DEFAULT_STREAM_INTERRUPTED);
   cfg.nearLimitWrapUp = validateNudge(cfg.nearLimitWrapUp, DEFAULT_NEAR_LIMIT_WRAP_UP);
+  cfg.nativeStaleReset = validateKeyNudge(cfg.nativeStaleReset, DEFAULT_NATIVE_STALE_RESET);
   return cfg;
 }
 

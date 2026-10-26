@@ -8,6 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **A native auto-continue that went stale over a host sleep is now continued.** Claude
+  Code v2.1.234+ waits out a usage limit by itself, but when the machine slept more than
+  ~30 min past the reset it declines to continue: its status lines become "Your usage limit
+  has reset" / "Press enter to continue" and it waits for a human Enter, indefinitely. The
+  limit banner is gone by then, so this tool's own wait — armed on the same banner, asleep
+  along with the host — rechecked on wake, concluded the user had continued, and stood
+  down, leaving the session parked forever. The recheck now recognizes the stale pair and
+  hands it to a new bounded nudge (`nativeStaleReset`, on by default): a bare Enter at an
+  idle prompt, at most 2 presses 3 s apart, giving up loudly if the prompt persists. The
+  pair is also caught from plain monitoring. Both lines are shape-anchored (each phrase
+  begins its line, in order, in the live tail), so the generic "Press enter to continue"
+  alone, prose quoting the pair, and tool output never trigger it. The status bar shows the
+  in-progress state as `🟢AR` (it lasts seconds) and a give-up as `🔴AR`.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both

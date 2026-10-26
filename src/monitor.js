@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, staleResetMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -37,6 +37,8 @@ export function createMonitorState() {
     // Near-limit wrap-up nudge (#78): a hold after each send so the pane can re-render the
     // nudge as a user row (the dedup), and a count of sends against the SAME notice.
     _wrapUpHoldUntil: 0, _wrapUpNudges: 0,
+    // Native stale-reset nudge sub-state (bounded Enter presses; same shape as above).
+    staleResetAttempts: 0, staleResetWaitUntil: 0,
   };
 }
 
@@ -79,6 +81,31 @@ function resetInterrupted(state) {
   state.interruptedWaitUntil = 0;
   state._interruptedGaveUp = false;
   state._gaveUp = false;
+}
+
+function resetStaleReset(state) {
+  state.staleResetAttempts = 0;
+  state.staleResetWaitUntil = 0;
+  state._staleResetGaveUp = false;
+  state._gaveUp = false;
+}
+
+// Enter the stale-reset family. Shared by the monitoring branch and the waiting branch's
+// recheck, which is where the stale render usually turns up (see the recheck comment).
+function enterStaleReset(state, match, cfg) {
+  resetStaleReset(state);
+  state.status = 'stale-reset';
+  state.staleResetWaitUntil = Date.now() + (cfg.retryDelaySeconds * 1000);
+  state._staleResetMatch = match;
+  return 'stale-reset-detected';
+}
+
+// The stale render is only actionable with a key-capable adapter (the remedy is a bare
+// Enter, not a message) and only while the family is on.
+function staleResetFor(stripped, tmuxAdapter, config) {
+  const cfg = config.nativeStaleReset;
+  if (!cfg || !cfg.enabled || !tmuxAdapter.sendKey) return null;
+  return staleResetMatch(stripped, RATE_LIMIT_TAIL_LINES);
 }
 
 // Foreground safety: is claude/node the foreground process (safe to send-keys), or did
@@ -245,7 +272,8 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // through to 'retried'/'user-continued' would otherwise leave the message set for the
     // next plain 'waiting' tick to log as a spurious fresh detection.
     const correctedMessage = correctUsageWait(state, stripped, config);
-    if (Date.now() < state.waitUntil && !resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+    const resumed = resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES);
+    if (Date.now() < state.waitUntil && !resumed) {
       if (!correctedMessage) return 'waiting';
       state.lastRateLimitMessage = correctedMessage;
       return 'wait-corrected';
@@ -258,9 +286,17 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // captured scrollback after a successful resume — spamming an actively-working
     // session (and a banner re-printed by another process keeps it "rate-limited" the
     // whole time). Resumed ⇒ the session continued; never inject into it.
-    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES)) {
+    if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumed) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
       state._waitIsFallback = false;
+      // Banner gone is NOT always "the user continued". With native auto-continue (Claude
+      // Code v2.1.234+) the common way to land here is a host that slept through the reset
+      // along with us: native then declines to continue, replaces the banner with "Your
+      // usage limit has reset" / "Press enter to continue", and waits for a human. Standing
+      // down on that screen parked the session forever — hand it to the stale-reset nudge.
+      // Only when the session has NOT resumed: a working pane really did continue.
+      const stale = !resumed && staleResetFor(stripped, tmuxAdapter, config);
+      if (stale) return enterStaleReset(state, stale, config.nativeStaleReset);
       return 'user-continued';
     }
 
@@ -510,6 +546,54 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     return 'interrupted-retried';
   }
 
+  // Native stale-reset nudge: the same bounded machine as the safeguard/interrupted
+  // branches, but its remedy is the bare Enter the native UI asks for, not a message.
+  if (state.status === 'stale-reset') {
+    if (Date.now() < state.staleResetWaitUntil) return 'stale-reset-waiting';
+    if (!isAlive()) return 'exit';
+    const staleCfg = config.nativeStaleReset;
+
+    // A live banner means the session hit the limit again — the usage wait owns it.
+    if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+      resetStaleReset(state); return enterUsageWait(state, stripped, config);
+    }
+    // In flight (our Enter took, or the user typed) — defer WITHOUT consuming or resetting
+    // the counter, exactly as the other bounded families do.
+    if (isWorking(stripped)) {
+      state.staleResetWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'stale-reset-working';
+    }
+
+    // Render gone → native continued (or the user pressed Enter). Episode over.
+    if (!staleResetMatch(stripped, RATE_LIMIT_TAIL_LINES)) {
+      resetStaleReset(state); state.status = 'monitoring'; return 'stale-reset-cleared';
+    }
+
+    // Still asking after our Enters: something other than staleness holds the session.
+    // Give up loudly ONCE, then hold quietly on a long cooldown.
+    if (state.staleResetAttempts >= staleCfg.maxRetries) {
+      state.staleResetWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
+      state._gaveUp = true;
+      if (state._staleResetGaveUp) return 'stale-reset-holding';
+      state._staleResetGaveUp = true;
+      return 'stale-reset-gave-up';
+    }
+
+    // Foreground safety: an Enter into some other app is worse than a message — it confirms.
+    const fg = await checkForeground(tmuxAdapter, pane, config);
+    if (!fg.ok) {
+      state._lastForeground = fg.fg;
+      state.staleResetWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 6);
+      return 'skipped-not-claude';
+    }
+
+    // Increment + schedule BEFORE send so a send failure still consumes the slot.
+    state.staleResetAttempts++;
+    state.staleResetWaitUntil = Date.now() + (staleCfg.retryDelaySeconds * 1000);
+    await tmuxAdapter.sendKey(pane, 'Enter');
+    return 'stale-reset-nudged';
+  }
+
   // --- monitoring ---
   // Usage-limit (hours-scale reset) takes precedence over overload (seconds-scale). No
   // !isWorking gate here: it would widen every WORKING_PATTERN from "skip one injection" to
@@ -521,6 +605,15 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
   // cycle (detect → wait → user-continued) that never actually injects.
   if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
     return enterUsageWait(state, stripped, config);
+  }
+
+  // Native stale reset, reached from monitoring: a monitor (re)started after native armed
+  // its wait never saw the banner, so the waiting branch's recheck can't catch this one.
+  // Right after the usage path — it IS the usage limit's tail end — and ahead of the
+  // seconds-scale families, whose renders it cannot be confused with. Idle-only.
+  if (!isWorking(stripped)) {
+    const stale = staleResetFor(stripped, tmuxAdapter, config);
+    if (stale) return enterStaleReset(state, stale, config.nativeStaleReset);
   }
 
   // Recovery closes an event-path overload incident. That path returns to monitoring
@@ -731,10 +824,12 @@ export async function startMonitor(pane, pid) {
         overloadWaitUntil: Math.floor(state.overloadWaitUntil / 1000),
         safeguardWaitUntil: Math.floor(state.safeguardWaitUntil / 1000),
         interruptedWaitUntil: Math.floor(state.interruptedWaitUntil / 1000),
+        staleResetWaitUntil: Math.floor(state.staleResetWaitUntil / 1000),
         attempts: state.attempts,
         overloadAttempts: state.overloadAttempts,
         safeguardAttempts: state.safeguardAttempts,
         interruptedAttempts: state.interruptedAttempts,
+        staleResetAttempts: state.staleResetAttempts,
         pollIntervalSeconds: config.pollIntervalSeconds,
         gaveUp: !!state._gaveUp,
       }).catch(() => {});
@@ -792,6 +887,10 @@ export async function startMonitor(pane, pid) {
       if (result === 'interrupted-cleared') await logger.info('Interrupted turn resumed. Back to normal monitoring.');
       if (result === 'wrap-up-nudged') await logger.info(`Near-limit wrap-up notice at an idle prompt ("${state._wrapUpNotice}") — sent "${config.nearLimitWrapUp.retryMessage}" to pick the work back up (${state._wrapUpNudges}/${config.nearLimitWrapUp.maxRetries}).`);
       if (result === 'wrap-up-gave-up') await logger.warn(`Wrap-up notice still unanswered after ${config.nearLimitWrapUp.maxRetries} nudges — the nudge never rendered. Holding until it clears.`);
+      if (result === 'stale-reset-detected') await logger.warn(`Native auto-continue went stale ("${state._staleResetMatch}" / "Press enter to continue") — the host likely slept past the reset. Will press Enter up to ${config.nativeStaleReset.maxRetries}x every ${config.nativeStaleReset.retryDelaySeconds}s.`);
+      if (result === 'stale-reset-nudged') await logger.info(`Pressed Enter on the stale native reset prompt (attempt ${state.staleResetAttempts}/${config.nativeStaleReset.maxRetries}).`);
+      if (result === 'stale-reset-cleared') await logger.info('Stale native reset prompt cleared. Back to normal monitoring.');
+      if (result === 'stale-reset-gave-up') await logger.warn(`Native reset prompt still asking after ${config.nativeStaleReset.maxRetries} Enter presses. Giving up — something other than staleness is holding the session. Will not press again until it clears.`);
       if (result === 'interrupted-gave-up') await logger.warn(`Stream still truncated after ${config.streamInterrupted.maxRetries} resume attempts. Giving up — the connection may still be down after the wake. Will not retry until it clears.`);
     } catch (err) {
       consecutiveErrors++;

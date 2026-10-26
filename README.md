@@ -205,6 +205,17 @@ Not an error: Claude Code prints this at ~95% of the window and tells the model 
 checkpoint. The model finishes the step, lists what's left and ends the turn — no banner,
 idle prompt, nothing resumes it. One `continue` picks the work back up.
 
+### Native auto-continue gone stale — one Enter, bounded
+
+```
+Your usage limit has reset
+Press enter to continue
+```
+
+Claude Code v2.1.234+ continues past a usage limit on its own — unless the machine slept
+more than ~30 minutes past the reset, in which case it shows this pair and waits for a
+human Enter, indefinitely. The tool presses it.
+
 Custom patterns can be added via config for future message format changes.
 
 Detection is **chrome-aware**: it looks at the live bottom of the pane, but first skips
@@ -242,6 +253,7 @@ Optional. Create `~/.claude-auto-retry.json`:
 | `fallbackWaitHours` | `5` | Wait time if reset time can't be parsed |
 | `retryMessage` | `"Continue where..."` | Message sent to Claude on retry |
 | `customPatterns` | `[]` | Additional regex patterns to detect rate limits |
+| `nativeStaleReset` | `{ "enabled": true, "maxRetries": 2, "retryDelaySeconds": 3 }` | Press Enter on native auto-continue's stale "Press enter to continue" — see [Native stale-reset nudge](#native-stale-reset-nudge) |
 
 All fields optional. Invalid values fall back to defaults automatically.
 
@@ -528,6 +540,53 @@ Configured under a `nearLimitWrapUp` block (defaults shown):
 ```
 
 Set `"enabled": false` if you *want* the session to stop at the checkpoint.
+
+## Native stale-reset nudge
+
+Claude Code v2.1.234+ waits out a usage limit itself and continues at the reset. But if
+the machine slept more than ~30 minutes past the reset, it does **not** continue on wake.
+Its two status lines change to:
+
+```
+Your usage limit has reset
+Press enter to continue
+```
+
+and the session waits for a human Enter — indefinitely. The limit banner is gone by then,
+so the tool's own wait (which usually armed on the same banner and slept along with the
+host) used to read that screen as "you already continued" and stand down, leaving the
+session parked. Now the wait's recheck recognizes the pair and hands it to this nudge: at
+an idle prompt, with `claude`/`node` in the foreground, the tool presses a bare **Enter**
+(the key the UI asks for — no message is typed). If the pair clears, the episode is over;
+if it is still there after `maxRetries` presses, the tool gives up loudly (`🔴AR`) rather
+than keep pressing. A live usage-limit banner always takes precedence.
+
+Detection is anchored on the **shape** of both lines: each phrase must begin its line
+(behind at most indentation and one chrome marker such as `│` or `⎿`), the two must appear
+in that order, and both must sit in the live bottom of the pane. `Press enter to continue`
+on its own is a generic phrase and never matches; prose quoting the pair mid-sentence, the
+model's `⏺` output, your own `❯` row and tool-call output don't either.
+
+Configured under a `nativeStaleReset` block (defaults shown):
+
+```json
+{
+  "nativeStaleReset": {
+    "enabled": true,
+    "maxRetries": 2,
+    "retryDelaySeconds": 3
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Turn the stale-reset nudge on/off |
+| `maxRetries` | `2` | Enter presses before giving up loudly |
+| `retryDelaySeconds` | `3` | Wait before each press — lets the wake and native's redraw settle |
+
+The status bar shows `🟢AR` while the nudge is in progress (it lasts seconds) and `🔴AR`
+if it gave up.
 
 ## tmux status bar indicator
 

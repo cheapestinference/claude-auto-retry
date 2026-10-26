@@ -80,7 +80,11 @@ case "$status" in
     [ "$remain" -lt 0 ] && remain=0
     printf '🛡AR %ds' "$remain"
     ;;
-  monitoring)
+  # stale-reset (pressing Enter on native auto-continue's stale "Press enter to continue")
+  # reuses the monitoring glyph rather than getting its own: the state lasts seconds (a 3s
+  # delay, at most a couple of presses), so a dedicated glyph would only flicker, and its
+  # give-up is already rendered by the gaveUp override above.
+  monitoring|stale-reset)
     printf '🟢AR'
     ;;
   *)
