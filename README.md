@@ -562,8 +562,9 @@ session parked. Now the wait's recheck recognizes the pair and hands it to this 
 an idle prompt, with `claude`/`node` in the foreground, the tool presses a bare **Enter**
 (the key the UI asks for — no message is typed). If the pair clears, the episode is over;
 if it is still there after `maxRetries` presses, the tool gives up loudly (`🔴AR`) rather
-than keep pressing. A working session ends the episode, even after a give-up: if you press
-Enter yourself, the tool goes back to normal monitoring and `🔴AR` clears. A live
+than keep pressing. Once the pair is gone, even after a give-up (say you pressed Enter
+yourself and the session is working), the tool goes back to normal monitoring and `🔴AR`
+clears. A live
 usage-limit banner always takes precedence.
 
 Detection is anchored on **where the pair sits**, not just its words. The real stale rows

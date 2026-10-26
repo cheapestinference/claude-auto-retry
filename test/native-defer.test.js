@@ -109,7 +109,7 @@ describe('nativeWaitArmed', () => {
 it('src/patterns.js carries no raw U+FE0F', async () => {
   const { readFile } = await import('node:fs/promises');
   const src = await readFile(new URL('../src/patterns.js', import.meta.url), 'utf8');
-  assert.equal(src.includes('️'), false);
+  assert.equal(src.includes('\uFE0F'), false);
 });
 
 describe('nativeDeferSeconds config validation', () => {
@@ -421,6 +421,22 @@ describe('processOneTick — the native re-arm is bounded', () => {
     assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
     assert.equal(tmux._sent.length, 1);
     assert.equal(s.attempts, 1, 'the attempt counts toward maxRetries');
+  });
+
+  // Claude's banner names the zone ("resets 3:00pm (UTC)"), native's own row does not
+  // ("limit resets 3:00pm"): the SAME reset. A static pane whose bottom-most banner at
+  // expiry is the other render must still be refused, not re-armed ~22h once more.
+  it('a static pair read through the other render (zone vs no zone) still does NOT re-arm', async () => {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const past = hhmm(-2 * H);
+    const zoned = paneAt(-2 * H).replace(`limit resets ${past}`, `limit resets ${past} (${tz})`);
+    const tmux = mockTmux(zoned);
+    const s = createMonitorState();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(s.status, 'waiting');
+    expire(s);
+    tmux._pane = paneAt(-2 * H);           // zoneless render of the same reset
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
   });
 
   it('a static pair still reaches max-retries instead of looping', async () => {

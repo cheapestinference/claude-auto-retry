@@ -21,8 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A stale-reset give-up no longer sticks after you press Enter yourself.** Once the
   Enter nudge gave up (`🔴AR`), a session the user continued by hand kept the stale-reset
   status and the give-up flag for the rest of the run: `🔴AR` through hours of healthy
-  work. A working session now ends the stale-reset episode — the stale screen cannot
-  coexist with a working turn — and returns to normal monitoring.
+  work. The pair leaving the bottom of the pane (a working turn's footer renders below it)
+  now ends the episode and clears the give-up, checked before the working gate; a
+  working-shaped line merely sitting above the input box still only defers, so the Enter
+  presses stay bounded by `maxRetries`.
 - **Confirming the menu's native row now defers to native.** Selecting "Wait here, then
   continue automatically" arms native's own wait, but the menu screen has no armed line
   yet, so the wait armed at reset + margin with no `nativeDeferSeconds` — and could not be

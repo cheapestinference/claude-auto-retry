@@ -175,12 +175,16 @@ function usageWaitUntil(stripped, config, { assumeNativeArmed = false } = {}) {
   return { message, parsed, until, native };
 }
 
-// Identity of a parsed ABSOLUTE reset, for the re-arm's different-reset guard: the whole
-// parsed clock (hour, minute, zone, and the date a weekly banner carries), so two reads of
-// the same banner text compare equal on any day. Relative hints and fallbacks have none.
+// Identity of a parsed ABSOLUTE reset, for the re-arm's different-reset guard: the clock
+// (hour, minute) plus the date a weekly banner carries, so two reads of the same reset
+// compare equal on any day. NOT the timezone: Claude's banner names it ("resets 3:00pm
+// (UTC)") while native's own row doesn't ("limit resets 3:00pm") — the same reset under two
+// keys let a static pane re-arm one extra ~22h wait whenever the bottom-most banner at
+// expiry was the other render. A genuine re-arm moves the reset ~5h, so the zone adds no
+// discrimination. Relative hints and fallbacks have no identity.
 function resetKey(parsed) {
   if (!parsed || parsed.relative) return null;
-  return [parsed.hour, parsed.minute, parsed.timezone || '', parsed.month ?? '', parsed.day ?? ''].join('|');
+  return [parsed.hour, parsed.minute, parsed.month ?? '', parsed.day ?? ''].join('|');
 }
 
 // `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
@@ -432,8 +436,10 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     //   1. DIFFERENT RESET. A genuine re-arm is for a NEW window (the reset moved ~5h), so
     //      the live banner must parse to a different reset than the one this wait was armed
     //      for (_waitResetKey). The static pair parses the same clock on every read →
-    //      refused at the FIRST expiry → the send path below. A wait with no stored identity
-    //      (fallback-armed, or set up without an arm) counts as different.
+    //      refused at the FIRST expiry of a wait armed from it → the send path below. A wait
+    //      with no stored identity (fallback-armed, or set up without an arm) counts as
+    //      different, so there the bound is ONE re-arm (which stores the key) before the
+    //      static pair is refused and sends.
     //      Accepted cost: a reset that recurs at the same clock with nothing else to tell it
     //      apart (a weekly limit rendered WITHOUT its date re-arms exactly 7 days later at
     //      the same time) is refused too, and we send once — benign, the pre-re-arm
@@ -712,25 +718,26 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     if (isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
       resetStaleReset(state); return enterUsageWait(state, stripped, config);
     }
-    // Working → the Enter (ours or the user's) took: the episode is OVER. Reset the family
-    // and return to monitoring, the same exit as the render-gone check below — which also
-    // clears _gaveUp. This deliberately differs from the other bounded families, which
-    // defer on working WITHOUT resetting: their error render can persist above a turn that
-    // is in flight (a sticky flag resent and re-flagged), so a reset there re-zeroed the
-    // budget every cycle. The stale screen cannot coexist with a working turn — the native
-    // wait ended by definition, and the working footer breaks the bottom-of-pane pair
-    // staleResetMatch requires. Deferring here instead held status 'stale-reset' and a
-    // give-up's _gaveUp for the rest of the run once the user pressed Enter by hand: 🔴AR
-    // in the tmux segment through hours of healthy work. (Kept ahead of the render-gone
-    // check, which reaches the same exit on most working captures: working is the explicit
-    // signal, so the recovery no longer hinges on how the pair happens to render.)
-    if (isWorking(stripped)) {
-      resetStaleReset(state); state.status = 'monitoring'; return 'stale-reset-cleared';
-    }
-
-    // Render gone → native continued (or the user pressed Enter). Episode over.
+    // Render gone → native continued (or the user pressed Enter). Episode over — and this
+    // is also how a give-up recovers: reset clears _gaveUp, so a session continued by hand
+    // after the nudge gave up stops showing 🔴AR. Checked BEFORE the working gate below.
+    // The invariant: a real working turn renders its footer BELOW the pair, and the pair
+    // must be the bottom-most content (staleResetMatch), so a working footer breaks the
+    // match and lands here. Deferring on working first held status 'stale-reset' and the
+    // give-up's _gaveUp for the rest of the run: 🔴AR through hours of healthy work.
     if (!staleResetMatch(stripped, RATE_LIMIT_TAIL_LINES)) {
       resetStaleReset(state); state.status = 'monitoring'; return 'stale-reset-cleared';
+    }
+    // The pair still matches, yet isWorking is true: a working-shaped line ABOVE the input
+    // box (an internal-retry "Retrying in … · attempt N/M", a background-agent count) —
+    // isWorking reads a content tail, so such lines satisfy it without being a live turn
+    // below the pair. Defer WITHOUT consuming or resetting, as the other bounded families
+    // do: clearing here (an earlier fix did) let the monitoring branch re-detect the pair
+    // with a fresh budget every cycle — 13 Enter presses in 40 ticks with maxRetries 2 and
+    // no give-up (reviewer-executed).
+    if (isWorking(stripped)) {
+      state.staleResetWaitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      return 'stale-reset-working';
     }
 
     // Still asking after our Enters: something other than staleness holds the session.

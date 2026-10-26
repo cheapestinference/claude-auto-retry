@@ -218,7 +218,48 @@ describe('processOneTick — native stale-reset nudge', () => {
     assert.equal(t._keys.length, 1);
   });
 
-  it('a non-gave-up episode interrupted by a working pane also resets', async () => {
+  // isWorking reads a content tail, so a working-shaped line ABOVE the input box (an
+  // internal-retry "Retrying in … · attempt N/M", a background-agent count) satisfies it
+  // while the stale pair still sits below the box. That is NOT a working turn: defer
+  // without consuming, exactly as before — clearing on it re-entered the family from
+  // monitoring with a fresh budget every other tick (13 Enters in 40 ticks, maxRetries 2).
+  const WORKING_ABOVE_PAIR = [
+    '⏺ Running the deploy script.',
+    '  Retrying in 5s · attempt 3/10',
+    '',
+    '────────────────────────────────────────',
+    '❯ ',
+    '────────────────────────────────────────',
+    '  Your usage limit has reset',
+    '  Press enter to continue',
+  ].join('\n');
+
+  it('working line ABOVE a still-matching pair defers without consuming an attempt', async () => {
+    const t = mockTmux(WORKING_ABOVE_PAIR);
+    const s = createMonitorState();
+    s.status = 'stale-reset'; s.staleResetWaitUntil = Date.now() - 1; s.staleResetAttempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'stale-reset-working');
+    assert.equal(s.status, 'stale-reset');
+    assert.equal(s.staleResetAttempts, 1, 'not consumed');
+    assert.equal(t._keys.length, 0);
+  });
+
+  it('a working line above the pair on alternating ticks stays bounded: <= maxRetries Enters, then gives up', async () => {
+    const t = mockTmux(STALE);
+    const s = createMonitorState();
+    const c = cfg({ maxRetries: 2, retryDelaySeconds: 1 });
+    const results = [];
+    for (let i = 0; i < 40; i++) {
+      t._pane = i % 3 === 2 ? WORKING_ABOVE_PAIR : STALE;   // idle, idle, working-above, …
+      s.staleResetWaitUntil = Date.now() - 1;
+      results.push(await processOneTick(s, t, '%0', c, () => true));
+    }
+    assert.ok(t._keys.length <= 2, `${t._keys.length} Enters: ${results.join(',')}`);
+    assert.ok(results.includes('stale-reset-gave-up'), results.join(','));
+    assert.equal(s._gaveUp, true);
+  });
+
+  it('a non-gave-up episode whose pair is broken by a working footer below it also resets', async () => {
     const t = mockTmux(STALE + '\n✻ Thinking… (esc to interrupt)');
     const s = createMonitorState();
     s.status = 'stale-reset'; s.staleResetWaitUntil = Date.now() - 1; s.staleResetAttempts = 1;
