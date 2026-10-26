@@ -1044,6 +1044,17 @@ describe('menuStepsToWaitOption — native "Wait here, then continue automatical
     const decoy = '  Upgrade so you never have to wait here, then continue automatically';
     assert.equal(menuStepsToWaitOption(menu([decoy, OLD], 0)), 1);
   });
+  // A menu offering ONLY the native row must still be recognized as a menu: otherwise the
+  // usage wait types retryMessage into it and Enter confirms the highlighted row.
+  it('isRateLimitOptionsPrompt recognizes a menu whose only wait row is the native one', () => {
+    assert.equal(isRateLimitOptionsPrompt(menu([UPGRADE, NATIVE], 0), 12), true);
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, NATIVE], 0), 12), 1);
+  });
+  it('a menu with no wait row (old or native) is still not taken as the limit menu', () => {
+    const decoy = '  Upgrade so you never have to wait here, then continue automatically';
+    assert.equal(isRateLimitOptionsPrompt(menu([UPGRADE, decoy], 0), 12), false);
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, decoy], 0), 12), null);
+  });
   it('still refuses (null) an unreadable layout with a native row', () => {
     const noCursor = ['What do you want to do?', `  1. ${UPGRADE.trim()}`, `  2. ${NATIVE.trim()}`].join('\n');
     assert.equal(menuStepsToWaitOption(noCursor), null);

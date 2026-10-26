@@ -570,8 +570,10 @@ export function isRateLimitOptionsPrompt(text, tailLines = 0) {
   // are not chrome, so contentTail keeps them.
   const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
   const t = lines.join('\n');
+  // Either wait row qualifies: a menu offering only native's "Wait here, then continue
+  // automatically" row must still be seen as the menu, or the usage wait types into it.
   return /what do you want to do\?/i.test(t)
-    && WAIT_OPTION_REGEX.test(t)
+    && (WAIT_OPTION_REGEX.test(t) || lines.some(l => NATIVE_WAIT_OPTION_REGEX.test(l)))
     && (/enter to confirm/i.test(t) || /esc to cancel/i.test(t) || t.includes(MENU_CURSOR));
 }
 

@@ -68,7 +68,7 @@ Where the native feature stops — each row verified against the [official docs]
 
 One config gotcha worth knowing: the native setting (`autoContinueAtUsageLimit`) is only honored from **user** or managed settings — a project-level settings file doesn't arm it.
 
-**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. When the native `Continuing automatically at … · esc to cancel` line is on screen, the monitor defers rather than races: it adds `nativeDeferSeconds` (180 s) to its own reset + margin wait and never types while native shows `Continuing shortly`, so native's continue goes first and ours is only the backstop. Without that line visible, the worst race is both submitting one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
+**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. When the native `Continuing automatically at … · esc to cancel` line is on screen, the monitor defers rather than races: it adds `nativeDeferSeconds` (180 s) to its own reset + margin wait, holds off typing for up to 3 minutes while native shows `Continuing shortly` (then sends as the backstop, with a warning), and re-arms instead of typing when native has armed a fresh wait for a later reset — so native's continue goes first and ours is only the backstop. Without that line visible, the worst race is both submitting one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
 
 ## The Solution
 
@@ -155,7 +155,7 @@ automates the wait-and-retry for all of them.
 | Rate limit | `Rate limit hit. Resets at 4pm` |
 | Live-limit companion hint | `/usage-credits to finish what you're working on.` |
 
-### The `/rate-limit-options` menu — driven to "Stop and wait", never "Upgrade"
+### The `/rate-limit-options` menu — driven to a wait row, never "Upgrade"
 
 ```
 What do you want to do?
@@ -164,8 +164,10 @@ What do you want to do?
 ```
 
 Handled across any menu layout (the option order varies by Claude Code version); the
-tool locates the cursor and the "Stop and wait" option, and refuses to press Enter if
-the layout is unreadable.
+tool locates the cursor and the wait option — native auto-continue's "Wait here, then
+continue automatically" row (v2.1.234+) when offered, else "Stop and wait for limit to
+reset" — and refuses to press Enter if the layout is unreadable. A menu offering only
+the native row is recognized as the menu too.
 
 ### API overload / transient errors — exponential backoff with jitter
 

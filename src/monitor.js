@@ -232,8 +232,9 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
 
   // Handle the interactive /rate-limit-options menu before any other logic. A bare
   // Enter here confirms the highlighted default, which on some Claude Code versions
-  // is "Upgrade your plan". Navigate to "Stop and wait for limit to reset" wherever
-  // it sits, confirm it, then enter the normal (hours-scale) wait state.
+  // is "Upgrade your plan". Navigate to the wait row wherever it sits — native's "Wait
+  // here, then continue automatically" when offered, else "Stop and wait for limit to
+  // reset" — confirm it, then enter the normal (hours-scale) wait state.
   if (tmuxAdapter.sendKey && isRateLimitOptionsPrompt(stripped, RATE_LIMIT_TAIL_LINES)
       && Date.now() >= (state._menuCooldownUntil || 0)) {
     const cooldown = config.pollIntervalSeconds * 1000 * 2;
@@ -338,6 +339,25 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
         return 'native-firing';
       }
       nativeOverdue = true;
+    }
+
+    // Native re-armed for a FRESH limit: it fired, the continuation re-hit the limit at
+    // once, and native armed again for the next reset — the brief working spinner slipped
+    // between polls, so the resumed check above never stood us down. Typing now cancels
+    // native's fresh wait, and repeating it on each expiry burns into max-retries with the
+    // session parked. Re-arm ours (a fresh episode) instead. Two signals must agree: the
+    // armed line AND a live banner whose reset is still ahead. The armed line alone could
+    // be stray tail text, and a reset already past means native's wait is over — both
+    // must fall through to the send. calculateWaitMs returns 0 (margin aside) for a
+    // just-passed reset (RESET_GRACE_MS). Absolute resets only: a relative hint ("try
+    // again in 5 minutes") reads as future on every re-read and would re-arm forever.
+    if (native && !native.firing) {
+      const message = findRateLimitMessage(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
+      const parsed = message ? parseResetTime(message) : null;
+      if (parsed && !parsed.relative && calculateWaitMs(parsed, 0, config.fallbackWaitHours) > 0) {
+        enterUsageWait(state, stripped, config, { fresh: true });
+        return 'native-rearmed';
+      }
     }
 
     if (state.attempts >= config.maxRetries) {
@@ -889,10 +909,13 @@ export async function startMonitor(pane, pid) {
       if (result === 'native-armed-deferring') {
         await logWait((secs, msg) => `Rate limit detected: "${msg}". Native auto-continue is armed ("${state._nativeWaitLine}") — deferring to it: waiting ${secs}s (includes +${config.nativeDeferSeconds}s nativeDeferSeconds), so ours only fires if native didn't continue.`);
       }
+      if (result === 'native-rearmed') {
+        await logWait((secs, msg) => `Wait expired, but native auto-continue is armed again for a fresh limit ("${state._nativeWaitLine}", banner "${msg}") — not typing over it. Re-armed: waiting ${secs}s.`);
+      }
       if (result === 'native-firing-overdue') await logger.warn(`Native auto-continue has shown "Continuing shortly" for over ${NATIVE_FIRING_MAX_SKIP_MS / 60_000} min without the session resuming — stopped deferring and sent the retry message as the backstop (attempt ${state.attempts}).`);
       if (result === 'native-firing') await logger.info('Native auto-continue is firing ("Continuing shortly") — not typing over it. Will recheck.');
       if (result === 'menu-confirmed') {
-        await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
+        await logWait((secs) => `Rate-limit options menu: selected the wait option (native "Wait here, then continue automatically" when offered, else "Stop and wait for limit to reset"). Waiting ${secs}s...`);
       }
       if (result === 'wait-corrected') {
         await logWait((secs, msg) => `Reset time re-read from the live banner: "${msg}". Wait shortened to ${secs}s.`);

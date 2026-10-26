@@ -16,7 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is on the screen the wait arms from, the wait now adds `nativeDeferSeconds` (new, default
   180, `0` disables) and logs that it deferred. At send time, a `Continuing shortly · esc
   to cancel` line (native firing right now) skips the tick on a short cooldown instead of
-  typing; the next recheck sees the resumed session and stands down as before. Both
+  typing; the next recheck sees the resumed session and stands down as before. The skip is
+  bounded: after 3 minutes of "Continuing shortly" without a resume, the retry is sent as
+  the backstop with a warning. And when the wait expires onto a FRESH native wait (native
+  fired, the continuation re-hit the limit, native re-armed), the monitor re-arms for the
+  new reset instead of typing — only when the armed line and a live banner with a future
+  reset agree; a past reset still sends. Both
   matches require `esc to cancel` after the phrase on the same line, so prose describing
   native auto-continue doesn't trip them.
 - **The `/rate-limit-options` menu now selects native auto-continue's own row.** Claude
@@ -25,7 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cursor to the old row — so native never armed and the session depended on this
   tool's typed continue alone. The native row is now preferred wherever it sits; "Stop and
   wait" stays the fallback for menus without it, and a layout that can't be read is still
-  refused (no Enter). The row must begin with the phrase, so another option that merely
+  refused (no Enter). A menu offering only the native row is now recognized as the menu
+  (it used to be missed, so the usage wait typed into the open menu). The row must begin with the phrase, so another option that merely
   mentions it isn't taken. Native's after-the-fact renders — "Automatic continue
   cancelled · …", "Usage limit reset · continuing automatically", and "Automatic continue
   stopped after repeated usage-limit hits" — are pinned by tests as triggering nothing;

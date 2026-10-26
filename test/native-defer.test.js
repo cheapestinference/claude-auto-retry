@@ -155,12 +155,47 @@ describe('processOneTick — defer to an armed native wait', () => {
     assert.ok(s.waitUntil - Date.now() <= DEFAULT_CONFIG.pollIntervalSeconds * 1000 * 2 + 1000);
   });
 
-  it('still sends when the wait expires with native armed but not firing', async () => {
+  // Native fired, the continuation instantly re-hit the limit, and native re-armed for the
+  // NEXT reset — the brief working spinner slipped between polls, so nothing stood us
+  // down. At our deferred expiry the pane shows a fresh banner + a fresh armed line.
+  // Typing here cancels native's fresh wait (and repeating it burns into max-retries):
+  // both signals agree a new wait is armed, so re-arm ours instead.
+  it('re-arms instead of sending when the expiry finds a fresh native wait (future reset)', async () => {
     const t = mockTmux(ARMED);
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.attempts = 3;
+    const base = await arm(BANNER_ONLY);
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'native-rearmed');
+    assert.equal(t._sent.length, 0, 'never type over a freshly armed native wait');
+    assert.equal(s.status, 'waiting');
+    assert.equal(s.attempts, 0, 'a re-hit limit is a fresh episode');
+    assert.ok(near(s.waitUntil - Date.now(), base.ms + DEFAULT_CONFIG.nativeDeferSeconds * 1000));
+  });
+
+  // The guard: the armed line alone must not re-arm. A banner whose reset has passed
+  // means native's wait is over (or that line is stale) — the backstop must send.
+  it('still sends when the armed line is visible but the banner reset is already past', async () => {
+    const past = hhmm(-4 * 60_000);
+    const pane = BANNER_ONLY.replace(RESET, past) + `\n  Continuing automatically at ${past} · esc to cancel`;
+    const t = mockTmux(pane);
     const s = createMonitorState();
     s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.attempts = 0;
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'retried');
     assert.equal(t._sent.length, 1);
+  });
+
+  it('drives a native-row-only /rate-limit-options menu instead of typing into it', async () => {
+    const t = mockTmux([
+      `You've hit your session limit · resets ${RESET}`,
+      'What do you want to do?',
+      '❯ 1. Upgrade your plan',
+      `  2. Wait here, then continue automatically at ${RESET}`,
+      'Enter to confirm · Esc to cancel',
+    ].join('\n'));
+    const s = createMonitorState();
+    assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'menu-confirmed');
+    assert.deepEqual(t._keys, ['Down', 'Enter']);
+    assert.equal(t._sent.length, 0);
   });
 
   it('native fired during our wait → the recheck still exits user-continued', async () => {
