@@ -82,10 +82,38 @@ describe('staleResetMatch', () => {
 
   it('does NOT match a pair OUTSIDE the tail window', () => {
     const below = Array.from({ length: 13 }, (_, i) => `line of later work ${i}`).join('\n');
-    const pane = `Your usage limit has reset\nPress enter to continue\n${below}`;
-    assert.equal(staleResetMatch(pane, 12), null);
-    assert.ok(staleResetMatch(pane, 20), 'a wider window sees it — the window is what excludes it');
+    assert.equal(staleResetMatch(`Your usage limit has reset\nPress enter to continue\n${below}`, 12), null);
   });
+
+  // Position, not prefix, is the gate against prose. Claude Code indents a reply's
+  // continuation lines and code blocks by two spaces, so a quotation of the pair on lines
+  // of its own BEGINS each line exactly like the real chrome does. What a quotation can't
+  // do is sit where the chrome sits: the stale rows are the bottom-most content, below
+  // the input box — model output always renders above it.
+  const BOX = ['────────────────────────────────────────', '❯ ', '────────────────────────────────────────', '  ? for shortcuts'];
+  const QUOTED_WITH_PROSE_BELOW = [
+    '⏺ When the host sleeps past the reset, the status lines change to:', '',
+    '  Your usage limit has reset', '  Press enter to continue', '',
+    '  and it waits for a human Enter.', ...BOX].join('\n');
+  const QUOTED_IN_CODE_BLOCK = [
+    '⏺ Here is the README section:', '  ```',
+    '  Your usage limit has reset', '  Press enter to continue', '  ```', ...BOX].join('\n');
+  const QUOTED_ABOVE_DRAFT = [
+    '⏺ Done.', '', '  Your usage limit has reset', '  Press enter to continue',
+    '────', '❯ half-typed draft', '────'].join('\n');
+  const QUOTED_ABOVE_EMPTY_BOX = [
+    '⏺ The stale render reads:', '  Your usage limit has reset', '  Press enter to continue', ...BOX].join('\n');
+
+  it('does NOT match a reply quoting the pair with prose output below it', () =>
+    assert.equal(staleResetMatch(QUOTED_WITH_PROSE_BELOW, 12), null));
+  it('does NOT match the pair echoed inside a code block', () =>
+    assert.equal(staleResetMatch(QUOTED_IN_CODE_BLOCK, 12), null));
+  it('does NOT match a quoted pair above an input box holding a draft', () =>
+    assert.equal(staleResetMatch(QUOTED_ABOVE_DRAFT, 12), null));
+  it('does NOT match a quoted pair directly above an EMPTY input box', () =>
+    assert.equal(staleResetMatch(QUOTED_ABOVE_EMPTY_BOX, 12), null));
+  it('matches the real pair below the input box with footer chrome under it', () =>
+    assert.ok(staleResetMatch(STALE + '\n  ? for shortcuts', 12)));
 
   it('returns null for empty text', () =>
     assert.equal(staleResetMatch('', 12), null));
@@ -215,6 +243,32 @@ describe('processOneTick — native stale-reset nudge', () => {
     s2.status = 'stale-reset'; s2.staleResetWaitUntil = Date.now() - 1;
     assert.equal(await processOneTick(s2, t, '%0', cfg(), () => true), 'waiting');
     assert.equal(t._keys.length, 0);
+  });
+
+  // The reviewer's executed repro: before the positional rule this pane went detected →
+  // nudged → nudged → gave-up, the two Enters submitting the user's half-typed draft.
+  it('never presses Enter over a quoted pair above the user\'s draft', async () => {
+    const t = mockTmux([
+      '⏺ When the host sleeps past the reset, the status lines change to:', '',
+      '  Your usage limit has reset', '  Press enter to continue', '',
+      '  and it waits for a human Enter.', '────', '❯ half-typed draft', '────', '  ? for shortcuts',
+    ].join('\n'));
+    const s = createMonitorState();
+    for (let i = 0; i < 4; i++) {
+      s.staleResetWaitUntil = Date.now() - 1;
+      assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'monitoring');
+    }
+    assert.deepEqual(t._keys, []);
+    assert.equal(!!s._gaveUp, false);
+  });
+
+  // A pane that resumed really did continue — never route it to the nudge.
+  it('waiting recheck still concludes user-continued when the pair is visible but the pane resumed', async () => {
+    const t = mockTmux(STALE + '\n✻ Thinking… (esc to interrupt)');
+    const s = expiredWait();
+    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'user-continued');
+    assert.equal(s.status, 'monitoring');
+    assert.deepEqual(t._keys, []);
   });
 
   it('enabled: false disables it — the recheck concludes user-continued as before', async () => {

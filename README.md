@@ -561,11 +561,16 @@ an idle prompt, with `claude`/`node` in the foreground, the tool presses a bare 
 if it is still there after `maxRetries` presses, the tool gives up loudly (`🔴AR`) rather
 than keep pressing. A live usage-limit banner always takes precedence.
 
-Detection is anchored on the **shape** of both lines: each phrase must begin its line
-(behind at most indentation and one chrome marker such as `│` or `⎿`), the two must appear
-in that order, and both must sit in the live bottom of the pane. `Press enter to continue`
-on its own is a generic phrase and never matches; prose quoting the pair mid-sentence, the
-model's `⏺` output, your own `❯` row and tool-call output don't either.
+Detection is anchored on **where the pair sits**, not just its words. The real stale rows
+are status chrome: they are the bottom-most content of the pane, below the input box.
+So the pair only matches when `Press enter to continue` is the last content row (UI
+footer aside), `Your usage limit has reset` is the nearest non-blank row above it, and both
+sit below the input row (`❯`, empty or holding a draft) when one is on screen. Model output
+always renders above the input box. A reply or code block quoting the pair, even on
+indented lines of its own, therefore doesn't match. Each phrase must also begin its line
+(behind at most indentation and one chrome marker such as `│` or `⎿`). That rules out
+mid-sentence quotes, the model's `⏺` output and your own `❯` row, and tool-call output is
+excluded as well. `Press enter to continue` on its own is a generic phrase and never matches.
 
 Configured under a `nativeStaleReset` block (defaults shown):
 

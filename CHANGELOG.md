@@ -17,9 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down, leaving the session parked forever. The recheck now recognizes the stale pair and
   hands it to a new bounded nudge (`nativeStaleReset`, on by default): a bare Enter at an
   idle prompt, at most 2 presses 3 s apart, giving up loudly if the prompt persists. The
-  pair is also caught from plain monitoring. Both lines are shape-anchored (each phrase
-  begins its line, in order, in the live tail), so the generic "Press enter to continue"
-  alone, prose quoting the pair, and tool output never trigger it. The status bar shows the
+  pair is also caught from plain monitoring. The gate is position: the pair must be the
+  bottom-most content rows of the pane, below the input box when one is on screen. Model
+  output always renders above the input box, so a reply or code block quoting the pair —
+  even on indented lines of its own, even above a half-typed draft — doesn't match. Each
+  phrase must also begin its line. The generic "Press enter to continue" alone never
+  matches, and tool output is excluded. The status bar shows the
   in-progress state as `🟢AR` (it lasts seconds) and a give-up as `🔴AR`.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm

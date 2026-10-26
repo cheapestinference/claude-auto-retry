@@ -802,35 +802,50 @@ export function nearLimitWrapUpMatch(text) {
 // screen, so isRateLimited is false and a monitor mid-wait read this as "the user
 // continued" and stood down — leaving the session parked forever.
 //
-// Shape-anchored, like the #77 render head: each phrase must BE its line's content —
-// leading whitespace (status rows are indented) and at most one chrome prefix (│ box
-// border, ⎿/└ echo marker, ⚠/· banner marker), then the phrase; trailing text is allowed
-// ("· esc to cancel", a closing │). Prose carries the phrases mid-sentence, the model's
-// own output carries ⏺/●, the user's typed row carries ❯ — none of those start the line
-// with the phrase, so none match. "Press enter to continue" alone is generic (installers,
-// pagers, test runners print it), so only the PAIR, in that order, is the signature.
-// Known limit: a hanging-indent quotation of BOTH lines, in order, at the bottom of the
-// pane still matches — the cost is an Enter at an idle prompt, bounded by maxRetries.
+// Two gates, and POSITION is the one that carries the weight against prose:
+//   1. WHERE THE PAIR SITS. The stale rows are status chrome: they render as the
+//      bottom-most content of the pane, BELOW the input box. Model output always renders
+//      ABOVE the input box. So "Press enter to continue" must be the last content row of the
+//      chrome-stripped tail, "Your usage limit has reset" must be the nearest non-blank row
+//      above it, and both must sit below the pane's last input row (❯/>, bare or boxed) when
+//      one is on screen. The prefix rule alone was not enough: Claude Code indents a reply's
+//      continuation lines and code blocks by two spaces, so a reply or README block quoting
+//      the pair on lines of its own begins each line exactly like the real chrome. Under
+//      that rule it fired, and a draft sitting in the input box was submitted by the Enter
+//      (verified by executing the monitor over such a pane). A quotation can't sit below
+//      the input box. That is the discriminator.
+//   2. HOW EACH LINE BEGINS. Leading whitespace (status rows are indented) and at most one
+//      chrome prefix (│ box border, ⎿/└ echo marker, ⚠/· banner marker), then the phrase;
+//      trailing text is allowed ("· esc to cancel", a closing │). ⏺/● (model output) and
+//      ❯ (the user's row) never begin a match.
+// "Press enter to continue" alone is generic (installers, pagers, test runners print it),
+// so only the PAIR is the signature.
 const STALE_RESET_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
 const STALE_RESET_HEAD = new RegExp(`${STALE_RESET_PREFIX}Your usage limit has reset\\b`, 'i');
 const STALE_RESET_PROMPT = new RegExp(`${STALE_RESET_PREFIX}Press enter to continue\\b`, 'i');
-// Same budget as the banner path (monitor.js RATE_LIMIT_TAIL_LINES): the pair renders as
-// the bottom-most status rows, so it is always inside a 12-line content tail when live.
+// The input row, bare ("❯ draft") or boxed ("│ > draft │"). Empty, it is chrome and gets
+// stripped from the tail — which is exactly why its position is checked separately.
+const INPUT_ROW = /^\s*(?:│\s*)?[❯>]/;
+// Same budget as the banner path (monitor.js RATE_LIMIT_TAIL_LINES).
 const STALE_RESET_TAIL_LINES = 12;
 
-// Returns the "Your usage limit has reset" line (trimmed) when the pair is live in the
-// tail, else null. Tool-echo masked (#63): the pair inside a Bash() result is a file's
-// content, not native chrome.
+// Returns the "Your usage limit has reset" line (trimmed) when the pair is the live bottom
+// of the pane, else null. Tool-echo masked (#63): the pair inside a Bash() result is a
+// file's content, not native chrome.
 export function staleResetMatch(text, tailLines = STALE_RESET_TAIL_LINES) {
   const all = stripAnsi(text).split('\n');
-  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines)
-    : { start: 0, end: all.length };
-  const lines = all.slice(start, end);
-  const mask = toolEchoMask(all).slice(start, end);
-  const head = lines.findIndex((l, i) => !mask[i] && STALE_RESET_HEAD.test(l));
-  if (head === -1) return null;
-  const prompted = lines.some((l, i) => i > head && !mask[i] && STALE_RESET_PROMPT.test(l));
-  return prompted ? lines[head].trim() : null;
+  // Chrome is stripped even for tailLines = 0: "the bottom-most content row" is only
+  // meaningful once the footer rows below the stale chrome are out of the way.
+  const { start, end } = contentTailRange(all, tailLines > 0 ? tailLines : Infinity);
+  const mask = toolEchoMask(all);
+  const prompt = end - 1;
+  if (prompt < start || mask[prompt] || !STALE_RESET_PROMPT.test(all[prompt])) return null;
+  let head = prompt - 1;
+  while (head >= start && all[head].trim() === '') head--;
+  if (head < start || mask[head] || !STALE_RESET_HEAD.test(all[head])) return null;
+  const lastInput = all.findLastIndex((l, i) => !mask[i] && INPUT_ROW.test(l));
+  if (lastInput > head) return null;
+  return all[head].trim();
 }
 
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
