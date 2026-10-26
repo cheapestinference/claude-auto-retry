@@ -10,7 +10,9 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 
-> **📢 Status (Aug 2026):** The Claude **Desktop app** now does this natively — an *"☑ Auto-continue when limits reset"* checkbox ([confirmed in the wild](https://github.com/anthropics/claude-code/issues/35744#issuecomment-5278232593)). The **CLI still doesn't have it** — that's the gap this tool covers today. Track [anthropics/claude-code#35744](https://github.com/anthropics/claude-code/issues/35744) for the native CLI version; until it lands, `npm i -g claude-auto-retry` is the way.
+> **📢 Status (Oct 2026): Claude Code now does the core of this natively.** Since **v2.1.234** the CLI waits in the open session and continues the task on its own when a claude.ai usage limit resets — **on by default** in interactive subscription sessions ([official docs](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset); [#13354](https://github.com/anthropics/claude-code/issues/13354) and [#35744](https://github.com/anthropics/claude-code/issues/35744) closed as fixed). If all you ever needed was "wait out the 5-hour limit on the laptop in front of you", **you no longer need this tool for that.**
+>
+> What this tool still covers — verified against the docs and the v2.1.310 binary: keeping the session *and the wait* alive when your SSH connection drops or the terminal closes (the native wait dies with the process and does **not** restart on `/resume`), waits the native feature won't start on its own (weekly resets more than 24h out, model-specific limits, Remote Control sessions), and the failure modes it doesn't touch at all: terminal API overloads, safeguard false-positives, interrupted streams, and the near-limit wrap-up parking. Details in [Native auto-continue vs this tool](#native-auto-continue-v21234-vs-this-tool).
 
 ---
 
@@ -25,6 +27,42 @@ You've hit your limit · resets 3pm (Europe/Dublin)
 ```
 
 Claude stops. You have to wait hours, come back, and type "continue". If you're running long tasks overnight or while AFK, this kills your productivity.
+
+Since v2.1.234, Claude Code handles the basic version of this itself. The next section maps exactly what the native feature covers and where this tool still earns its keep.
+
+## Native auto-continue (v2.1.234+) vs this tool
+
+Claude Code v2.1.234 (October 2026) shipped [native auto-continue](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset): when a claude.ai usage limit stops Claude mid-task in an interactive session, the CLI shows `Continuing automatically at 3:45pm · esc to cancel`, waits, and prompts Claude to pick the task back up. It is on by default for claude.ai subscription logins (toggle: **Continue automatically at usage limit** in `/config`).
+
+For the core case, the native feature is **better** than any terminal scraper, including this one:
+
+- The reset time comes **structurally from the API** (an epoch timestamp), not parsed out of banner text — no timezone or format pitfalls.
+- It continues **early** if usage becomes available before the reset (you add usage credits, re-login after `/upgrade`, or switch models during the wait).
+- If the continued task hits the limit again, it re-arms itself, up to twice in a row.
+
+If you work interactively, on one machine that stays awake, signed in with a claude.ai subscription: the native feature covers you, and this tool's usage-limit path is redundant.
+
+Where the native feature stops — each row verified against the [official docs](https://code.claude.com/docs/en/interactive-mode#wait-for-a-usage-limit-to-reset) and the v2.1.310 binary:
+
+| Scenario | Native auto-continue | claude-auto-retry |
+|----------|----------------------|-------------------|
+| 5-hour/session limit, interactive subscription session | ✅ default on | Redundant — the monitor stands down when the session resumes |
+| SSH drops, terminal closes, you exit during the wait | ❌ the wait dies with the session and does **not** restart on `/resume`, relaunch, account switch, or a Desktop/cloud handoff — the docs say "keep the session open" | ✅ the tmux wrapper is the "keep the session open" machine: claude and the wait survive the disconnect; reattach to find it working |
+| Machine slept >~30 min past the reset | ⚠️ goes stale: shows `Press enter to continue` and waits for a human | ⚠️ the monitor sleeps with the box too — moot on the always-on machines tmux is for |
+| Weekly limit resetting >24 h out | ⚠️ won't arm on its own (manual: `/rate-limit-options` → *Wait here, then continue automatically*) | ✅ parses dated weekly resets (`resets Oct 9, 10am`) and waits |
+| Opus/Sonnet-specific limit while running another model | ⚠️ won't arm on its own | ✅ waits on the printed reset |
+| Remote Control / agent-team teammate session | ⚠️ won't arm on its own | ✅ the monitor doesn't care who's attached |
+| Headless `claude -p` / background sessions | ❌ not offered at all | ✅ [`--print` mode](#--print-mode): buffers, waits, re-executes |
+| API key / Bedrock / Vertex / usage-based billing | ❌ not offered (no reset to wait for) | Usage path n/a for the same reason — but the [overload backoff](#overload-backoff) still applies |
+| Terminal API overload (`529`/5xx after Claude Code's internal retries give up) | ❌ | ✅ [exponential backoff](#overload-backoff) + `StopFailure` hook |
+| Safeguard/AUP false positive | ❌ | ✅ [bounded re-send](#safeguard-retry) |
+| Response truncated by suspend / dropped connection | ❌ | ✅ [one resume](#interrupted-stream-resume) |
+| Turn parked by the ~95% [wrap-up notice](#near-limit-wrap-up-nudge) | ❌ (it's Claude Code's own wind-down) | ✅ one nudge |
+| Limit hit repeatedly after resuming | Stops after 2 consecutive re-arms | `maxRetries` (default 5), configurable |
+
+One config gotcha worth knowing: the native setting (`autoContinueAtUsageLimit`) is only honored from **user** or managed settings — a project-level settings file doesn't arm it.
+
+**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. In the worst race, both submit one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
 
 ## The Solution
 
@@ -768,6 +806,9 @@ node --test --watch test/             # Watch mode
 - [opencode-claude-quota](https://github.com/nguyenngothuong/opencode-claude-quota) — Rate limit quota monitoring (display only)
 
 ## FAQ
+
+**Q: Claude Code now continues automatically after a limit reset (v2.1.234+). Is this tool obsolete?**
+A: For the basic interactive case — yes, and the native feature does it better (it gets the reset time from the API instead of parsing the terminal). What remains is everything around that case: surviving disconnects via tmux, waits the native feature won't arm, headless `-p` runs, and the non-limit failures (overload, safeguards, interrupted streams, wrap-up parking). See [Native auto-continue vs this tool](#native-auto-continue-v21234-vs-this-tool) for the verified comparison.
 
 **Q: Does this work with Claude Max/Pro/Team?**
 A: Yes. It works with any Anthropic subscription that has usage-based rate limits.
