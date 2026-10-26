@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption } from '../src/patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, menuWaitTarget } from '../src/patterns.js';
 
 const MENU_UPGRADE_FIRST = [
   "You've hit your session limit · resets 6:50pm (Europe/London)",
@@ -1058,6 +1058,12 @@ describe('menuStepsToWaitOption — native "Wait here, then continue automatical
   it('still refuses (null) an unreadable layout with a native row', () => {
     const noCursor = ['What do you want to do?', `  1. ${UPGRADE.trim()}`, `  2. ${NATIVE.trim()}`].join('\n');
     assert.equal(menuStepsToWaitOption(noCursor), null);
+  });
+  // The monitor defers to native only when the confirmed row is native's own.
+  it('menuWaitTarget reports which row it targets', () => {
+    assert.deepEqual(menuWaitTarget(menu([UPGRADE, OLD, NATIVE], 0)), { steps: 2, native: true });
+    assert.deepEqual(menuWaitTarget(menu([UPGRADE, OLD], 0)), { steps: 1, native: false });
+    assert.equal(menuWaitTarget('just some text'), null);
   });
 });
 

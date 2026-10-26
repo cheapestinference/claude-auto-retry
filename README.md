@@ -68,7 +68,7 @@ Where the native feature stops — each row verified against the [official docs]
 
 One config gotcha worth knowing: the native setting (`autoContinueAtUsageLimit`) is only honored from **user** or managed settings — a project-level settings file doesn't arm it.
 
-**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. When the native `Continuing automatically at … · esc to cancel` line is on screen, the monitor defers rather than races: it adds `nativeDeferSeconds` (180 s) to its own reset + margin wait, holds off typing for up to 3 minutes while native shows `Continuing shortly` (then sends as the backstop, with a warning), and re-arms instead of typing when native has armed a fresh wait for a later reset — so native's continue goes first and ours is only the backstop. Without that line visible, the worst race is both submitting one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
+**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. When the native `Continuing automatically at … · esc to cancel` line is on screen, the monitor defers rather than races: it adds `nativeDeferSeconds` (180 s) to its own reset + margin wait, holds off typing for up to 3 minutes while native shows `Continuing shortly` (then sends as the backstop, with a warning), and re-arms instead of typing when native has armed a fresh wait for a later reset — so native's continue goes first and ours is only the backstop. The re-arm is bounded: the banner's reset must differ from the one the wait was armed for (a static or quoted pair that reads the same reset every time sends instead, so `maxRetries` still applies), and at most 3 re-arms run back to back. Confirming the menu's *Wait here, then continue automatically* row also adds the defer, since that confirm is what arms native. Without that line visible, the worst race is both submitting one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
 
 ## The Solution
 
@@ -562,7 +562,9 @@ session parked. Now the wait's recheck recognizes the pair and hands it to this 
 an idle prompt, with `claude`/`node` in the foreground, the tool presses a bare **Enter**
 (the key the UI asks for — no message is typed). If the pair clears, the episode is over;
 if it is still there after `maxRetries` presses, the tool gives up loudly (`🔴AR`) rather
-than keep pressing. A live usage-limit banner always takes precedence.
+than keep pressing. A working session ends the episode, even after a give-up: if you press
+Enter yourself, the tool goes back to normal monitoring and `🔴AR` clears. A live
+usage-limit banner always takes precedence.
 
 Detection is anchored on **where the pair sits**, not just its words. The real stale rows
 are status chrome: they are the bottom-most content of the pane, below the input box.
@@ -594,7 +596,7 @@ Configured under a `nativeStaleReset` block (defaults shown):
 | `retryDelaySeconds` | `3` | Wait before each press — lets the wake and native's redraw settle |
 
 The status bar shows `🟢AR` while the nudge is in progress (it lasts seconds) and `🔴AR`
-if it gave up.
+if it gave up, until the session is working again.
 
 ## tmux status bar indicator
 

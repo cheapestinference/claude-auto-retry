@@ -185,13 +185,48 @@ describe('processOneTick — native stale-reset nudge', () => {
     // Not entered while working…
     const t1 = mockTmux(working);
     assert.equal(await processOneTick(createMonitorState(), t1, '%0', cfg(), () => true), 'monitoring');
-    // …and deferred, without consuming an attempt, if work starts mid-episode.
+    // …and no Enter if work starts mid-episode: a working pane ends the episode (below).
     const t2 = mockTmux(working);
     const s = createMonitorState();
     s.status = 'stale-reset'; s.staleResetWaitUntil = Date.now() - 1; s.staleResetAttempts = 1;
-    assert.equal(await processOneTick(s, t2, '%0', cfg(), () => true), 'stale-reset-working');
-    assert.equal(s.staleResetAttempts, 1);
+    await processOneTick(s, t2, '%0', cfg(), () => true);
     assert.equal(t2._keys.length, 0);
+  });
+
+  // The stale screen cannot coexist with a working turn: a working pane means the Enter
+  // (ours or the user's) took. Deferring on it — as the other bounded families do — kept a
+  // gave-up episode's status and _gaveUp for the rest of the run: 🔴AR in the tmux segment
+  // through hours of healthy work after the user pressed Enter by hand.
+  it('a working pane after a give-up ends the episode and clears the give-up', async () => {
+    const t = mockTmux(STALE);
+    const s = createMonitorState();
+    const c = cfg({ maxRetries: 1, retryDelaySeconds: 1 });
+    await processOneTick(s, t, '%0', c, () => true);
+    s.staleResetWaitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', c, () => true), 'stale-reset-nudged');
+    s.staleResetWaitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', c, () => true), 'stale-reset-gave-up');
+    assert.equal(s._gaveUp, true);
+    // The user pressed Enter by hand; the session is working.
+    t._pane = '⏺ Picking up the remaining handlers.\n✻ Thinking… (esc to interrupt)\n\n❯ ';
+    s.staleResetWaitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, t, '%0', c, () => true), 'stale-reset-cleared');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s._gaveUp, false, 'the status snapshot no longer publishes gaveUp');
+    assert.equal(s._staleResetGaveUp, false);
+    assert.equal(s.staleResetAttempts, 0);
+    assert.equal(t._keys.length, 1);
+  });
+
+  it('a non-gave-up episode interrupted by a working pane also resets', async () => {
+    const t = mockTmux(STALE + '\n✻ Thinking… (esc to interrupt)');
+    const s = createMonitorState();
+    s.status = 'stale-reset'; s.staleResetWaitUntil = Date.now() - 1; s.staleResetAttempts = 1;
+    assert.equal(await processOneTick(s, t, '%0', cfg(), () => true), 'stale-reset-cleared');
+    assert.equal(s.status, 'monitoring');
+    assert.equal(s.staleResetAttempts, 0);
+    assert.equal(s._gaveUp, false);
+    assert.equal(t._keys.length, 0);
   });
 
   it('does not press Enter into a non-claude foreground', async () => {
