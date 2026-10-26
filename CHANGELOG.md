@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The usage wait now defers to an armed native auto-continue instead of racing it.**
+  Claude Code v2.1.234+ fires its own continue at reset + 30–90 s; this tool's wait fired
+  at reset + `marginSeconds` (60 s), so it often won — and its typed "continue" cancelled
+  the native wait and became the continuation, noisier and less well anchored than
+  native's own prompt. When native's `Continuing automatically at … · esc to cancel` line
+  is on the screen the wait arms from, the wait now adds `nativeDeferSeconds` (new, default
+  180, `0` disables) and logs that it deferred. At send time, a `Continuing shortly · esc
+  to cancel` line (native firing right now) skips the tick on a short cooldown instead of
+  typing; the next recheck sees the resumed session and stands down as before. Both
+  matches require `esc to cancel` after the phrase on the same line, so prose describing
+  native auto-continue doesn't trip them.
 - **A native auto-continue that went stale over a host sleep is now continued.** Claude
   Code v2.1.234+ waits out a usage limit by itself, but when the machine slept more than
   ~30 min past the reset it declines to continue: its status lines become "Your usage limit

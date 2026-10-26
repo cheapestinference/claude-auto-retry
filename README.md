@@ -68,7 +68,7 @@ Where the native feature stops — each row verified against the [official docs]
 
 One config gotcha worth knowing: the native setting (`autoContinueAtUsageLimit`) is only honored from **user** or managed settings — a project-level settings file doesn't arm it.
 
-**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. In the worst race, both submit one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
+**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. When the native `Continuing automatically at … · esc to cancel` line is on screen, the monitor defers rather than races: it adds `nativeDeferSeconds` (180 s) to its own reset + margin wait and never types while native shows `Continuing shortly`, so native's continue goes first and ours is only the backstop. Without that line visible, the worst race is both submitting one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
 
 ## The Solution
 
@@ -251,6 +251,7 @@ Optional. Create `~/.claude-auto-retry.json`:
 | `pollIntervalSeconds` | `5` | How often to check the terminal (seconds) |
 | `marginSeconds` | `60` | Extra wait after reset time (seconds) |
 | `fallbackWaitHours` | `5` | Wait time if reset time can't be parsed |
+| `nativeDeferSeconds` | `180` | Extra wait (seconds) on top of reset + margin when native auto-continue's `Continuing automatically at … · esc to cancel` line is visible, so the native continue goes first. `0` = no defer |
 | `retryMessage` | `"Continue where..."` | Message sent to Claude on retry |
 | `customPatterns` | `[]` | Additional regex patterns to detect rate limits |
 | `nativeStaleReset` | `{ "enabled": true, "maxRetries": 2, "retryDelaySeconds": 3 }` | Press Enter on native auto-continue's stale "Press enter to continue" — see [Native stale-reset nudge](#native-stale-reset-nudge) |

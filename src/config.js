@@ -140,6 +140,13 @@ export const DEFAULT_CONFIG = {
   streamInterrupted: DEFAULT_STREAM_INTERRUPTED,
   nearLimitWrapUp: DEFAULT_NEAR_LIMIT_WRAP_UP,
   nativeStaleReset: DEFAULT_NATIVE_STALE_RESET,
+  // Extra seconds added to a usage wait when native auto-continue (Claude Code v2.1.234+)
+  // is visibly armed on the same screen. Native fires at reset + 30–90 s; ours at reset +
+  // marginSeconds — so without this the two race, and when ours wins its typed "continue"
+  // cancels the native wait. Deferring lets native continue first; ours becomes the
+  // backstop for when it didn't (the recheck then stands down on a resumed session).
+  // 0 = no defer.
+  nativeDeferSeconds: 180,
 };
 
 const CONFIG_PATH = join(homedir(), '.claude-auto-retry.json');
@@ -234,6 +241,7 @@ function validate(cfg) {
   cfg.maxRetries = validNumber(cfg.maxRetries, 1, DEFAULT_CONFIG.maxRetries);
   cfg.pollIntervalSeconds = validNumber(cfg.pollIntervalSeconds, 1, DEFAULT_CONFIG.pollIntervalSeconds);
   cfg.marginSeconds = validNumber(cfg.marginSeconds, 0, DEFAULT_CONFIG.marginSeconds);
+  cfg.nativeDeferSeconds = validNumber(cfg.nativeDeferSeconds, 0, DEFAULT_CONFIG.nativeDeferSeconds);
   cfg.fallbackWaitHours = validNumber(cfg.fallbackWaitHours, 0.1, DEFAULT_CONFIG.fallbackWaitHours);
   if (typeof cfg.retryMessage !== 'string' || !cfg.retryMessage) {
     cfg.retryMessage = DEFAULT_CONFIG.retryMessage;

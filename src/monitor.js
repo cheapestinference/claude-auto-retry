@@ -1,4 +1,4 @@
-import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, staleResetMatch, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
+import { stripAnsi, isRateLimited, findRateLimitMessage, isRateLimitOptionsPrompt, menuStepsToWaitOption, detectOverload, overloadMatch, detectSafeguard, safeguardMatch, detectStreamInterrupted, streamInterruptedMatch, nearLimitWrapUpMatch, staleResetMatch, nativeWaitArmed, isWorking, isInternalRetry, resumedAfterLimit } from './patterns.js';
 import { parseResetTime, calculateWaitMs } from './time-parser.js';
 import { capturePane, sendKeys, sendKey, getPaneCommand, isProcessForeground } from './tmux.js';
 import { loadConfig } from './config.js';
@@ -128,21 +128,33 @@ async function checkForeground(tmuxAdapter, pane, config) {
 // Reads the SAME chrome-aware window the isRateLimited gate reads — an unbounded scan lets
 // reset-shaped text anywhere in the capture outrank the live banner (see the tailLines note
 // on findRateLimitMessage).
+//
+// Native defer: when native auto-continue is visibly armed on the same screen, push our
+// wake-up nativeDeferSeconds past reset + margin. Native fires at reset + 30–90 s, ours
+// at reset + marginSeconds — racing it, and when ours won, our typed "continue" cancelled
+// the native wait. Deferred, native continues first and the expiry recheck stands down on
+// the resumed session; ours stays the backstop for a native wait that never fired. Only
+// on a PARSED reset: the defer is relative to the reset native is counting down to, and a
+// fallback wait is already hours out.
 function usageWaitUntil(stripped, config) {
   const message = findRateLimitMessage(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES);
   const parsed = message ? parseResetTime(message) : null;
-  const until = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours);
-  return { message, parsed, until };
+  const native = parsed && config.nativeDeferSeconds > 0
+    ? nativeWaitArmed(stripped, RATE_LIMIT_TAIL_LINES) : null;
+  const deferMs = native ? config.nativeDeferSeconds * 1000 : 0;
+  const until = Date.now() + calculateWaitMs(parsed, config.marginSeconds, config.fallbackWaitHours) + deferMs;
+  return { message, parsed, until, native };
 }
 
 // `fresh` starts a new retry episode: attempts and the give-up flag are cleared. Used by
 // the menu path, where a re-rendered /rate-limit-options menu means the session hit the
 // limit again rather than continuing the old episode.
 function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
-  const { message, parsed, until } = usageWaitUntil(stripped, config);
+  const { message, parsed, until, native } = usageWaitUntil(stripped, config);
   state.lastRateLimitMessage = message;
   state.waitUntil = until;
   state.status = 'waiting';
+  state._nativeWaitLine = native ? native.line : null;
   // Latch whether this wait is the fallback default rather than a real reset time. Only a
   // fallback stays open to correction (correctUsageWait), so a wait derived from a genuine
   // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
@@ -150,7 +162,8 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
   state._waitIsFallback = !parsed;
   state._gaveUp = false;
   if (fresh) state.attempts = 0;
-  return 'waiting';
+  // Its own result (status stays 'waiting') so the detection logs that we deferred.
+  return native ? 'native-armed-deferring' : 'waiting';
 }
 
 // Re-derive the wake-up from the LIVE banner while already waiting, and pull it earlier
@@ -298,6 +311,19 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       const stale = !resumed && staleResetFor(stripped, tmuxAdapter, config);
       if (stale) return enterStaleReset(state, stale, config.nativeStaleReset);
       return 'user-continued';
+    }
+
+    // Native is continuing RIGHT NOW ("Continuing shortly · esc to cancel"): typing here
+    // would cancel it at the last moment. Skip this tick on a short cooldown — the next
+    // recheck sees the resumed session and stands down above. After the stand-down check
+    // so the banner-gone exits (including the stale-reset route) keep precedence; the
+    // stale render replaces this chrome, so the two never share a screen. Before the
+    // max-retries gate: a skip is not a send and must not burn into a give-up.
+    const native = nativeWaitArmed(stripped, RATE_LIMIT_TAIL_LINES);
+    if (native && native.firing) {
+      state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+      state._waitIsFallback = false;   // skip cooldown, deliberately unrelated to the reset time
+      return 'native-firing';
     }
 
     if (state.attempts >= config.maxRetries) {
@@ -833,7 +859,7 @@ export async function startMonitor(pane, pid) {
         pollIntervalSeconds: config.pollIntervalSeconds,
         gaveUp: !!state._gaveUp,
       }).catch(() => {});
-      // The three results that announce a new wake-up time share one shape: seconds until
+      // The results that announce a new wake-up time share one shape: seconds until
       // waitUntil, then consume the one-shot lastRateLimitMessage. Set-with-clear is an
       // invariant — a message left behind logs as a spurious detection on a later tick.
       const logWait = (line) => {
@@ -845,6 +871,10 @@ export async function startMonitor(pane, pid) {
       if (result === 'waiting' && state.lastRateLimitMessage) {
         await logWait((secs, msg) => `Rate limit detected: "${msg}". Waiting ${secs}s...`);
       }
+      if (result === 'native-armed-deferring') {
+        await logWait((secs, msg) => `Rate limit detected: "${msg}". Native auto-continue is armed ("${state._nativeWaitLine}") — deferring to it: waiting ${secs}s (includes +${config.nativeDeferSeconds}s nativeDeferSeconds), so ours only fires if native didn't continue.`);
+      }
+      if (result === 'native-firing') await logger.info('Native auto-continue is firing ("Continuing shortly") — not typing over it. Will recheck.');
       if (result === 'menu-confirmed') {
         await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);
       }

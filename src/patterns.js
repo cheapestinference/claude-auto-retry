@@ -848,6 +848,47 @@ export function staleResetMatch(text, tailLines = STALE_RESET_TAIL_LINES) {
   return all[head].trim();
 }
 
+// --- Native auto-continue armed / firing (Claude Code v2.1.234+) ---
+// While native waits out a usage limit, the second status line under the banner reads
+//   Continuing automatically at 3:45pm · esc to cancel
+// and at the reset it turns into
+//   Continuing shortly · esc to cancel
+// before native prompts Claude to continue (reset + 30–90 s jitter). Our own wait fires at
+// reset + marginSeconds, so without this signal the two race: when ours wins, our typed
+// "continue" cancels the native wait and becomes the continuation — noisy, and worse
+// anchored than native's own prompt. The monitor reads it to defer, not to act.
+//
+// Gates against prose:
+//   1. "esc to cancel" AFTER the phrase on the SAME line — the cancel hint is what makes
+//      this a live status row; a sentence describing native auto-continue doesn't carry
+//      it. The separator is left loose (the middle dot has been `·` in every observed
+//      render, but nothing depends on it), both parts are required.
+//   2. How the line begins: indentation and at most one chrome prefix (same set as the
+//      stale-reset rows), so ⏺/● (model output) and ❯ (the user's row) never begin a match.
+//   3. Tool-echo masked (#63), and tail-windowed like every other detector.
+// The transcript record ("Usage limit reached · continuing automatically at … · esc to
+// cancel") also matches. Harmless: it names the same episode, and a false positive here
+// costs at most a few minutes of extra wait or one skipped tick — never a send.
+const NATIVE_WAIT_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
+const NATIVE_WAIT_ARMED = new RegExp(`${NATIVE_WAIT_PREFIX}(?:.*?\\s)?continuing automatically at\\s+\\S.*?\\besc to cancel\\b`, 'i');
+const NATIVE_WAIT_FIRING = new RegExp(`${NATIVE_WAIT_PREFIX}continuing shortly\\b.*?\\besc to cancel\\b`, 'i');
+const NATIVE_WAIT_LEAD = /^\s*(?:[│⎿└⚠·]️?\s*)?[⏺●∙❯>]/;
+
+// Returns { line, firing } for the bottom-most native wait row in the tail, else null.
+// firing = the "Continuing shortly" row: native is continuing right now.
+export function nativeWaitArmed(text, tailLines = 0) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines) : { start: 0, end: all.length };
+  const mask = toolEchoMask(all);
+  for (let i = end - 1; i >= start; i--) {
+    const l = all[i];
+    if (mask[i] || NATIVE_WAIT_LEAD.test(l)) continue;
+    const firing = NATIVE_WAIT_FIRING.test(l);
+    if (firing || NATIVE_WAIT_ARMED.test(l)) return { line: l.trim(), firing };
+  }
+  return null;
+}
+
 // Chrome-aware, so isWorking measures the SAME bottom as isRateLimited/detectOverload. A
 // live working footer pushed up by a tall chrome stack below it (task widget + input box
 // + footer) would be invisible to a raw last-N tail while the chrome-aware detectors still
