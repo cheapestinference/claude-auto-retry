@@ -20,15 +20,21 @@ When Claude Code shows *"5-hour limit reached - resets 3pm"*, this tool waits fo
 
 ## The Problem
 
-You're in the middle of a complex task with Claude Code. After a while, you see:
+You're in the middle of a long task with Claude Code. After a while, you see:
 
 ```
-You've hit your limit · resets 3pm (Europe/Dublin)
+Usage limit reached · limit resets 3pm
 ```
 
-Claude stops. You have to wait hours, come back, and type "continue". If you're running long tasks overnight or while AFK, this kills your productivity.
+On Claude Code **older than v2.1.234**, that's the end of it: Claude stops, and hours later you have to come back and type "continue" yourself.
 
-Since v2.1.234, Claude Code handles the basic version of this itself. The next section maps exactly what the native feature covers and where this tool still earns its keep.
+On **v2.1.234 and later**, the CLI itself waits and continues ([details below](#native-auto-continue-v21234-vs-this-tool)) — *if* the session survives the wait, and *if* the wait armed at all. The problem that's left is everything around that happy path:
+
+- **The wait dies with the process.** SSH drops, the terminal closes, you log out — the session is gone, and the wait does **not** restart on `/resume`. An overnight run on a remote box lives or dies on the connection staying up.
+- **Lots of waits never arm.** Weekly limits resetting more than 24 h out, Opus/Sonnet-specific limits while you run another model, Remote Control sessions, and every headless `claude -p` run.
+- **Limits aren't the only way a session parks.** A terminal API overload, a safeguard false-positive, a response truncated by a laptop suspend, or the ~95% wrap-up notice all leave the session sitting at an idle prompt — and nothing native resumes any of them.
+
+If you run long tasks overnight, over SSH, or unattended, any of these still kills your productivity.
 
 ## Native auto-continue (v2.1.234+) vs this tool
 
