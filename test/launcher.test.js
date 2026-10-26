@@ -95,16 +95,17 @@ describe('env snapshot file (#68)', () => {
     assert.deepEqual(warnings, []);
   });
 
-  it('applyEnvSnapshot overwrites stale pane values but never TMUX* or the pointer var', () => {
-    const target = { PATH: '/stale/path', TMUX_PANE: '%7', CLAUDE_AUTO_RETRY_ENV_FILE: '/x' };
+  it('applyEnvSnapshot overwrites stale pane values but never TMUX*, TERM, or the pointer var', () => {
+    const target = { PATH: '/stale/path', TMUX_PANE: '%7', TERM: 'tmux-direct', CLAUDE_AUTO_RETRY_ENV_FILE: '/x' };
     applyEnvSnapshot(target, {
       PATH: '/usr/bin', NEW_VAR: '1',
-      TMUX_PANE: '%5', TMUX: 'evil', CLAUDE_AUTO_RETRY_ENV_FILE: '/evil',
+      TMUX_PANE: '%5', TMUX: 'evil', TERM: 'xterm-ghostty', CLAUDE_AUTO_RETRY_ENV_FILE: '/evil',
     });
     assert.equal(target.PATH, '/usr/bin');
     assert.equal(target.NEW_VAR, '1');
     assert.equal(target.TMUX_PANE, '%7', 'the pane identity belongs to the inner session');
     assert.ok(!('TMUX' in target));
+    assert.equal(target.TERM, 'tmux-direct', 'tmux assigns TERM per-pane from default-terminal; the outer shell must not override it');
     assert.equal(target.CLAUDE_AUTO_RETRY_ENV_FILE, '/x');
   });
 

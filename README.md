@@ -695,6 +695,52 @@ pruned, since staleness can't be detected). Prefer the PID form; you can also ha
 | zsh | Full (auto-install to `~/.zshrc`) |
 | fish | Manual setup (instructions printed on `install`) |
 
+## NixOS / Nix
+
+The repo is also a flake, for anyone who'd rather manage this declaratively than run
+`npm i -g` + `install`. It exposes:
+
+- `packages.<system>.default`: the package, built from source (no npm registry fetch).
+- `overlays.default`: adds `claude-auto-retry` to `pkgs`.
+- `nixosModules.default`: a NixOS module, no home-manager required.
+- `homeManagerModules.default`: a home-manager module (Linux and Darwin).
+
+Both modules install the package, wire up the shell wrapper (bash and zsh, same
+runtime-branching script described above), and manage the reconcile timer
+(`systemd --user` on Linux, a `launchd` agent under home-manager on Darwin) and the
+`StopFailure` hook declaratively. No imperative `install`/`install-hook`/`install-timer`
+step, and no shell-rc file to keep mutable for it.
+
+**NixOS system module:**
+
+```nix
+{
+  inputs.claude-auto-retry.url = "github:cheapestinference/claude-auto-retry";
+
+  outputs = { self, nixpkgs, claude-auto-retry, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        claude-auto-retry.nixosModules.default
+        { programs.claude-auto-retry.enable = true; }
+      ];
+    };
+  };
+}
+```
+
+**home-manager module** (works without a NixOS host, including on Darwin):
+
+```nix
+{
+  imports = [ claude-auto-retry.homeManagerModules.default ];
+  programs.claude-auto-retry.enable = true;
+}
+```
+
+See `nix/nixos-module.nix` / `nix/home-manager-module.nix` for the full option list
+(`package`, `shellIntegration.{bash,zsh}`, `installHook`, `reconcileTimer.{enable,
+startupDelay,interval}`).
+
 ## `--print` Mode
 
 For scripted/piped usage (`claude -p "..." | jq`), the tool:

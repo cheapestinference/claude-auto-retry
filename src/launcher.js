@@ -88,6 +88,10 @@ export function applyEnvSnapshot(target, snap) {
   for (const [k, v] of Object.entries(snap)) {
     if (k.startsWith('TMUX')) continue;              // pane identity belongs to the inner session
     if (k === 'CLAUDE_AUTO_RETRY_ENV_FILE') continue;
+    // TERM is pane identity too: tmux assigns it per-pane from default-terminal (e.g. a
+    // user opting into "tmux-direct" for truecolor). Reapplying the outer shell's TERM
+    // here silently overwrites that choice right after tmux made it.
+    if (k === 'TERM') continue;
     target[k] = v;
   }
 }
