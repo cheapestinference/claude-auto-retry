@@ -1003,6 +1003,64 @@ describe('menuStepsToWaitOption (#19)', () => {
   });
 });
 
+describe('menuStepsToWaitOption — native "Wait here, then continue automatically" row', () => {
+  // Claude Code v2.1.234+ adds a row that arms its native wait, alongside the older
+  // "Stop and wait" row. Row order varies, so the native row is located, never assumed.
+  const NATIVE = '  Wait here, then continue automatically at 3:45pm';
+  const OLD = '  Stop and wait for limit to reset';
+  const UPGRADE = '  Upgrade your plan';
+  const menu = (rows, cursor) => [
+    "You've hit your session limit · resets 3:45pm (Europe/London)",
+    'What do you want to do?',
+    ...rows.map((r, i) => `${i === cursor ? '❯' : ' '} ${i + 1}. ${r.trim()}`),
+    'Enter to confirm · Esc to cancel',
+  ].join('\n');
+
+  it('targets the native row below the cursor', () => {
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, NATIVE], 0)), 1);
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, OLD, NATIVE], 0)), 2);
+  });
+  it('targets the native row above the cursor', () => {
+    assert.equal(menuStepsToWaitOption(menu([NATIVE, UPGRADE], 1)), -1);
+    assert.equal(menuStepsToWaitOption(menu([NATIVE, OLD, UPGRADE], 2)), -2);
+  });
+  it('returns 0 when the native row is already highlighted', () => {
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, NATIVE, OLD], 1)), 0);
+  });
+  it('prefers the native row over "Stop and wait" when both are present, in either order', () => {
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, OLD, NATIVE], 1)), 1);   // cursor on old row
+    assert.equal(menuStepsToWaitOption(menu([NATIVE, OLD, UPGRADE], 1)), -1);
+    assert.equal(menuStepsToWaitOption(menu([OLD, NATIVE, UPGRADE], 0)), 1);
+  });
+  it('falls back to "Stop and wait" when there is no native row', () => {
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, OLD], 0)), 1);
+    assert.equal(menuStepsToWaitOption(menu([OLD, UPGRADE], 1)), -1);
+  });
+  it('honours the tail window for the native row like the old one', () => {
+    const pane = [menu([UPGRADE, OLD, NATIVE], 0), '', '───', '❯ ', '───', '  ⏵⏵ auto mode on'].join('\n');
+    assert.equal(menuStepsToWaitOption(pane, 6), 2);
+  });
+  it('only takes a row that STARTS with the phrase (an option merely mentioning it is not the native row)', () => {
+    const decoy = '  Upgrade so you never have to wait here, then continue automatically';
+    assert.equal(menuStepsToWaitOption(menu([decoy, OLD], 0)), 1);
+  });
+  // A menu offering ONLY the native row must still be recognized as a menu: otherwise the
+  // usage wait types retryMessage into it and Enter confirms the highlighted row.
+  it('isRateLimitOptionsPrompt recognizes a menu whose only wait row is the native one', () => {
+    assert.equal(isRateLimitOptionsPrompt(menu([UPGRADE, NATIVE], 0), 12), true);
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, NATIVE], 0), 12), 1);
+  });
+  it('a menu with no wait row (old or native) is still not taken as the limit menu', () => {
+    const decoy = '  Upgrade so you never have to wait here, then continue automatically';
+    assert.equal(isRateLimitOptionsPrompt(menu([UPGRADE, decoy], 0), 12), false);
+    assert.equal(menuStepsToWaitOption(menu([UPGRADE, decoy], 0), 12), null);
+  });
+  it('still refuses (null) an unreadable layout with a native row', () => {
+    const noCursor = ['What do you want to do?', `  1. ${UPGRADE.trim()}`, `  2. ${NATIVE.trim()}`].join('\n');
+    assert.equal(menuStepsToWaitOption(noCursor), null);
+  });
+});
+
 describe('isRateLimited (multi-line TUI renders)', () => {
   it('detects limit + resets on separate lines', () => {
     assert.ok(isRateLimited('⚠ You\'ve hit your limit\n· resets 3pm (UTC)'));

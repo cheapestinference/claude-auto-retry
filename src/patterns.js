@@ -545,9 +545,18 @@ export function resumedAfterLimit(text, tailLines = 0) {
 // on some versions. The option ORDER varies between versions, so we never assume
 // a position: we locate the cursor (❯) and the "Stop and wait" option and compute
 // the cursor moves needed to land on it.
+//
+// Claude Code v2.1.234+ adds a row that arms its NATIVE wait ("Wait here, then continue
+// automatically at 3:45pm" / "… shortly" / "… when the limit resets"), alongside the older
+// "Stop and wait" row. The native row is preferred: native continues by itself at the reset
+// and the monitor defers to an armed native wait, whereas "Stop and wait" leaves only this
+// tool's typed continue. Anchored to the START of the option text (after the cursor and
+// number), so another option that merely mentions the phrase is never mistaken for it.
+// "Stop and wait" stays the fallback for menus without the native row.
 
 const MENU_CURSOR = '❯';
 const WAIT_OPTION_REGEX = /stop and wait for limit to reset/i;
+const NATIVE_WAIT_OPTION_REGEX = /^\s*❯?\s*\d+\.\s+wait here, then continue automatically\b/i;
 const MENU_OPTION_REGEX = /^\s*❯?\s*\d+\.\s/;
 
 // tailLines > 0 restricts to the last N lines: a LIVE menu sits at the prompt, so the
@@ -561,14 +570,17 @@ export function isRateLimitOptionsPrompt(text, tailLines = 0) {
   // are not chrome, so contentTail keeps them.
   const lines = tailLines > 0 ? contentTail(all, tailLines) : all;
   const t = lines.join('\n');
+  // Either wait row qualifies: a menu offering only native's "Wait here, then continue
+  // automatically" row must still be seen as the menu, or the usage wait types into it.
   return /what do you want to do\?/i.test(t)
-    && WAIT_OPTION_REGEX.test(t)
+    && (WAIT_OPTION_REGEX.test(t) || lines.some(l => NATIVE_WAIT_OPTION_REGEX.test(l)))
     && (/enter to confirm/i.test(t) || /esc to cancel/i.test(t) || t.includes(MENU_CURSOR));
 }
 
-// Cursor moves to reach the "Stop and wait for limit to reset" option, counted in
+// Cursor moves to reach the wait option — the native "Wait here, then continue
+// automatically" row when present, else "Stop and wait for limit to reset" — counted in
 // option steps: positive => press Down N times, negative => Up, 0 => already there.
-// Returns null when the layout can't be read (no cursor or option not found); the
+// Returns null when the layout can't be read (no cursor or neither option found); the
 // caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
 // tailLines mirrors isRateLimitOptionsPrompt so option counting ignores quoted menus.
 export function menuStepsToWaitOption(text, tailLines = 0) {
@@ -577,7 +589,8 @@ export function menuStepsToWaitOption(text, tailLines = 0) {
   const optionLines = lines.filter(l => MENU_OPTION_REGEX.test(l));
   if (optionLines.length === 0) return null;
   const cursorPos = optionLines.findIndex(l => l.includes(MENU_CURSOR));
-  const waitPos = optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
+  const nativePos = optionLines.findIndex(l => NATIVE_WAIT_OPTION_REGEX.test(l));
+  const waitPos = nativePos !== -1 ? nativePos : optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
   if (cursorPos === -1 || waitPos === -1) return null;
   return waitPos - cursorPos;
 }
@@ -788,6 +801,103 @@ export function nearLimitWrapUpMatch(text) {
     if (mask[i]) continue;
     if (USER_ROW.test(lines[i])) return null;
     if (WRAP_UP_HEAD.test(lines[i])) return lines[i].trim();
+  }
+  return null;
+}
+
+// --- Native auto-continue gone stale (Claude Code v2.1.234+) ---
+// Native auto-continue waits out a usage limit on its own, but when the host slept more
+// than ~30 min past the reset it declines to continue: the two status lines under the
+// input box become
+//   Your usage limit has reset
+//   Press enter to continue
+// and the session waits for a human Enter, indefinitely. No limit banner is left on
+// screen, so isRateLimited is false and a monitor mid-wait read this as "the user
+// continued" and stood down — leaving the session parked forever.
+//
+// Two gates, and POSITION is the one that carries the weight against prose:
+//   1. WHERE THE PAIR SITS. The stale rows are status chrome: they render as the
+//      bottom-most content of the pane, BELOW the input box. Model output always renders
+//      ABOVE the input box. So "Press enter to continue" must be the last content row of the
+//      chrome-stripped tail, "Your usage limit has reset" must be the nearest non-blank row
+//      above it, and both must sit below the pane's last input row (❯/>, bare or boxed) when
+//      one is on screen. The prefix rule alone was not enough: Claude Code indents a reply's
+//      continuation lines and code blocks by two spaces, so a reply or README block quoting
+//      the pair on lines of its own begins each line exactly like the real chrome. Under
+//      that rule it fired, and a draft sitting in the input box was submitted by the Enter
+//      (verified by executing the monitor over such a pane). A quotation can't sit below
+//      the input box. That is the discriminator.
+//   2. HOW EACH LINE BEGINS. Leading whitespace (status rows are indented) and at most one
+//      chrome prefix (│ box border, ⎿/└ echo marker, ⚠/· banner marker), then the phrase;
+//      trailing text is allowed ("· esc to cancel", a closing │). ⏺/● (model output) and
+//      ❯ (the user's row) never begin a match.
+// "Press enter to continue" alone is generic (installers, pagers, test runners print it),
+// so only the PAIR is the signature.
+const STALE_RESET_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
+const STALE_RESET_HEAD = new RegExp(`${STALE_RESET_PREFIX}Your usage limit has reset\\b`, 'i');
+const STALE_RESET_PROMPT = new RegExp(`${STALE_RESET_PREFIX}Press enter to continue\\b`, 'i');
+// The input row, bare ("❯ draft") or boxed ("│ > draft │"). Empty, it is chrome and gets
+// stripped from the tail — which is exactly why its position is checked separately.
+const INPUT_ROW = /^\s*(?:│\s*)?[❯>]/;
+// Same budget as the banner path (monitor.js RATE_LIMIT_TAIL_LINES).
+const STALE_RESET_TAIL_LINES = 12;
+
+// Returns the "Your usage limit has reset" line (trimmed) when the pair is the live bottom
+// of the pane, else null. Tool-echo masked (#63): the pair inside a Bash() result is a
+// file's content, not native chrome.
+export function staleResetMatch(text, tailLines = STALE_RESET_TAIL_LINES) {
+  const all = stripAnsi(text).split('\n');
+  // Chrome is stripped even for tailLines = 0: "the bottom-most content row" is only
+  // meaningful once the footer rows below the stale chrome are out of the way.
+  const { start, end } = contentTailRange(all, tailLines > 0 ? tailLines : Infinity);
+  const mask = toolEchoMask(all);
+  const prompt = end - 1;
+  if (prompt < start || mask[prompt] || !STALE_RESET_PROMPT.test(all[prompt])) return null;
+  let head = prompt - 1;
+  while (head >= start && all[head].trim() === '') head--;
+  if (head < start || mask[head] || !STALE_RESET_HEAD.test(all[head])) return null;
+  const lastInput = all.findLastIndex((l, i) => !mask[i] && INPUT_ROW.test(l));
+  if (lastInput > head) return null;
+  return all[head].trim();
+}
+
+// --- Native auto-continue armed / firing (Claude Code v2.1.234+) ---
+// While native waits out a usage limit, the second status line under the banner reads
+//   Continuing automatically at 3:45pm · esc to cancel
+// and at the reset it turns into
+//   Continuing shortly · esc to cancel
+// before native prompts Claude to continue (reset + 30–90 s jitter). Our own wait fires at
+// reset + marginSeconds, so without this signal the two race: when ours wins, our typed
+// "continue" cancels the native wait and becomes the continuation — noisy, and worse
+// anchored than native's own prompt. The monitor reads it to defer, not to act.
+//
+// Gates against prose:
+//   1. "esc to cancel" AFTER the phrase on the SAME line — the cancel hint is what makes
+//      this a live status row; a sentence describing native auto-continue doesn't carry
+//      it. The separator is left loose (the middle dot has been `·` in every observed
+//      render, but nothing depends on it), both parts are required.
+//   2. How the line begins: indentation and at most one chrome prefix (same set as the
+//      stale-reset rows), so ⏺/● (model output) and ❯ (the user's row) never begin a match.
+//   3. Tool-echo masked (#63), and tail-windowed like every other detector.
+// The transcript record ("Usage limit reached · continuing automatically at … · esc to
+// cancel") also matches. Harmless: it names the same episode, and a false positive here
+// costs at most a few minutes of extra wait or one skipped tick — never a send.
+const NATIVE_WAIT_PREFIX = '^\\s*(?:[│⎿└⚠·]\\uFE0F?\\s*)?';
+const NATIVE_WAIT_ARMED = new RegExp(`${NATIVE_WAIT_PREFIX}(?:.*?\\s)?continuing automatically at\\s+\\S.*?\\besc to cancel\\b`, 'i');
+const NATIVE_WAIT_FIRING = new RegExp(`${NATIVE_WAIT_PREFIX}continuing shortly\\b.*?\\besc to cancel\\b`, 'i');
+const NATIVE_WAIT_LEAD = /^\s*(?:[│⎿└⚠·]️?\s*)?[⏺●∙❯>]/;
+
+// Returns { line, firing } for the bottom-most native wait row in the tail, else null.
+// firing = the "Continuing shortly" row: native is continuing right now.
+export function nativeWaitArmed(text, tailLines = 0) {
+  const all = stripAnsi(text).split('\n');
+  const { start, end } = tailLines > 0 ? contentTailRange(all, tailLines) : { start: 0, end: all.length };
+  const mask = toolEchoMask(all);
+  for (let i = end - 1; i >= start; i--) {
+    const l = all[i];
+    if (mask[i] || NATIVE_WAIT_LEAD.test(l)) continue;
+    const firing = NATIVE_WAIT_FIRING.test(l);
+    if (firing || NATIVE_WAIT_ARMED.test(l)) return { line: l.trim(), firing };
   }
   return null;
 }

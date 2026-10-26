@@ -68,7 +68,7 @@ Where the native feature stops — each row verified against the [official docs]
 
 One config gotcha worth knowing: the native setting (`autoContinueAtUsageLimit`) is only honored from **user** or managed settings — a project-level settings file doesn't arm it.
 
-**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. In the worst race, both submit one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
+**Running both is safe by design.** On v2.1.234+ the native wait and this monitor arm in parallel (the native wait's own `Usage limit reached · limit resets 3:45pm` render parses as a normal banner here). Before ever typing, the monitor re-checks that the limit banner is still present and the session hasn't resumed; once the native continue fires, the monitor logs `user-continued` and goes back to watching. When the native `Continuing automatically at … · esc to cancel` line is on screen, the monitor defers rather than races: it adds `nativeDeferSeconds` (180 s) to its own reset + margin wait, holds off typing for up to 3 minutes while native shows `Continuing shortly` (then sends as the backstop, with a warning), and re-arms instead of typing when native has armed a fresh wait for a later reset — so native's continue goes first and ours is only the backstop. Without that line visible, the worst race is both submitting one "continue" — Claude Code treats the extra one as a prompt you sent. The two are complementary rather than rivals: **the tmux wrapper is what lets the native wait survive a disconnect**, and the monitor picks up everything the native feature doesn't arm.
 
 ## The Solution
 
@@ -155,7 +155,7 @@ automates the wait-and-retry for all of them.
 | Rate limit | `Rate limit hit. Resets at 4pm` |
 | Live-limit companion hint | `/usage-credits to finish what you're working on.` |
 
-### The `/rate-limit-options` menu — driven to "Stop and wait", never "Upgrade"
+### The `/rate-limit-options` menu — driven to a wait row, never "Upgrade"
 
 ```
 What do you want to do?
@@ -164,8 +164,10 @@ What do you want to do?
 ```
 
 Handled across any menu layout (the option order varies by Claude Code version); the
-tool locates the cursor and the "Stop and wait" option, and refuses to press Enter if
-the layout is unreadable.
+tool locates the cursor and the wait option — native auto-continue's "Wait here, then
+continue automatically" row (v2.1.234+) when offered, else "Stop and wait for limit to
+reset" — and refuses to press Enter if the layout is unreadable. A menu offering only
+the native row is recognized as the menu too.
 
 ### API overload / transient errors — exponential backoff with jitter
 
@@ -205,6 +207,17 @@ Not an error: Claude Code prints this at ~95% of the window and tells the model 
 checkpoint. The model finishes the step, lists what's left and ends the turn — no banner,
 idle prompt, nothing resumes it. One `continue` picks the work back up.
 
+### Native auto-continue gone stale — one Enter, bounded
+
+```
+Your usage limit has reset
+Press enter to continue
+```
+
+Claude Code v2.1.234+ continues past a usage limit on its own — unless the machine slept
+more than ~30 minutes past the reset, in which case it shows this pair and waits for a
+human Enter, indefinitely. The tool presses it.
+
 Custom patterns can be added via config for future message format changes.
 
 Detection is **chrome-aware**: it looks at the live bottom of the pane, but first skips
@@ -240,8 +253,10 @@ Optional. Create `~/.claude-auto-retry.json`:
 | `pollIntervalSeconds` | `5` | How often to check the terminal (seconds) |
 | `marginSeconds` | `60` | Extra wait after reset time (seconds) |
 | `fallbackWaitHours` | `5` | Wait time if reset time can't be parsed |
+| `nativeDeferSeconds` | `180` | Extra wait (seconds) on top of reset + margin when native auto-continue's `Continuing automatically at … · esc to cancel` line is visible, so the native continue goes first. `0` = no defer |
 | `retryMessage` | `"Continue where..."` | Message sent to Claude on retry |
 | `customPatterns` | `[]` | Additional regex patterns to detect rate limits |
+| `nativeStaleReset` | `{ "enabled": true, "maxRetries": 2, "retryDelaySeconds": 3 }` | Press Enter on native auto-continue's stale "Press enter to continue" — see [Native stale-reset nudge](#native-stale-reset-nudge) |
 
 All fields optional. Invalid values fall back to defaults automatically.
 
@@ -528,6 +543,58 @@ Configured under a `nearLimitWrapUp` block (defaults shown):
 ```
 
 Set `"enabled": false` if you *want* the session to stop at the checkpoint.
+
+## Native stale-reset nudge
+
+Claude Code v2.1.234+ waits out a usage limit itself and continues at the reset. But if
+the machine slept more than ~30 minutes past the reset, it does **not** continue on wake.
+Its two status lines change to:
+
+```
+Your usage limit has reset
+Press enter to continue
+```
+
+and the session waits for a human Enter — indefinitely. The limit banner is gone by then,
+so the tool's own wait (which usually armed on the same banner and slept along with the
+host) used to read that screen as "you already continued" and stand down, leaving the
+session parked. Now the wait's recheck recognizes the pair and hands it to this nudge: at
+an idle prompt, with `claude`/`node` in the foreground, the tool presses a bare **Enter**
+(the key the UI asks for — no message is typed). If the pair clears, the episode is over;
+if it is still there after `maxRetries` presses, the tool gives up loudly (`🔴AR`) rather
+than keep pressing. A live usage-limit banner always takes precedence.
+
+Detection is anchored on **where the pair sits**, not just its words. The real stale rows
+are status chrome: they are the bottom-most content of the pane, below the input box.
+So the pair only matches when `Press enter to continue` is the last content row (UI
+footer aside), `Your usage limit has reset` is the nearest non-blank row above it, and both
+sit below the input row (`❯`, empty or holding a draft) when one is on screen. Model output
+always renders above the input box. A reply or code block quoting the pair, even on
+indented lines of its own, therefore doesn't match. Each phrase must also begin its line
+(behind at most indentation and one chrome marker such as `│` or `⎿`). That rules out
+mid-sentence quotes, the model's `⏺` output and your own `❯` row, and tool-call output is
+excluded as well. `Press enter to continue` on its own is a generic phrase and never matches.
+
+Configured under a `nativeStaleReset` block (defaults shown):
+
+```json
+{
+  "nativeStaleReset": {
+    "enabled": true,
+    "maxRetries": 2,
+    "retryDelaySeconds": 3
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `true` | Turn the stale-reset nudge on/off |
+| `maxRetries` | `2` | Enter presses before giving up loudly |
+| `retryDelaySeconds` | `3` | Wait before each press — lets the wake and native's redraw settle |
+
+The status bar shows `🟢AR` while the nudge is in progress (it lasts seconds) and `🔴AR`
+if it gave up.
 
 ## tmux status bar indicator
 

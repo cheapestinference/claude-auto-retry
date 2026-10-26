@@ -8,6 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **The usage wait now defers to an armed native auto-continue instead of racing it.**
+  Claude Code v2.1.234+ fires its own continue at reset + 30–90 s; this tool's wait fired
+  at reset + `marginSeconds` (60 s), so it often won — and its typed "continue" cancelled
+  the native wait and became the continuation, noisier and less well anchored than
+  native's own prompt. When native's `Continuing automatically at … · esc to cancel` line
+  is on the screen the wait arms from, the wait now adds `nativeDeferSeconds` (new, default
+  180, `0` disables) and logs that it deferred. At send time, a `Continuing shortly · esc
+  to cancel` line (native firing right now) skips the tick on a short cooldown instead of
+  typing; the next recheck sees the resumed session and stands down as before. The skip is
+  bounded: after 3 minutes of "Continuing shortly" without a resume, the retry is sent as
+  the backstop with a warning. And when the wait expires onto a FRESH native wait (native
+  fired, the continuation re-hit the limit, native re-armed), the monitor re-arms for the
+  new reset instead of typing — only when the armed line and a live banner with a future
+  reset agree; a past reset still sends. Both
+  matches require `esc to cancel` after the phrase on the same line, so prose describing
+  native auto-continue doesn't trip them.
+- **The `/rate-limit-options` menu now selects native auto-continue's own row.** Claude
+  Code v2.1.234+ adds "Wait here, then continue automatically" (it arms the native wait)
+  next to the older "Stop and wait for limit to reset", and the menu handler still drove
+  the cursor to the old row — so native never armed and the session depended on this
+  tool's typed continue alone. The native row is now preferred wherever it sits; "Stop and
+  wait" stays the fallback for menus without it, and a layout that can't be read is still
+  refused (no Enter). The row must begin with the phrase, so another option that merely
+  mentions it isn't taken.
+  - A menu offering only the native row is now recognized as the menu. It used to be
+    missed, so the usage wait typed into the open menu.
+  - Native's after-the-fact renders — "Automatic continue cancelled · …", "Usage limit
+    reset · continuing automatically", and "Automatic continue stopped after repeated
+    usage-limit hits" — are pinned by tests as triggering nothing; a fresh limit banner
+    below the give-up line still arms the usage wait as usual.
+- **A native auto-continue that went stale over a host sleep is now continued.** Claude
+  Code v2.1.234+ waits out a usage limit by itself, but when the machine slept more than
+  ~30 min past the reset it declines to continue: its status lines become "Your usage limit
+  has reset" / "Press enter to continue" and it waits for a human Enter, indefinitely. The
+  limit banner is gone by then, so this tool's own wait — armed on the same banner, asleep
+  along with the host — rechecked on wake, concluded the user had continued, and stood
+  down, leaving the session parked forever. The recheck now recognizes the stale pair and
+  hands it to a new bounded nudge (`nativeStaleReset`, on by default): a bare Enter at an
+  idle prompt, at most 2 presses 3 s apart, giving up loudly if the prompt persists. The
+  pair is also caught from plain monitoring, and mid-wait on every tick — a wait standing
+  far past native's (a long fallback, or a re-arm from a post-wake capture that rolled the
+  reset to tomorrow) no longer holds the session until it expires. The gate is position: the pair must be the
+  bottom-most content rows of the pane, below the input box when one is on screen. Model
+  output always renders above the input box, so a reply or code block quoting the pair —
+  even on indented lines of its own, even above a half-typed draft — doesn't match. Each
+  phrase must also begin its line. The generic "Press enter to continue" alone never
+  matches, and tool output is excluded. The status bar shows the
+  in-progress state as `🟢AR` (it lasts seconds) and a give-up as `🔴AR`.
 - **A weekly-limit banner with a calendar date is now detected and parsed.** Weekly limits
   render their reset with a date — "You've hit your weekly limit · resets Aug 21 at 3pm
   (Australia/Brisbane)", a real Claude Code record surfaced by PR #56's fixture — and both
