@@ -17,6 +17,9 @@ const RATE_LIMIT_TAIL_LINES = 12;
 // old one. Sized above Claude Code's own internal attempt-N/10 backoff (which can hold a
 // genuinely-failing turn open for several minutes before the hook fires).
 const OVERLOAD_INCIDENT_GAP_MS = 15 * 60_000;
+// How long the waiting branch holds off typing while native shows "Continuing shortly".
+// Native fires within 90 s of the reset; 3 min is 2x slack. See the skip in processOneTick.
+const NATIVE_FIRING_MAX_SKIP_MS = 3 * 60_000;
 
 export function createMonitorState() {
   return {
@@ -155,6 +158,7 @@ function enterUsageWait(state, stripped, config, { fresh = false } = {}) {
   state.waitUntil = until;
   state.status = 'waiting';
   state._nativeWaitLine = native ? native.line : null;
+  state._nativeFiringSince = 0;   // a new episode gets its own firing-skip bound
   // Latch whether this wait is the fallback default rather than a real reset time. Only a
   // fallback stays open to correction (correctUsageWait), so a wait derived from a genuine
   // banner is never re-parsed — no window for stray reset-shaped text to move it, and none
@@ -301,7 +305,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // whole time). Resumed ⇒ the session continued; never inject into it.
     if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumed) {
       state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
-      state._waitIsFallback = false;
+      state._waitIsFallback = false; state._nativeFiringSince = 0;
       // Banner gone is NOT always "the user continued". With native auto-continue (Claude
       // Code v2.1.234+) the common way to land here is a host that slept through the reset
       // along with us: native then declines to continue, replaces the banner with "Your
@@ -319,11 +323,21 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // so the banner-gone exits (including the stale-reset route) keep precedence; the
     // stale render replaces this chrome, so the two never share a screen. Before the
     // max-retries gate: a skip is not a send and must not burn into a give-up.
+    // BOUNDED (NATIVE_FIRING_MAX_SKIP_MS from the first firing sighting this episode): a
+    // native wedged mid-fire, or the phrase sitting in the tail as an indented reply
+    // continuation line, would otherwise skip every expiry forever — no send, no give-up —
+    // and park the session for good. Past the bound we fall through and send as the
+    // backstop, with a warning.
     const native = nativeWaitArmed(stripped, RATE_LIMIT_TAIL_LINES);
+    let nativeOverdue = false;
     if (native && native.firing) {
-      state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
-      state._waitIsFallback = false;   // skip cooldown, deliberately unrelated to the reset time
-      return 'native-firing';
+      if (!state._nativeFiringSince) state._nativeFiringSince = Date.now();
+      if (Date.now() - state._nativeFiringSince < NATIVE_FIRING_MAX_SKIP_MS) {
+        state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 2);
+        state._waitIsFallback = false;   // skip cooldown, deliberately unrelated to the reset time
+        return 'native-firing';
+      }
+      nativeOverdue = true;
     }
 
     if (state.attempts >= config.maxRetries) {
@@ -335,6 +349,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
       state.waitUntil = Date.now() + (config.pollIntervalSeconds * 1000 * 12);
       state._gaveUp = true;
       state._waitIsFallback = false;   // give-up backoff, deliberately unrelated to the reset time
+      state._nativeFiringSince = 0;
       return 'max-retries';
     }
 
@@ -360,7 +375,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     state.waitUntil = Date.now() + 30_000;
     state._waitIsFallback = false;   // send cooldown, deliberately unrelated to the reset time
     await tmuxAdapter.sendKeys(pane, config.retryMessage);
-    return 'retried';
+    return nativeOverdue ? 'native-firing-overdue' : 'retried';
   }
 
   if (state.status === 'overload') {
@@ -874,6 +889,7 @@ export async function startMonitor(pane, pid) {
       if (result === 'native-armed-deferring') {
         await logWait((secs, msg) => `Rate limit detected: "${msg}". Native auto-continue is armed ("${state._nativeWaitLine}") — deferring to it: waiting ${secs}s (includes +${config.nativeDeferSeconds}s nativeDeferSeconds), so ours only fires if native didn't continue.`);
       }
+      if (result === 'native-firing-overdue') await logger.warn(`Native auto-continue has shown "Continuing shortly" for over ${NATIVE_FIRING_MAX_SKIP_MS / 60_000} min without the session resuming — stopped deferring and sent the retry message as the backstop (attempt ${state.attempts}).`);
       if (result === 'native-firing') await logger.info('Native auto-continue is firing ("Continuing shortly") — not typing over it. Will recheck.');
       if (result === 'menu-confirmed') {
         await logWait((secs) => `Rate-limit options menu: selected "Stop and wait for limit to reset". Waiting ${secs}s...`);

@@ -191,3 +191,70 @@ describe('processOneTick — defer to an armed native wait', () => {
     assert.equal(await processOneTick(s, t, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
   });
 });
+
+// The firing skip must not become a permanent no-send: native wedged mid-fire, or the
+// firing text sitting in the tail as an indented reply continuation line, would otherwise
+// skip every expiry forever and park the session — the backstop must fire eventually.
+describe('processOneTick — the native-firing skip is bounded', () => {
+  const BOUND_MS = 3 * 60_000;
+  const expiredWaiting = () => {
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.attempts = 0;
+    return s;
+  };
+  // Runs ticks on the mocked clock, advancing past each cooldown, until a non-skip result.
+  async function runUntilNotSkipped(t, s, tmux, limitMs = 10 * 60_000) {
+    const t0 = Date.now();
+    let r;
+    while (Date.now() - t0 < limitMs) {
+      r = await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+      if (r !== 'native-firing') break;
+      t.mock.timers.tick(Math.max(1, s.waitUntil - Date.now()));
+    }
+    return { r, elapsed: Date.now() - t0 };
+  }
+
+  it('a firing line that never clears stops being skipped after 3 min and the retry is sent', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const tmux = mockTmux(FIRING);
+    const s = expiredWaiting();
+    const { r, elapsed } = await runUntilNotSkipped(t, s, tmux);
+    assert.equal(r, 'native-firing-overdue', 'distinct result so the run loop warns');
+    assert.ok(elapsed >= BOUND_MS && elapsed < BOUND_MS + DEFAULT_CONFIG.pollIntervalSeconds * 2000 + 1,
+      `skipped for ${Math.round(elapsed / 1000)}s`);
+    assert.equal(tmux._sent.length, 1);
+    assert.equal(s.attempts, 1, 'the overdue send is a real attempt (bounded by maxRetries)');
+  });
+
+  it('the latch clears on a new arm, so a later episode gets its own 3 minutes', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const tmux = mockTmux(FIRING);
+    const s = expiredWaiting();
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-firing');
+    t.mock.timers.tick(BOUND_MS + 60_000);
+    // A new limit episode arms from monitoring.
+    s.status = 'monitoring';
+    tmux._pane = ARMED;
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    assert.equal(s.status, 'waiting');
+    s.waitUntil = Date.now() - 1;
+    tmux._pane = FIRING;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-firing');
+    assert.equal(tmux._sent.length, 0);
+  });
+
+  it('the latch clears on stand-down', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const tmux = mockTmux(FIRING);
+    const s = expiredWaiting();
+    await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true);
+    t.mock.timers.tick(BOUND_MS + 60_000);
+    tmux._pane = `${BANNER_ONLY}\n⏺ Picking the tests back up.\n✻ Cogitating… (esc to interrupt)`;
+    s.waitUntil = Date.now() - 1;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'user-continued');
+    // Same state re-enters waiting without going through an arm (defensive: the latch
+    // belongs to the episode that just stood down).
+    s.status = 'waiting'; s.waitUntil = Date.now() - 1; tmux._pane = FIRING;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-firing');
+  });
+});
