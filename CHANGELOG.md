@@ -30,12 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the cursor to the old row — so native never armed and the session depended on this
   tool's typed continue alone. The native row is now preferred wherever it sits; "Stop and
   wait" stays the fallback for menus without it, and a layout that can't be read is still
-  refused (no Enter). A menu offering only the native row is now recognized as the menu
-  (it used to be missed, so the usage wait typed into the open menu). The row must begin with the phrase, so another option that merely
-  mentions it isn't taken. Native's after-the-fact renders — "Automatic continue
-  cancelled · …", "Usage limit reset · continuing automatically", and "Automatic continue
-  stopped after repeated usage-limit hits" — are pinned by tests as triggering nothing;
-  a fresh limit banner below the give-up line still arms the usage wait as usual.
+  refused (no Enter). The row must begin with the phrase, so another option that merely
+  mentions it isn't taken.
+  - A menu offering only the native row is now recognized as the menu. It used to be
+    missed, so the usage wait typed into the open menu.
+  - Native's after-the-fact renders — "Automatic continue cancelled · …", "Usage limit
+    reset · continuing automatically", and "Automatic continue stopped after repeated
+    usage-limit hits" — are pinned by tests as triggering nothing; a fresh limit banner
+    below the give-up line still arms the usage wait as usual.
 - **A native auto-continue that went stale over a host sleep is now continued.** Claude
   Code v2.1.234+ waits out a usage limit by itself, but when the machine slept more than
   ~30 min past the reset it declines to continue: its status lines become "Your usage limit
@@ -45,7 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down, leaving the session parked forever. The recheck now recognizes the stale pair and
   hands it to a new bounded nudge (`nativeStaleReset`, on by default): a bare Enter at an
   idle prompt, at most 2 presses 3 s apart, giving up loudly if the prompt persists. The
-  pair is also caught from plain monitoring. The gate is position: the pair must be the
+  pair is also caught from plain monitoring, and mid-wait on every tick — a wait standing
+  far past native's (a long fallback, or a re-arm from a post-wake capture that rolled the
+  reset to tomorrow) no longer holds the session until it expires. The gate is position: the pair must be the
   bottom-most content rows of the pane, below the input box when one is on screen. Model
   output always renders above the input box, so a reply or code block quoting the pair —
   even on indented lines of its own, even above a half-typed draft — doesn't match. Each

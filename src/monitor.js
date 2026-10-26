@@ -201,6 +201,12 @@ function correctUsageWait(state, stripped, config) {
   return message;
 }
 
+// End the usage-wait episode (stand-down, or handing the pane to the stale-reset nudge).
+function leaveUsageWait(state) {
+  state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
+  state._waitIsFallback = false; state._nativeFiringSince = 0;
+}
+
 function enterOverload(state, overload, rand) {
   const capMs = overload.maxTotalWaitMinutes * 60_000;
   resetOverload(state);
@@ -292,6 +298,21 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     const correctedMessage = correctUsageWait(state, stripped, config);
     const resumed = resumedAfterLimit(stripped, RATE_LIMIT_TAIL_LINES);
     if (Date.now() < state.waitUntil && !resumed) {
+      // Stale-aware on EVERY tick, not only at expiry. A wait can stand far longer than
+      // native's: a host that slept >1h past the reset can re-arm us ~24h out (the first
+      // post-wake capture races Claude Code's redraw and still shows the old armed line,
+      // whose reset then rolls to tomorrow), and a fallback wait runs for hours. Native
+      // meanwhile shows "Press enter to continue" and waits for a human — so honouring
+      // the countdown parked the session until it expired. Only the stale screen with NO
+      // live banner leaves early; a banner-gone screen without it keeps waiting, exactly
+      // as before (no early 'user-continued').
+      if (!correctedMessage && !isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES)) {
+        const stale = staleResetFor(stripped, tmuxAdapter, config);
+        if (stale) {
+          leaveUsageWait(state);
+          return enterStaleReset(state, stale, config.nativeStaleReset);
+        }
+      }
       if (!correctedMessage) return 'waiting';
       state.lastRateLimitMessage = correctedMessage;
       return 'wait-corrected';
@@ -305,8 +326,7 @@ export async function processOneTick(state, tmuxAdapter, pane, config, isAlive, 
     // session (and a banner re-printed by another process keeps it "rate-limited" the
     // whole time). Resumed ⇒ the session continued; never inject into it.
     if (!isRateLimited(stripped, config.customPatterns, RATE_LIMIT_TAIL_LINES) || resumed) {
-      state.status = 'monitoring'; state.attempts = 0; state._gaveUp = false;
-      state._waitIsFallback = false; state._nativeFiringSince = 0;
+      leaveUsageWait(state);
       // Banner gone is NOT always "the user continued". With native auto-continue (Claude
       // Code v2.1.234+) the common way to land here is a host that slept through the reset
       // along with us: native then declines to continue, replaces the banner with "Your

@@ -293,3 +293,79 @@ describe('processOneTick — the native-firing skip is bounded', () => {
     assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'native-firing');
   });
 });
+
+// The waiting branch must notice native's stale "Press enter to continue" on EVERY tick,
+// not only at expiry. A host that slept >1h past the reset can re-arm us ~24h out (the
+// first post-wake capture races Claude Code's redraw and still shows the old armed line,
+// whose reset rolls to tomorrow); if the stale route only ran at expiry, the session
+// stayed parked for a day. Same gap for a long fallback wait.
+describe('processOneTick — mid-wait stale-reset awareness', () => {
+  const STALE = [
+    '⏺ Migrated the first half of the handlers; the rest are queued.',
+    '',
+    '────────────────────────────────────────',
+    '❯ ',
+    '────────────────────────────────────────',
+    '  Your usage limit has reset',
+    '  Press enter to continue',
+  ].join('\n');
+  const IDLE = [
+    '⏺ Migrated the first half of the handlers; the rest are queued.',
+    '',
+    '────────────────────────────────────────',
+    '❯ ',
+    '────────────────────────────────────────',
+  ].join('\n');
+  const farWait = () => {
+    const s = createMonitorState();
+    s.status = 'waiting'; s.waitUntil = Date.now() + 23 * 3600_000; s.attempts = 0;
+    return s;
+  };
+
+  it('a stale screen mid-wait routes to the stale nudge on that tick, then Enter is pressed', async (t) => {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const tmux = mockTmux(STALE);
+    const s = farWait();
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'stale-reset-detected');
+    assert.equal(s.status, 'stale-reset');
+    t.mock.timers.tick(DEFAULT_CONFIG.nativeStaleReset.retryDelaySeconds * 1000 + 1);
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'stale-reset-nudged');
+    assert.deepEqual(tmux._keys, ['Enter']);
+    assert.equal(tmux._sent.length, 0);
+  });
+
+  it('banner gone WITHOUT the stale screen mid-wait keeps waiting (no early user-continued)', async () => {
+    const tmux = mockTmux(IDLE);
+    const s = farWait();
+    const until = s.waitUntil;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.status, 'waiting');
+    assert.equal(s.waitUntil, until);
+    assert.equal(tmux._sent.length + tmux._keys.length, 0);
+  });
+
+  it('banner still present mid-wait keeps waiting unchanged', async () => {
+    const tmux = mockTmux(ARMED);
+    const s = farWait();
+    const until = s.waitUntil;
+    assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'waiting');
+    assert.equal(s.waitUntil, until);
+    assert.equal(tmux._sent.length + tmux._keys.length, 0);
+  });
+
+  it('nativeStaleReset disabled: a stale screen mid-wait keeps waiting', async () => {
+    const tmux = mockTmux(STALE);
+    const s = farWait();
+    const config = { ...DEFAULT_CONFIG, nativeStaleReset: { ...DEFAULT_CONFIG.nativeStaleReset, enabled: false } };
+    assert.equal(await processOneTick(s, tmux, '%0', config, () => true), 'waiting');
+  });
+});
+
+// A relative hint reads as "future" on every re-read, so it must never drive the re-arm.
+it('armed line + relative "try again in N min" banner at expiry → sends, no re-arm', async () => {
+  const tmux = mockTmux('  Usage limit reached · try again in 30 minutes\n  Continuing automatically at 3:45pm · esc to cancel');
+  const s = createMonitorState();
+  s.status = 'waiting'; s.waitUntil = Date.now() - 1; s.attempts = 0;
+  assert.equal(await processOneTick(s, tmux, '%0', DEFAULT_CONFIG, () => true), 'retried');
+  assert.equal(tmux._sent.length, 1);
+});
