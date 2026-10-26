@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing; the next recheck sees the resumed session and stands down as before. Both
   matches require `esc to cancel` after the phrase on the same line, so prose describing
   native auto-continue doesn't trip them.
+- **The `/rate-limit-options` menu now selects native auto-continue's own row.** Claude
+  Code v2.1.234+ adds "Wait here, then continue automatically" (it arms the native wait)
+  next to the older "Stop and wait for limit to reset", and the menu handler still drove
+  the cursor to the old row — so native never armed and the session depended on this
+  tool's typed continue alone. The native row is now preferred wherever it sits; "Stop and
+  wait" stays the fallback for menus without it, and a layout that can't be read is still
+  refused (no Enter). The row must begin with the phrase, so another option that merely
+  mentions it isn't taken. Native's after-the-fact renders — "Automatic continue
+  cancelled · …", "Usage limit reset · continuing automatically", and "Automatic continue
+  stopped after repeated usage-limit hits" — are pinned by tests as triggering nothing;
+  a fresh limit banner below the give-up line still arms the usage wait as usual.
 - **A native auto-continue that went stale over a host sleep is now continued.** Claude
   Code v2.1.234+ waits out a usage limit by itself, but when the machine slept more than
   ~30 min past the reset it declines to continue: its status lines become "Your usage limit

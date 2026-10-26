@@ -545,9 +545,18 @@ export function resumedAfterLimit(text, tailLines = 0) {
 // on some versions. The option ORDER varies between versions, so we never assume
 // a position: we locate the cursor (❯) and the "Stop and wait" option and compute
 // the cursor moves needed to land on it.
+//
+// Claude Code v2.1.234+ adds a row that arms its NATIVE wait ("Wait here, then continue
+// automatically at 3:45pm" / "… shortly" / "… when the limit resets"), alongside the older
+// "Stop and wait" row. The native row is preferred: native continues by itself at the reset
+// and the monitor defers to an armed native wait, whereas "Stop and wait" leaves only this
+// tool's typed continue. Anchored to the START of the option text (after the cursor and
+// number), so another option that merely mentions the phrase is never mistaken for it.
+// "Stop and wait" stays the fallback for menus without the native row.
 
 const MENU_CURSOR = '❯';
 const WAIT_OPTION_REGEX = /stop and wait for limit to reset/i;
+const NATIVE_WAIT_OPTION_REGEX = /^\s*❯?\s*\d+\.\s+wait here, then continue automatically\b/i;
 const MENU_OPTION_REGEX = /^\s*❯?\s*\d+\.\s/;
 
 // tailLines > 0 restricts to the last N lines: a LIVE menu sits at the prompt, so the
@@ -566,9 +575,10 @@ export function isRateLimitOptionsPrompt(text, tailLines = 0) {
     && (/enter to confirm/i.test(t) || /esc to cancel/i.test(t) || t.includes(MENU_CURSOR));
 }
 
-// Cursor moves to reach the "Stop and wait for limit to reset" option, counted in
+// Cursor moves to reach the wait option — the native "Wait here, then continue
+// automatically" row when present, else "Stop and wait for limit to reset" — counted in
 // option steps: positive => press Down N times, negative => Up, 0 => already there.
-// Returns null when the layout can't be read (no cursor or option not found); the
+// Returns null when the layout can't be read (no cursor or neither option found); the
 // caller MUST NOT press Enter in that case, to avoid confirming the wrong option.
 // tailLines mirrors isRateLimitOptionsPrompt so option counting ignores quoted menus.
 export function menuStepsToWaitOption(text, tailLines = 0) {
@@ -577,7 +587,8 @@ export function menuStepsToWaitOption(text, tailLines = 0) {
   const optionLines = lines.filter(l => MENU_OPTION_REGEX.test(l));
   if (optionLines.length === 0) return null;
   const cursorPos = optionLines.findIndex(l => l.includes(MENU_CURSOR));
-  const waitPos = optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
+  const nativePos = optionLines.findIndex(l => NATIVE_WAIT_OPTION_REGEX.test(l));
+  const waitPos = nativePos !== -1 ? nativePos : optionLines.findIndex(l => WAIT_OPTION_REGEX.test(l));
   if (cursorPos === -1 || waitPos === -1) return null;
   return waitPos - cursorPos;
 }
